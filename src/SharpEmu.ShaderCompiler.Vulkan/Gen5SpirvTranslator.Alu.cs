@@ -840,52 +840,17 @@ public static partial class Gen5SpirvTranslator
                         right = BitwiseAnd(right, UInt(0x00FF_FFFF));
                     }
 
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        left);
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        right);
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _ulongType,
-                        wideLeft,
-                        wideRight);
-                    result = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _uintType,
-                        ShiftRightLogical64(
-                            product,
-                            _module.Constant64(_ulongType, 32)));
+                    result = MultiplyExtended(left, right, signed: false).High;
                     break;
                 }
                 case "VMulHiI32":
                 {
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.SConvert,
-                        _longType,
-                        Bitcast(_intType, GetRawSource(instruction, 0)));
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.SConvert,
-                        _longType,
-                        Bitcast(_intType, GetRawSource(instruction, 1)));
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _longType,
-                        wideLeft,
-                        wideRight);
                     result = Bitcast(
                         _uintType,
-                        _module.AddInstruction(
-                            SpirvOp.SConvert,
-                            _intType,
-                            _module.AddInstruction(
-                                SpirvOp.ShiftRightArithmetic,
-                                _longType,
-                                product,
-                                _module.Constant64(_longType, 32))));
+                        MultiplyExtended(
+                            Bitcast(_intType, GetRawSource(instruction, 0)),
+                            Bitcast(_intType, GetRawSource(instruction, 1)),
+                            signed: true).High);
                     break;
                 }
                 case "VBcntU32B32":
@@ -1319,19 +1284,8 @@ public static partial class Gen5SpirvTranslator
                     // sources are 32-bit factors; the third is a 64-bit addend
                     // held in a VGPR or SGPR pair. Its SDST receives the carry
                     // mask for the unsigned 64-bit addition.
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        GetRawSource(instruction, 0));
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        GetRawSource(instruction, 1));
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _ulongType,
-                        wideLeft,
-                        wideRight);
+                    var (productLow, productHigh) = MultiplyExtended(GetRawSource(instruction, 0), GetRawSource(instruction, 1), signed: false);
+                    var product = Pair64(productLow, productHigh);
                     var addend = GetRawSource64(instruction, 2);
                     var wideResult = _module.AddInstruction(
                         SpirvOp.IAdd,
@@ -3034,47 +2988,13 @@ public static partial class Gen5SpirvTranslator
                                 right);
                             break;
                         case "SMulHiI32":
-                        {
-                            var wideLeft = _module.AddInstruction(
-                                SpirvOp.SConvert,
-                                _longType,
-                                Bitcast(_intType, left));
-                            var wideRight = _module.AddInstruction(
-                                SpirvOp.SConvert,
-                                _longType,
-                                Bitcast(_intType, right));
-                            var product = _module.AddInstruction(
-                                SpirvOp.IMul,
-                                _longType,
-                                wideLeft,
-                                wideRight);
                             result = Bitcast(
                                 _uintType,
-                                _module.AddInstruction(
-                                    SpirvOp.SConvert,
-                                    _intType,
-                                    _module.AddInstruction(
-                                        SpirvOp.ShiftRightArithmetic,
-                                        _longType,
-                                        product,
-                                        _module.Constant64(_longType, 32))));
+                                MultiplyExtended(Bitcast(_intType, left), Bitcast(_intType, right), signed: true).High);
                             break;
-                        }
                         case "SMulHiU32":
-                        {
-                            var product = _module.AddInstruction(
-                                SpirvOp.IMul,
-                                _ulongType,
-                                _module.AddInstruction(SpirvOp.UConvert, _ulongType, left),
-                                _module.AddInstruction(SpirvOp.UConvert, _ulongType, right));
-                            result = _module.AddInstruction(
-                                SpirvOp.UConvert,
-                                _uintType,
-                                ShiftRightLogical64(
-                                    product,
-                                    _module.Constant64(_ulongType, 32)));
+                            result = MultiplyExtended(left, right, signed: false).High;
                             break;
-                        }
                         case "SAndB32":
                             result = BitwiseAnd(left, right);
                             Store(_scc, IsNotZero(result));

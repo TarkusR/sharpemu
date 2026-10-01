@@ -7346,6 +7346,31 @@ public static partial class Gen5SpirvTranslator
                     Bitcast(_intType, left),
                     BitwiseAnd(right, UInt(31))));
 
+        private uint _uintPairType;
+        private uint _intPairType;
+
+        private (uint Low, uint High) MultiplyExtended(uint left, uint right, bool signed)
+        {
+            var elementType = signed ? _intType : _uintType;
+            if (signed && _intPairType == 0)
+            {
+                _intPairType = _module.TypeStruct(_intType, _intType);
+            }
+            else if (!signed && _uintPairType == 0)
+            {
+                _uintPairType = _module.TypeStruct(_uintType, _uintType);
+            }
+
+            var product = _module.AddInstruction(
+                signed ? SpirvOp.SMulExtended : SpirvOp.UMulExtended,
+                signed ? _intPairType : _uintPairType,
+                left,
+                right);
+            return (
+                _module.AddInstruction(SpirvOp.CompositeExtract, elementType, product, 0),
+                _module.AddInstruction(SpirvOp.CompositeExtract, elementType, product, 1));
+        }
+
         private uint ShiftLeftLogical64(uint left, uint right) =>
             _module.AddInstruction(
                 SpirvOp.ShiftLeftLogical,
