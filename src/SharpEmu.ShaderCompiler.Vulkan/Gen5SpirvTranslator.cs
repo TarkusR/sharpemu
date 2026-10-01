@@ -1361,8 +1361,7 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             var block = blocks[blockIndex];
             // One guest wave can span two host subgroups. Keep its shared-memory phases ordered.
-            // Restrict added barriers to a single block, where all invocations follow the same path.
-            var synchronizeSharedMemory = _emulateWave64 && blocks.Count == 1;
+            var synchronizeSharedMemory = _emulateWave64;
             var sharedMemoryPhase = SharedMemoryPhase.None;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
