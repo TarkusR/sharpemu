@@ -142,7 +142,7 @@ public static partial class Gen5SpirvTranslator
         private uint _uvec4Type;
         private uint _privateUintPointer;
         private uint _privateVec2Pointer;
-        private uint _privateBoolPointer;
+        private readonly HashSet<uint> _flagVariables = [];
         private uint _runtimeBufferBiases;
         private uint _scalarRegisters;
         private uint _vectorRegisters;
@@ -564,8 +564,6 @@ public static partial class Gen5SpirvTranslator
                 _module.TypePointer(SpirvStorageClass.Private, _uintType);
             _privateVec2Pointer =
                 _module.TypePointer(SpirvStorageClass.Private, _vec2Type);
-            _privateBoolPointer =
-                _module.TypePointer(SpirvStorageClass.Private, _boolType);
 
             var scalarArrayType = _module.TypeArray(_uintType, ScalarRegisterCount);
             var vectorArrayType = _module.TypeArray(_uintType, VectorRegisterCount);
@@ -7006,6 +7004,13 @@ public static partial class Gen5SpirvTranslator
                 return variable;
             }
 
+            uint Flag(bool initialValue)
+            {
+                var variable = Variable(_uintType, UInt(initialValue ? 1u : 0u));
+                _flagVariables.Add(variable);
+                return variable;
+            }
+
             _scalarRegisters = Variable(_scalarArrayType, _module.ConstantNull(_scalarArrayType));
             _vectorRegisters = Variable(_vectorArrayType, _module.ConstantNull(_vectorArrayType));
             if (_functionScopeState)
@@ -7016,18 +7021,18 @@ public static partial class Gen5SpirvTranslator
                 _module.AddName(_packedHalfRegisters, "vgprPackedHalf");
             }
 
-            _scc = Variable(_boolType, _module.ConstantBool(false));
-            _vcc = Variable(_boolType, _module.ConstantBool(false));
-            _exec = Variable(_boolType, _module.ConstantBool(true));
-            _reachedPixelExport = Variable(_boolType, _module.ConstantBool(false));
+            _scc = Flag(false);
+            _vcc = Flag(false);
+            _exec = Flag(true);
+            _reachedPixelExport = Flag(false);
             if (_usesPixelValidMask)
             {
-                _pixelValidMaskActive = Variable(_boolType, _module.ConstantBool(true));
+                _pixelValidMaskActive = Flag(true);
                 _module.AddName(_pixelValidMaskActive, "pixelValidMaskActive");
             }
 
             _programCounter = Variable(_uintType, _module.Constant(_uintType, 0));
-            _programActive = Variable(_boolType, _module.ConstantBool(true));
+            _programActive = Flag(true);
             if (_maxDispatcherSteps > 0)
             {
                 _iterationGuard = Variable(_uintType, _module.Constant(_uintType, 0));
@@ -7307,11 +7312,32 @@ public static partial class Gen5SpirvTranslator
                     "SPIR-V generator attempted OpLoad from id 0.");
             }
 
+            if (_flagVariables.Contains(pointer))
+            {
+                return _module.AddInstruction(
+                    SpirvOp.INotEqual,
+                    _boolType,
+                    _module.AddInstruction(SpirvOp.Load, _uintType, pointer),
+                    UInt(0));
+            }
+
             return _module.AddInstruction(SpirvOp.Load, type, pointer);
         }
 
-        private void Store(uint pointer, uint value) =>
+        private void Store(uint pointer, uint value)
+        {
+            if (_flagVariables.Contains(pointer))
+            {
+                value = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    value,
+                    UInt(1),
+                    UInt(0));
+            }
+
             _module.AddStatement(SpirvOp.Store, pointer, value);
+        }
 
         private uint UInt(uint value) => _module.Constant(_uintType, value);
 
