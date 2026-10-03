@@ -7441,11 +7441,12 @@ public static partial class Gen5SpirvTranslator
         private List<(uint Register, uint Lane)> FindLaneSpillSlots()
         {
             var slots = new List<(uint Register, uint Lane)>();
-            if (UsesSubgroupOperations())
+            if (_emulateWave64)
             {
                 return slots;
             }
 
+            var ownsLaneZero = !UsesSubgroupOperations();
             var readRegisters = _request.Program.Instructions
                 .Where(static instruction => instruction.Opcode == "VReadlaneB32" &&
                     instruction.Sources.Count > 0 &&
@@ -7458,7 +7459,7 @@ public static partial class Gen5SpirvTranslator
                     TryGetVectorDestination(instruction, out var register) &&
                     readRegisters.Contains(register) &&
                     TryGetConstantLane(instruction, out var lane) &&
-                    lane != 0 &&
+                    (lane != 0 || !ownsLaneZero) &&
                     !slots.Contains((register, lane)))
                 {
                     slots.Add((register, lane));
@@ -7489,8 +7490,26 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            lane = value & (_waveLaneCount - 1);
+            lane = value & LaneSelectMask;
             return true;
+        }
+
+        private uint LaneSelectMask => _stage == Gen5SpirvStage.Compute ? _waveLaneCount - 1 : 63u;
+
+        private uint ReadLaneSpillSlot(Gen5ShaderInstruction instruction, uint selectedLane, uint value)
+        {
+            if (instruction.Sources[0].Kind != Gen5OperandKind.VectorRegister)
+            {
+                return value;
+            }
+
+            var register = instruction.Sources[0].Value;
+            if (TryGetConstantLane(instruction, out var lane))
+            {
+                return _laneSpillSlots.TryGetValue((register, lane), out var slot) ? Load(_uintType, slot) : value;
+            }
+
+            return SelectLaneSpillSlot(register, selectedLane, value);
         }
 
         // Folds the spill slots of register into value: selected lane == slot lane reads the slot.

@@ -117,8 +117,15 @@ public static partial class Gen5SpirvTranslator
                 {
                     var oldValue = LoadV(destination);
                     var sourceValue = GetRawSource(instruction, 0);
-                    var selectedLane = BitwiseAnd(GetRawSource(instruction, 1), UInt(_waveLaneCount - 1));
-                    if (_laneSpillSlots.Count != 0)
+                    var selectedLane = BitwiseAnd(GetRawSource(instruction, 1), UInt(LaneSelectMask));
+                    if (TryGetConstantLane(instruction, out var constantLane))
+                    {
+                        if (_laneSpillSlots.TryGetValue((destination, constantLane), out var slot))
+                        {
+                            Store(slot, sourceValue);
+                        }
+                    }
+                    else if (_laneSpillSlots.Count != 0)
                     {
                         foreach (var ((slotRegister, slotLane), variable) in _laneSpillSlots)
                         {
@@ -4979,7 +4986,7 @@ public static partial class Gen5SpirvTranslator
 
             var destination = instruction.Destinations[0].Value;
             var sourceValue = GetRawSource(instruction, 0);
-            var selectedLane = BitwiseAnd(GetRawSource(instruction, 1), UInt(_waveLaneCount - 1));
+            var selectedLane = BitwiseAnd(GetRawSource(instruction, 1), UInt(LaneSelectMask));
 
             if (_emulateWave64)
             {
@@ -4987,7 +4994,7 @@ public static partial class Gen5SpirvTranslator
                 // Read it even when the guest execution mask disables that lane.
                 StoreS(destination, BroadcastWave64Lane(sourceValue, selectedLane));
             }
-            else if (_subgroupInvocationIdInput != 0)
+            else if (_subgroupInvocationIdInput != 0 && _stage == Gen5SpirvStage.Compute)
             {
                 var broadcast = _module.AddInstruction(
                     SpirvOp.GroupNonUniformBroadcast,
@@ -4995,18 +5002,13 @@ public static partial class Gen5SpirvTranslator
                     UInt(3),
                     sourceValue,
                     selectedLane);
-                StoreS(destination, broadcast);
+                StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, broadcast));
             }
             else
             {
                 // Fallback: no subgroup ops, read current lane's value, or the
                 // spill slot that V_WRITELANE filled for the selected lane.
-                if (instruction.Sources[0].Kind == Gen5OperandKind.VectorRegister)
-                {
-                    sourceValue = SelectLaneSpillSlot(instruction.Sources[0].Value, selectedLane, sourceValue);
-                }
-
-                StoreS(destination, sourceValue);
+                StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, sourceValue));
             }
 
             return true;

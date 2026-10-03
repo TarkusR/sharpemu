@@ -213,6 +213,47 @@ public sealed class Gen5InterpolationParameterTests
         ValidateWhenAvailable(shader.Spirv);
     }
 
+    [Theory]
+    [InlineData(ShaderStage.Pixel, 32u)]
+    [InlineData(ShaderStage.Pixel, 64u)]
+    [InlineData(ShaderStage.Vertex, 32u)]
+    [InlineData(ShaderStage.Vertex, 64u)]
+    public void LaneSpills_AreReadBackWithoutTheHostSubgroup(ShaderStage stage, uint waveSize)
+    {
+        var program = ResourceTestProgram.Program(
+            ResourceTestProgram.WriteLane(0, vectorRegister: 18, scalarRegister: 84, lane: 5),
+            ResourceTestProgram.WriteLane(8, vectorRegister: 18, scalarRegister: 85, lane: 37),
+            ResourceTestProgram.ReadLane(16, scalarRegister: 86, vectorRegister: 18, lane: 5),
+            ResourceTestProgram.ReadLane(24, scalarRegister: 87, vectorRegister: 18, lane: 37),
+            ResourceTestProgram.EndProgram(32));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, stage, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { WaveSize = waveSize, EnableGraphicsSubgroupOperations = true };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.DoesNotContain(Instructions(shader.Spirv), instruction => instruction.Opcode == SpirvOp.GroupNonUniformBroadcast);
+        var text = System.Text.Encoding.ASCII.GetString(shader.Spirv);
+        Assert.Contains("v18_lane5", text, StringComparison.Ordinal);
+        Assert.Contains("v18_lane37", text, StringComparison.Ordinal);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(ShaderStage.Pixel, 0)]
+    [InlineData(ShaderStage.Vertex, 0)]
+    [InlineData(ShaderStage.Compute, 2)]
+    public void ReadlaneOfAnUnspilledLane_UsesTheHostSubgroupOnlyInCompute(ShaderStage stage, int broadcasts)
+    {
+        var program = ResourceTestProgram.Program(
+            ResourceTestProgram.WriteLane(0, vectorRegister: 18, scalarRegister: 84, lane: 5),
+            ResourceTestProgram.ReadLane(8, scalarRegister: 86, vectorRegister: 18, lane: 6),
+            ResourceTestProgram.ReadLane(16, scalarRegister: 87, vectorRegister: 19, lane: 5),
+            ResourceTestProgram.EndProgram(24));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, stage, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { WaveSize = 32, EnableGraphicsSubgroupOperations = true };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Equal(broadcasts, Instructions(shader.Spirv).Count(instruction => instruction.Opcode == SpirvOp.GroupNonUniformBroadcast));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
     private static ShaderCompileRequest Request(
         uint selector, bool custom, uint inputs = 2, string opcode = "VInterpMovF32",
         uint inputCntl = 0x401, bool supportsPerVertex = true)
