@@ -1398,6 +1398,11 @@ public static partial class Gen5SpirvTranslator
                     _floatType,
                     fragCoord,
                     component);
+                if (component == 3)
+                {
+                    value = _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1f), value);
+                }
+
                 StoreV(vgpr, Bitcast(_uintType, value), guardWithExec: false);
             }
 

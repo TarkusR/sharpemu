@@ -193,6 +193,26 @@ public sealed class Gen5InterpolationParameterTests
         ValidateWhenAvailable(shader.Spirv);
     }
 
+    [Theory]
+    [InlineData(0x800u, 1)]
+    [InlineData(0x400u, 0)]
+    public void PositionW_IsTheReciprocalOfTheFragmentCoordinate(uint inputs, int reciprocals)
+    {
+        var program = ResourceTestProgram.Program(ResourceTestProgram.EndProgram(0));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { PixelInputAddress = inputs, PixelInputEnable = inputs };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        var position = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn && instruction.Operands[2] == (uint)SpirvBuiltIn.FragCoord).Operands[0];
+        var loaded = instructions.Where(instruction => instruction.Opcode == SpirvOp.Load && instruction.Operands[2] == position)
+            .Select(instruction => instruction.Operands[1]).ToHashSet();
+        var w = instructions.Where(instruction => instruction.Opcode == SpirvOp.CompositeExtract &&
+            loaded.Contains(instruction.Operands[2]) && instruction.Operands[3] == 3).Select(instruction => instruction.Operands[1]).ToHashSet();
+        Assert.Equal(reciprocals, instructions.Count(instruction => instruction.Opcode == SpirvOp.FDiv && w.Contains(instruction.Operands[3])));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
     private static ShaderCompileRequest Request(
         uint selector, bool custom, uint inputs = 2, string opcode = "VInterpMovF32",
         uint inputCntl = 0x401, bool supportsPerVertex = true)
