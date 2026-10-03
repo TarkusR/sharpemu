@@ -164,8 +164,8 @@ public static partial class Gen5SpirvTranslator
                         SpirvOp.Select,
                         _uintType,
                         condition,
-                        GetRawSource(instruction, 1),
-                        GetRawSource(instruction, 0));
+                        GetSignModifiedSource(instruction, 1),
+                        GetSignModifiedSource(instruction, 0));
                     break;
                 }
                 case "VCvtU32F32":
@@ -3875,6 +3875,24 @@ public static partial class Gen5SpirvTranslator
             }
 
             return value;
+        }
+
+        private uint GetSignModifiedSource(Gen5ShaderInstruction instruction, int sourceIndex)
+        {
+            var value = GetRawSource(instruction, sourceIndex);
+            if (instruction.Control is not Gen5Vop3Control control)
+            {
+                return value;
+            }
+
+            if ((control.AbsoluteMask & (1u << sourceIndex)) != 0)
+            {
+                value = BitwiseAnd(value, UInt(0x7FFFFFFFu));
+            }
+
+            return (control.NegateMask & (1u << sourceIndex)) != 0
+                ? BitwiseXor(value, UInt(0x80000000u))
+                : value;
         }
 
         private uint ApplyDpp8Source(Gen5Dpp8Control control, uint value)

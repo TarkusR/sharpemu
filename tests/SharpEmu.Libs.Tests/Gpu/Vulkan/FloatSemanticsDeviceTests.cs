@@ -74,5 +74,53 @@ public sealed class FloatSemanticsDeviceTests(HeadlessVulkanFixture fixture) : I
         }
     }
 
+    [Fact]
+    public void ConditionalMaskAppliesSourceSignModifiers()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var negateFirst = new Gen5Vop3Control(0, 1, 0, false, 0, null);
+        var absoluteBothNegateSecond = new Gen5Vop3Control(3, 2, 0, false, 0, null);
+        var program = Program(
+            Vop1(0, "VCvtF32U32", 1, Gen5Operand.Vector(0)),
+            MoveScalar(4, 8, Bits(1f)),
+            MoveScalar(12, 9, Bits(-8f)),
+            MoveScalar(20, 20, uint.MaxValue),
+            MoveScalar(28, 21, uint.MaxValue),
+            MoveScalar(36, 22, 0),
+            MoveScalar(44, 23, 0),
+            Vop3(52, "VMadF32", 2, Gen5Operand.Vector(1), Gen5Operand.Scalar(8), Gen5Operand.Scalar(9)),
+            Vop3(60, "VCndmaskB32", 12, Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Scalar(22)) with { Control = negateFirst },
+            Vop3(68, "VCndmaskB32", 13, Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Scalar(20)) with { Control = negateFirst },
+            Vop3(76, "VCndmaskB32", 14, Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Scalar(20)) with { Control = absoluteBothNegateSecond },
+            Vop3(84, "VCndmaskB32", 15, Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Scalar(22)) with { Control = absoluteBothNegateSecond },
+            Vop2(92, "VLshlrevB32", 7, Operand(5), Gen5Operand.Vector(0)),
+            BufferAccess(96, "BufferStoreDwordx4", 4, vectorData: 12, dwords: 4, offsetEnabled: true, vectorAddress: 7),
+            EndProgram(104));
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = ThreadCount, ThreadCountX = ThreadCount, WaveSize = 32,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var result = runner.CreateBuffer(ThreadCount * RowBytes);
+        var registers = new uint[256];
+        registers[6] = ThreadCount * RowBytes;
+        harness.Run(() => runner.Dispatch(registers,
+            new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result] }, 1));
+        var actual = runner.ReadBack(result, 0, ThreadCount * RowBytes);
+        for (var lane = 0u; lane < ThreadCount; lane++)
+        {
+            var row = actual.AsSpan((int)(lane * RowBytes));
+            var value = Bits(lane - 8f);
+            Assert.Equal(value ^ 0x8000_0000, BinaryPrimitives.ReadUInt32LittleEndian(row));
+            Assert.Equal(value, BinaryPrimitives.ReadUInt32LittleEndian(row[4..]));
+            Assert.Equal(value | 0x8000_0000, BinaryPrimitives.ReadUInt32LittleEndian(row[8..]));
+            Assert.Equal(value & 0x7FFF_FFFF, BinaryPrimitives.ReadUInt32LittleEndian(row[12..]));
+        }
+    }
+
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 }
