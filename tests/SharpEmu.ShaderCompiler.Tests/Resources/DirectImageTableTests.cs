@@ -366,6 +366,47 @@ public sealed class DirectImageTableTests
     }
 
     [Theory]
+    [InlineData(600u, 8u)]
+    [InlineData(444u, 3u)]
+    [InlineData(312u, 32u)]
+    [InlineData(1400u, 32u)]
+    public void DenseTableEndsBeforeASamplerLoadedFromTheSameBase(uint samplerOffset, uint expectedBound)
+    {
+        var program = CreateGuardedProgram();
+        program = program with
+        {
+            Instructions = program.Instructions.Where(instruction => instruction.Pc != 52).Select(instruction => instruction.Pc switch
+            {
+                48 => ScalarLoad(48, 0, 12, 4, immediateOffset: (int)samplerOffset),
+                60 => Image(60, "ImageSample", 4, samplerRegister: 12, dmask: 1, vectorAddress: 1),
+                _ => instruction,
+            }).ToArray(),
+        };
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
+        Assert.True(selector.Dense);
+        Assert.Equal(344u, selector.TableOffset);
+        Assert.Equal(expectedBound, selector.KeyBound);
+
+        var highest = 0ul;
+        bool Read(ulong address, out uint word)
+        {
+            if (address >= 0x1000 + samplerOffset && address < 0x1000 + samplerOffset + 16)
+            {
+                word = 0;
+                return true;
+            }
+
+            if (address >= 0x1000 + 344) highest = Math.Max(highest, address);
+            return ReadDescriptor(address, out word);
+        }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], Read, Read), ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.True(highest < 0x1000 + 344 + expectedBound * 32, $"read 0x{highest:X} beyond the table");
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void LoopMustRecheckTheBitScanInput(bool bypassGuard)
