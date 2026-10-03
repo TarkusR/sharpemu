@@ -197,7 +197,7 @@ public static partial class Gen5SpirvTranslator
                     var source = GetFloatSource(instruction, 0);
                     if (instruction.Opcode == "VCvtRpiI32F32")
                     {
-                        source = Ext(9, _floatType, source);
+                        source = Ext(8, _floatType, _module.AddInstruction(SpirvOp.FAdd, _floatType, source, Float(0.5f)));
                     }
                     else if (instruction.Opcode == "VCvtFlrI32F32")
                     {
@@ -428,7 +428,7 @@ public static partial class Gen5SpirvTranslator
                     var converted = _module.AddInstruction(
                         SpirvOp.ConvertFToU,
                         _uintType,
-                        GetFloatSource(instruction, 0));
+                        Ext(81, _floatType, GetFloatSource(instruction, 0), Float(0), Float(255)));
                     var offset = ShiftLeftLogical(
                         BitwiseAnd(GetRawSource(instruction, 1), UInt(3)),
                         UInt(3));
@@ -685,9 +685,9 @@ public static partial class Gen5SpirvTranslator
                     var c = GetFloat16Source(instruction, 2);
                     var value = instruction.Opcode switch
                     {
-                        "VMin3F16" => Ext(37, _floatType, Ext(37, _floatType, a, b), c),
-                        "VMax3F16" => Ext(40, _floatType, Ext(40, _floatType, a, b), c),
-                        _ => Ext(40, _floatType, Ext(37, _floatType, a, b), Ext(37, _floatType, Ext(40, _floatType, a, b), c)),
+                        "VMin3F16" => NanIgnoringMinMax(37, NanIgnoringMinMax(37, a, b), c),
+                        "VMax3F16" => NanIgnoringMinMax(40, NanIgnoringMinMax(40, a, b), c),
+                        _ => EmitFloatMedian(a, b, c),
                     };
                     result = EmitFloat16Result(instruction, destination, value);
                     break;
@@ -1226,18 +1226,9 @@ public static partial class Gen5SpirvTranslator
                 }
                 case "VMed3F32":
                 {
-                    var left = GetFloatSource(instruction, 0);
-                    var middle = GetFloatSource(instruction, 1);
-                    var right = GetFloatSource(instruction, 2);
-                    var low = Ext(37, _floatType, left, middle);
-                    var high = Ext(40, _floatType, left, middle);
                     result = EmitFloatResult(
                         instruction,
-                        Ext(
-                            40,
-                            _floatType,
-                            low,
-                            Ext(37, _floatType, high, right)));
+                        EmitFloatMedian(GetFloatSource(instruction, 0), GetFloatSource(instruction, 1), GetFloatSource(instruction, 2)));
                     break;
                 }
                 case "VCubeidF32":
@@ -4458,7 +4449,7 @@ public static partial class Gen5SpirvTranslator
             };
             if (clamp)
             {
-                doubleValue = Ext(43, type, doubleValue, Double(0.0), Double(1.0));
+                doubleValue = Ext(81, type, doubleValue, Double(0.0), Double(1.0));
             }
 
             var bits = Bitcast(_ulongType, doubleValue);
@@ -4492,9 +4483,8 @@ public static partial class Gen5SpirvTranslator
             EmitFloat16Result(
                 instruction,
                 destination,
-                Ext(
+                NanIgnoringMinMax(
                     operation,
-                    _floatType,
                     GetFloat16Source(instruction, 0),
                     GetFloat16Source(instruction, 1)));
 
@@ -4521,6 +4511,19 @@ public static partial class Gen5SpirvTranslator
                     operation,
                     GetFloatSource(instruction, 0),
                     GetFloatSource(instruction, 1)));
+
+        private uint EmitFloatMedian(uint a, uint b, uint c)
+        {
+            var low = NanIgnoringMinMax(37, a, b);
+            var high = NanIgnoringMinMax(40, a, b);
+            var median = NanIgnoringMinMax(40, low, NanIgnoringMinMax(37, high, c));
+            var anyNan = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                IsNanBits(a),
+                _module.AddInstruction(SpirvOp.LogicalOr, _boolType, IsNanBits(b), IsNanBits(c)));
+            return _module.AddInstruction(SpirvOp.Select, _floatType, anyNan, NanIgnoringMinMax(37, low, c), median);
+        }
 
         private uint EmitFloatTernaryExt(
             Gen5ShaderInstruction instruction,
@@ -5131,7 +5134,7 @@ public static partial class Gen5SpirvTranslator
             };
             if (control?.Clamp == true)
             {
-                value = Ext(43, _floatType, value, Float(0), Float(1));
+                value = Ext(81, _floatType, value, Float(0), Float(1));
             }
 
             var half = EmitFloatToHalf(Bitcast(_uintType, value));
@@ -5172,7 +5175,7 @@ public static partial class Gen5SpirvTranslator
             };
             if (clamp)
             {
-                value = Ext(43, _floatType, value, Float(0), Float(1));
+                value = Ext(81, _floatType, value, Float(0), Float(1));
             }
 
             return Bitcast(_uintType, value);
