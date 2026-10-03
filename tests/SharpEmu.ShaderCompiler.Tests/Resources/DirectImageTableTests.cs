@@ -148,6 +148,24 @@ public sealed class DirectImageTableTests
         Assert.Equal(2, snapshot.Images.Length);
     }
 
+    [Fact]
+    public void CandidateWithAnUnsupportedFormatIsMaterializedAsNull()
+    {
+        var plan = ShaderResourcePlan.Extract(CreateWaveIndexedDescriptorProgram(), ShaderStage.Compute, Hash, 0, 2);
+        bool Read(ulong address, out uint word)
+        {
+            var success = ReadWaveIndexedMemory(address, out word);
+            if (address == 0x1000 + 0x100 + 5 * 32 + 4) word = 139u << 20;
+            return success;
+        }
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.Single(snapshot.Images, image => image.All(word => word == 0));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -492,6 +510,32 @@ public sealed class DirectImageTableTests
         Assert.True(plan.Info.UsesDeviceAddresses);
         Assert.True(plan.Memory.TryGetIndex(24, 0, out var memoryIndex));
         Assert.False(plan.Memory[memoryIndex].PlanningOnly);
+    }
+
+    [Fact]
+    public void DirectTableSlotWithAnUnsupportedFormatIsMaterializedAsNull()
+    {
+        var program = CreateProgram();
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        var unsupported = true;
+        bool Read(ulong address, out uint word)
+        {
+            var success = ReadDescriptor(address, out word);
+            if (unsupported && address == 0x1000 + 344 + 3 * 32 + 4) word = 139u << 20;
+            return success;
+        }
+
+        var clean = new ResourceSnapshot();
+        var cleanSpecialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: ReadDescriptor), ref clean, ref cleanSpecialization));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.Equal(clean.Images.Length + 1, snapshot.Images.Length);
+        Assert.Single(snapshot.Images, image => image.All(word => word == 0));
+        unsupported = false;
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization, out failure), $"materialize {failure}");
+        Assert.Equal(clean.Images.Length, snapshot.Images.Length);
     }
 
     [Theory]
