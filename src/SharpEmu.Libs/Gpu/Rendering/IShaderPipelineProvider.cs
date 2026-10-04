@@ -44,8 +44,28 @@ public sealed class GraphicsPrograms
     public bool DropUnwrittenColorTargets { get; init; }
 }
 
+public sealed class KnownGpuWrite(ulong address, uint[] buffer, int count, bool pooled = false)
+{
+    private bool _released;
+
+    public ulong Address { get; } = address;
+
+    public ReadOnlySpan<uint> Words => buffer.AsSpan(0, count);
+
+    public void Release()
+    {
+        if (pooled && !_released)
+        {
+            _released = true;
+            System.Buffers.ArrayPool<uint>.Shared.Return(buffer);
+        }
+    }
+}
+
 public sealed class ComputeProgram
 {
+    public KnownGpuWrite? KnownWrite { get; init; }
+
     public ShaderProgram Program { get; init; }
     public ComputeInputInfo Input { get; init; } = new();
 

@@ -803,7 +803,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
         var systemRegisters = DecodeComputeSystemRegisters(compute);
-        if (TrySubmitMaskedDwordCopyKernel(program, source, systemRegisters, input, out var description))
+        if (TrySubmitMaskedDwordCopyKernel(program, source, systemRegisters, input, dimensionX, dimensionY, dimensionZ, out var description, out var knownWrite))
         {
             if (RenderTrace.Enabled)
             {
@@ -832,7 +832,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         input.Stage = stage;
-        return new ComputeProgram { Program = handle, Input = input };
+        return new ComputeProgram { Program = handle, Input = input, KnownWrite = knownWrite };
     }
 
     private bool TryPrepareProgram(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,

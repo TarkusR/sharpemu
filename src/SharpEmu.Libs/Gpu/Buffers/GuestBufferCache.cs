@@ -1913,6 +1913,39 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
     }
 
+    private static long _reportedKnownApplied;
+    private static long _reportedKnownUnbacked;
+
+    public static string TakeKnownContentsReport() => FormattableString.Invariant(
+        $"[PERF][KNOWN_GPU] applied={Interlocked.Exchange(ref _reportedKnownApplied, 0)} unbacked={Interlocked.Exchange(ref _reportedKnownUnbacked, 0)}");
+
+    public void NoteKnownGpuContents(ulong address, ReadOnlySpan<uint> words)
+    {
+        var bytes = MemoryMarshal.AsBytes(words);
+        var size = (ulong)bytes.Length;
+        if (size == 0)
+        {
+            return;
+        }
+
+        if (!_backing.TryWriteBacking(address, bytes))
+        {
+            Interlocked.Increment(ref _reportedKnownUnbacked);
+            return;
+        }
+
+        _gpuModifiedRanges.Remove(address, size);
+        var firstPage = address & ~(TrackerLayout.PageBytes - 1);
+        for (var page = firstPage; page < address + size; page += TrackerLayout.PageBytes)
+        {
+            if (!_gpuModifiedRanges.Overlaps(page, TrackerLayout.PageBytes))
+            {
+                _tracker.ClearGpuDirtyPages(page, TrackerLayout.PageBytes);
+            }
+        }
+        Interlocked.Increment(ref _reportedKnownApplied);
+    }
+
     private bool TryBeginDownloadAsync(List<DownloadPiece> copies, out VulkanAsyncReadback.Ticket ticket, out ulong[] writeTicks)
     {
         ticket = null!;

@@ -181,6 +181,54 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void KnownGpuContentsReachGuestMemoryAndEndGpuOwnershipOfTheirBytes()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Pattern(0x8000, 3));
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address + 0x100, 0x40, isWritten: true);
+            _ = harness.Cache.ObtainBuffer(address + 0x4000, 0x40, isWritten: true);
+            Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x40));
+
+            harness.Cache.NoteKnownGpuContents(address + 0x100, [0x11111111, 0x22222222, 0x33333333]);
+
+            // The written words are the CPU's now; the rest of the declared range and other ranges stay with the GPU.
+            Assert.False(harness.Cache.HasGpuDirtyBytes(address + 0x100, 12));
+            Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x10C, 4));
+            Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x4000, 0x40));
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+            Assert.True(harness.Cache.HasGpuDirtyPages(address + 0x4000, 0x1000));
+        });
+
+        var bytes = harness.Read(address + 0x100, 12);
+        Assert.Equal(0x11111111u, BitConverter.ToUInt32(bytes, 0));
+        Assert.Equal(0x33333333u, BitConverter.ToUInt32(bytes, 8));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void KnownGpuContentsCoveringEveryGpuByteOfAPageEndItsGpuOwnership()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address + 0x100, 8, isWritten: true);
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+
+            harness.Cache.NoteKnownGpuContents(address + 0x100, [0xAAAAAAAA, 0xBBBBBBBB]);
+
+            Assert.False(harness.Cache.HasGpuDirtyBytes(address + 0x100, 8));
+            Assert.False(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void OverlappingPreparedBindingsUseTheFinalCacheAllocation()
     {
         if (_vulkan is null) return;

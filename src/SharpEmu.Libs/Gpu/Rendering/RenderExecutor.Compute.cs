@@ -213,6 +213,12 @@ public sealed partial class RenderExecutor
             }
             _host.EndComputeImageSnapshot(imageSnapshot, bindings);
             _host.ShaderAccessBarrier();
+
+            if (indirectArgumentsAddress == 0 && computeProgram.KnownWrite is { } known)
+            {
+                _host.NoteKnownGpuContents(known.Address, known.Words);
+                known.Release();
+            }
         }
 
         _host.ResetBindings();

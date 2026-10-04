@@ -237,6 +237,13 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
+        public void NoteKnownGpuContents(ulong address, ReadOnlySpan<uint> words) => _bufferCache.NoteKnownGpuContents(address, words);
+
+        public bool CpuWriteNeedsGpuData(ulong address, ulong size) =>
+            address != 0 && size != 0 && new SharpEmu.HLE.GpuMemory.GuestSpan(address, size).IsValid &&
+            ((_bufferCache.MayHaveGpuDirtyPages(address, size) && _bufferCache.HasGpuDirtyPages(address, size)) ||
+             _imageCache.HasGpuModifiedImageBytes(address, size));
+
         // The same ownership rules as the two word readers, checked once for a whole range.
         public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
         {

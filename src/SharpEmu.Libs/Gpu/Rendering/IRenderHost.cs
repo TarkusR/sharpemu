@@ -196,6 +196,10 @@ public interface IRenderHost
 
     void ShaderAccessBarrier();
 
+    void NoteKnownGpuContents(ulong address, ReadOnlySpan<uint> words)
+    {
+    }
+
     // Clears the bound color targets to one colour in place of the draw.
     void ClearColorTargets(ReadOnlySpan<ColorTargetState> targets, SolidColorClear clear);
 

@@ -79,6 +79,18 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public bool TryReadCleanGuestWord(ulong address, out uint word) => TryReadGuestWord(address, out word);
 
+    // Off by default: with resident reads the resource cache starts serving hits.
+    public bool ResidentReads { get; set; }
+
+    // A range the test names here stands for bytes the GPU still owns.
+    public (ulong Address, ulong Size) GpuOwned { get; set; }
+
+    public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) =>
+        ResidentReads && !CpuWriteNeedsGpuData(address, (ulong)destination.Length) && memory.TryRead(address, destination);
+
+    public bool CpuWriteNeedsGpuData(ulong address, ulong size) =>
+        GpuOwned.Size != 0 && address + size > GpuOwned.Address && address < GpuOwned.Address + GpuOwned.Size;
+
     public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
     {
         Modules.Add((stage, hash, programId));
