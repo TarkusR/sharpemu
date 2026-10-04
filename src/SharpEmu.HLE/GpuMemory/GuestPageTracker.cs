@@ -340,7 +340,7 @@ public sealed class GuestPageTracker
                     if (!isWritten)
                     {
                         region.Lock.Exit();
-                        held.Remove(region);
+                        held.RemoveAt(held.Count - 1);
                     }
 
                     return false;
