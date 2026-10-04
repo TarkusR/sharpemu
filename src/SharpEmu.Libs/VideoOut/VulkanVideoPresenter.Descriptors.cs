@@ -44,7 +44,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public readonly RenderScratchPool<byte> SamplerClasses = new();
             public readonly RenderScratchPool<uint> ShaderData = new();
             public readonly RenderScratchPool<BufferView> Buffers = new();
-            public readonly RenderScratchPool<(BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer)> Sources = new();
+            public readonly RenderScratchPool<(BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer, ulong MappedSize)> Sources = new();
         }
 
         private DescriptorScratch? _descriptorScratch;
@@ -73,7 +73,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             public StageDescriptors Descriptors { get; } = new();
 
-            public (BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer)[] BufferSources { get; set; } = [];
+            public (BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer, ulong MappedSize)[] BufferSources { get; set; } = [];
 
             public uint[] ShaderData { get; set; } = [];
 
@@ -566,7 +566,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"A storage buffer descriptor footprint overflows: buffer={index} stride={descriptor.Stride} records={descriptor.RecordCount} hash=0x{program.Hash:X16}.");
                 if (descriptor.Address == 0 || requested == 0 || IsUnresidentPrtPage(descriptor.Address))
                 {
-                    sources[index] = (descriptor, default);
+                    sources[index] = (descriptor, default, 0);
                     continue;
                 }
 
@@ -583,7 +583,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _imageCache.PublishImagesUnderRawWrite(descriptor.Address, size);
                 }
 
-                sources[index] = (descriptor, _bufferCache.FindBuffer(descriptor.Address, size));
+                sources[index] = (descriptor, _bufferCache.FindBuffer(descriptor.Address, size), size);
             }
 
             prepared.BufferSources = sources;
@@ -696,18 +696,17 @@ internal static unsafe partial class VulkanVideoPresenter
             ShaderProgramInfo program,
             int slot,
             ResourceSlotIdentifier bufferIdentifier,
+            ulong size,
             out uint memoryOffset)
         {
             memoryOffset = 0;
             var address = descriptor.Address;
-            var requested = descriptor.Footprint() ?? throw SubmissionScheduler.Fatal($"A storage buffer descriptor footprint overflows: buffer={slot} hash=0x{program.Hash:X16}.");
-            if (address == 0 || requested == 0 || IsUnresidentPrtPage(address))
+            if (address == 0 || size == 0 || IsUnresidentPrtPage(address))
             {
                 return NullStorageBuffer();
             }
 
-            var size = ClampMappedSize(address, requested);
-            if (MeshDrawTrace.Active) MeshDrawTrace.Write("buffer-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={slot} address=0x{address:X16} requested=0x{requested:X} size=0x{size:X} written={resource.Written} formatted={resource.Formatted}");
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("buffer-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={slot} address=0x{address:X16} requested=0x{descriptor.Footprint() ?? 0:X} size=0x{size:X} written={resource.Written} formatted={resource.Formatted}");
             var alignment = _minStorageBufferOffsetAlignment;
             var maxRange = _deviceInfo.MaxStorageBufferRange;
             if (alignment == 0 || size > maxRange)
@@ -777,8 +776,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             for (var index = 0; index < views.Length; index++)
             {
-                var (descriptor, bufferIdentifier) = prepared.BufferSources[index];
-                views[index] = BindStorageBuffer(in descriptor, info.Buffers[index], program, index, bufferIdentifier, out var memoryOffset);
+                var (descriptor, bufferIdentifier, mappedSize) = prepared.BufferSources[index];
+                views[index] = BindStorageBuffer(in descriptor, info.Buffers[index], program, index, bufferIdentifier, mappedSize, out var memoryOffset);
                 var dword = layout.MemoryOffsetDword + (uint)index / 4;
                 var shift = ((uint)index % 4) * 8;
                 shaderData[dword] |= memoryOffset << (int)shift;
