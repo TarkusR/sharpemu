@@ -333,6 +333,40 @@ public sealed class RuntimeValueEvaluator
         return true;
     }
 
+    internal CompiledResourceEvaluator? IndexedEvaluator => _activeMask is null ? _compiled : null;
+
+    internal bool IsEvaluatedAt(int index) => _compiledValues.Contains(index);
+
+    internal void SeedAt(int index, ulong result) => _compiledValues.Store(index, result);
+
+    internal bool TryEvaluateRawBase(ScalarValue handle, ScalarValueKind kind, int[] operandIndices, out ulong baseAddress, out ulong high,
+        out ulong records)
+    {
+        baseAddress = 0;
+        high = 0;
+        records = 0;
+        if (handle.Operands.Length < 2 ||
+            !EvaluateOperand(handle, operandIndices, 0, out var low) ||
+            !EvaluateOperand(handle, operandIndices, 1, out high))
+        {
+            return false;
+        }
+
+        if (kind == ScalarValueKind.ScalarBufferWord &&
+            (handle.Operands.Length != 4 ||
+             !EvaluateOperand(handle, operandIndices, 2, out records) ||
+             !EvaluateOperand(handle, operandIndices, 3, out _)))
+        {
+            return false;
+        }
+
+        baseAddress = ((high << 32) | (uint)low) & AddressMask;
+        return true;
+    }
+
+    private bool EvaluateOperand(ScalarValue handle, int[] indices, int operand, out ulong result) =>
+        indices[operand] >= 0 ? EvaluateCompiled(indices[operand], out result) : EvaluateWide(handle.Operands[operand], out result);
+
     internal bool IsEvaluated(ScalarValue value) =>
         _compiled is not null && _compiled.TryGetIndex(value, out var index)
             ? _compiledValues.Contains(index) : _cache.TryGetValue(value, out _);

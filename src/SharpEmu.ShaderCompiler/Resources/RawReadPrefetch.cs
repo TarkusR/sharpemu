@@ -12,6 +12,10 @@ internal sealed class RawReadGroup
     public required ScalarValue[] Reads { get; init; }
     public required long[] Immediates { get; init; }
     public required uint[] Offsets { get; init; }
+
+    public CompiledResourceEvaluator? IndexedFor;
+    public int[] HandleIndices = [];
+    public int[] ReadIndices = [];
 }
 
 internal sealed class RawReadPrefetchPlan
@@ -39,20 +43,26 @@ internal static class RawReadPrefetch
     private sealed class Scratch
     {
         public ulong[] Addresses = new ulong[256];
+        public int[] Order = new int[256];
         public ScalarValue[] Values = new ScalarValue[256];
+        public int[] Indices = new int[256];
         public byte[] Bytes = new byte[1024];
         public int Count;
 
-        public void Add(ulong address, ScalarValue value)
+        public void Add(ulong address, ScalarValue value, int index)
         {
             if (Count == Addresses.Length)
             {
                 Array.Resize(ref Addresses, Count * 2);
+                Array.Resize(ref Order, Count * 2);
                 Array.Resize(ref Values, Count * 2);
+                Array.Resize(ref Indices, Count * 2);
             }
 
             Addresses[Count] = address;
+            Order[Count] = Count;
             Values[Count] = value;
+            Indices[Count] = index;
             Count++;
         }
     }
@@ -194,24 +204,68 @@ internal static class RawReadPrefetch
 
     private static void Collect(RawReadGroup[] groups, RuntimeValueEvaluator evaluator, Scratch scratch)
     {
+        var compiled = evaluator.IndexedEvaluator;
         foreach (var group in groups)
         {
-            if (!evaluator.TryEvaluateRawBase(group.Handle, group.Kind, out var baseAddress, out var high, out var records) ||
-                (baseAddress & ~3ul) == 0)
+            int[]? readIndices = null;
+            bool based;
+            ulong baseAddress;
+            ulong high;
+            ulong records;
+            if (compiled is not null)
+            {
+                if (!ReferenceEquals(Volatile.Read(ref group.IndexedFor), compiled))
+                {
+                    Index(group, compiled);
+                }
+
+                readIndices = group.ReadIndices;
+                based = evaluator.TryEvaluateRawBase(group.Handle, group.Kind, group.HandleIndices, out baseAddress, out high, out records);
+            }
+            else
+            {
+                based = evaluator.TryEvaluateRawBase(group.Handle, group.Kind, out baseAddress, out high, out records);
+            }
+
+            if (!based || (baseAddress & ~3ul) == 0)
             {
                 continue;
             }
 
             for (var index = 0; index < group.Reads.Length; index++)
             {
-                if (!evaluator.IsEvaluated(group.Reads[index]) &&
+                var readIndex = readIndices is null ? -1 : readIndices[index];
+                var evaluated = readIndex >= 0 ? evaluator.IsEvaluatedAt(readIndex) : evaluator.IsEvaluated(group.Reads[index]);
+                if (!evaluated &&
                     RuntimeValueEvaluator.ResolveRawAddress(group.Kind, baseAddress, high, records, group.Immediates[index], group.Offsets[index],
                         out var address) == RuntimeValueEvaluator.RawAddress.Read)
                 {
-                    scratch.Add(address, group.Reads[index]);
+                    scratch.Add(address, group.Reads[index], readIndex);
                 }
             }
         }
+    }
+
+    private static void Index(RawReadGroup group, CompiledResourceEvaluator compiled)
+    {
+        static int IndexOf(CompiledResourceEvaluator compiled, ScalarValue value) =>
+            !value.IsConstant && compiled.TryGetIndex(value, out var index) ? index : -1;
+
+        var handle = new int[group.Handle.Operands.Length];
+        for (var operand = 0; operand < handle.Length; operand++)
+        {
+            handle[operand] = IndexOf(compiled, group.Handle.Operands[operand]);
+        }
+
+        var reads = new int[group.Reads.Length];
+        for (var read = 0; read < reads.Length; read++)
+        {
+            reads[read] = IndexOf(compiled, group.Reads[read]);
+        }
+
+        group.HandleIndices = handle;
+        group.ReadIndices = reads;
+        Volatile.Write(ref group.IndexedFor, compiled);
     }
 
     private static void ReadRuns(RuntimeValueEvaluator evaluator, Scratch scratch)
@@ -227,7 +281,7 @@ internal static class RawReadPrefetch
         var clean = evaluator.Inputs.ReadsClean;
         var addresses = scratch.Addresses;
         var values = scratch.Values;
-        Array.Sort(addresses, values, 0, count);
+        Array.Sort(addresses, scratch.Order, 0, count);
         var start = 0;
         while (start < count)
         {
@@ -277,8 +331,18 @@ internal static class RawReadPrefetch
         for (var index = start; index < end; index++)
         {
             var word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(addresses[index] - first)..]);
-            evaluator.Seed(scratch.Values[index], word);
-            evaluator.RecordPrefetchedConsumer(scratch.Values[index], scratch.Addresses[index]);
+            var added = scratch.Order[index];
+            var compiledIndex = scratch.Indices[added];
+            if (compiledIndex >= 0)
+            {
+                evaluator.SeedAt(compiledIndex, word);
+            }
+            else
+            {
+                evaluator.Seed(scratch.Values[added], word);
+            }
+
+            evaluator.RecordPrefetchedConsumer(scratch.Values[added], addresses[index]);
         }
     }
 

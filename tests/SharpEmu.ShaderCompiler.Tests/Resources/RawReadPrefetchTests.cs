@@ -66,6 +66,26 @@ public sealed class RawReadPrefetchTests
     }
 
     [Fact]
+    public void APrefetchSeedsTheCompiledEvaluatorByIndex()
+    {
+        var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);
+        Assert.NotNull(plan.CompileEvaluatorNow());
+        var memory = new TestWordMemory { Words = [11, 22, 33, 44] };
+        var resident = new ResidentMemory(memory);
+
+        for (var walk = 0; walk < 2; walk++)
+        {
+            Assert.True(RuntimeValueEvaluator.EvaluateSources(plan, [], PrefetchInputs(memory, resident), plan.CleanFlatSlots,
+                evaluateTable: true, out _, out var table));
+            Assert.Equal([11u, 22, 33, 44], table);
+        }
+
+        Assert.Equal(2, resident.Calls);
+        Assert.Equal(8, resident.Words);
+        Assert.Equal(0u, memory.Reads);
+    }
+
+    [Fact]
     public void ARefusedRunFallsBackToWordReads()
     {
         var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);
