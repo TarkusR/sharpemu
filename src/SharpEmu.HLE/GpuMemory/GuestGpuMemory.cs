@@ -87,7 +87,11 @@ public sealed class GuestGpuMemory : IDisposable
         bool handled;
         if (kind == FaultKind.Write)
         {
-            handled = (buffers?.MarkCpuWrite(address, faultSize) ?? false) | (images?.MarkCpuWrite(address, faultSize) ?? false);
+            var groupAddress = address & ~(GuestWriteGranule - 1);
+            var (markAddress, markSize) = Covers(groupAddress, GuestWriteGranule) && GuestPermits(kind, groupAddress) && GuestPermits(kind, groupAddress + GuestWriteGranule - 1)
+                ? (groupAddress, GuestWriteGranule)
+                : (address, faultSize);
+            handled = (buffers?.MarkCpuWrite(markAddress, markSize) ?? false) | (images?.MarkCpuWrite(address, faultSize) ?? false);
         }
         else
         {
@@ -138,6 +142,9 @@ public sealed class GuestGpuMemory : IDisposable
         _lastWriteRetryVersion = version;
         return true;
     }
+
+    private const ulong GuestWriteGranule = 0x4000;
+
 
     public bool MarkCpuWrite(ulong address, ulong size)
     {
