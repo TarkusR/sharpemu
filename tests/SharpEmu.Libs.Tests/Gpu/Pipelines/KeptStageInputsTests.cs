@@ -117,6 +117,60 @@ public sealed class KeptStageInputsTests : IDisposable
     }
 
     [Fact]
+    public void VertexInput_IsKeptWhileItsTablesHoldTheSameWords()
+    {
+        var first = Lookup();
+        var second = Lookup();
+
+        Assert.Equal(2, first.Attributes.Length);
+        Assert.Equal(24u, Assert.Single(first.Buffers).Stride);
+        Assert.NotSame(first, second);
+        Assert.Same(first.Attributes, second.Attributes);
+        Assert.Same(first.Buffers, second.Buffers);
+        Assert.True(second.Stage.IsValid);
+    }
+
+    [Fact]
+    public void VertexInput_IsResolvedAgainWhenATableWordChanges()
+    {
+        var first = Lookup();
+        WriteTables(AttributeTable, BufferTable, stride: 32);
+        var changedBuffer = Lookup();
+        _guest.WriteWords(AttributeTable + 4, 8u << 14);
+        var changedAttribute = Lookup();
+
+        Assert.NotSame(first.Buffers, changedBuffer.Buffers);
+        Assert.Equal(32u, Assert.Single(changedBuffer.Buffers).Stride);
+        Assert.NotSame(changedBuffer.Attributes, changedAttribute.Attributes);
+        Assert.Equal(8u, changedAttribute.Attributes[1].OffsetBytes);
+    }
+
+    [Fact]
+    public void VertexInput_IsKeptWhenTheSameTablesMove()
+    {
+        var first = Lookup();
+        WriteTables(MovedAttributeTable, MovedBufferTable, stride: 24);
+        PointAtTables(MovedAttributeTable, MovedBufferTable);
+        var moved = Lookup();
+
+        Assert.Same(first.Attributes, moved.Attributes);
+        Assert.Same(first.Buffers, moved.Buffers);
+    }
+
+    [Fact]
+    public void VertexInput_IsResolvedAgainWhenTheClipTransformChanges()
+    {
+        var first = Lookup();
+        _banks.Context.Clip.ClipDisable = true;
+        _banks.Context.ScreenViewport.Viewports[0] = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = 32, YOffset = 32 };
+        var clipped = Lookup();
+
+        Assert.NotSame(first.Attributes, clipped.Attributes);
+        Assert.True(clipped.ClipSpace.Enabled);
+        Assert.Equal(32f, clipped.ClipSpace.ScaleX);
+    }
+
+    [Fact]
     public void UserData_IsKeptUntilARegisterHoldsAnotherWord()
     {
         Lookup();

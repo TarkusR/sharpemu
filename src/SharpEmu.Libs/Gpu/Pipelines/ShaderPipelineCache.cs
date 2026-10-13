@@ -36,6 +36,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly bool _skipRayTracing = Environment.GetEnvironmentVariable("SHARPEMU_SKIP_RT") == "1";
     private readonly HashSet<(ShaderStage Stage, ulong Hash, uint CodeSize)> _reportedShaderSkips = [];
     private readonly HashSet<(uint Stages, uint PrimitiveType, uint MaxOutput, uint MaxVerticesOut)> _reportedMeshSkips = [];
+    private readonly uint[] _vertexTableScratch = new uint[VertexTableWords.MaxWords];
 
     public ShaderPipelineCache(CpuContext context, IShaderPipelineHost host, IGuestGpuBackend compiler, ShaderHeaderRegistry registry)
     {
@@ -177,6 +178,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     private readonly KeptUserData _vertexUserData = new();
     private readonly KeptUserData _pixelUserData = new();
+    private readonly KeptVertexInput _vertexInput = new();
 
     private GraphicsPrograms GetGraphicsProgramsCore(
         RegisterBanks banks,
@@ -211,7 +213,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount, vertex.ExportAddress, vertexLabel);
         var vertexSource = PrepareSource(vertex.ExportAddress, mesh is null ? ShaderStage.Vertex : ShaderStage.Mesh, vertexLabel, vertexUserData,
             VertexUserDataBase, out var vertexHeader, vertex.GeometryUserDataAddress);
-        var vertexInfo = mesh is null ? PrepareVertexInput(vertexSource, shaderInterface, context) : new VertexInputInfo();
+        var vertexInfo = mesh is null ? PrepareVertexInput(vertexSource, vertexHeader, shaderInterface, context, _vertexInput) : new VertexInputInfo();
         vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
@@ -364,11 +366,26 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     // The vertex tables of the draw and the clip-space transform when clipping is off.
-    private VertexInputInfo PrepareVertexInput(ShaderSource source, ShaderInterfaceRegisters shaderInterface, ContextRegisters context)
+    private VertexInputInfo PrepareVertexInput(ShaderSource source, ShaderHeaderEntry header, ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context, KeptVertexInput kept)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexInputResolution);
-        return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
-            shaderInterface.VertexOutputControl, ResolveClipSpace(context));
+        var clipSpace = ResolveClipSpace(context);
+        var tables = header.VertexTables ??= VertexInputResolver.RequireTables(_context, header.Shader);
+        var control = shaderInterface.VertexOutputControl;
+        if (ReferenceEquals(kept.Header, header) && kept.Info is { } info && kept.PositionExportControl == control &&
+            SameBits(kept.ClipSpace, clipSpace) && SameVertexTables(kept, tables, source.UserData))
+        {
+            return info.WithoutStage();
+        }
+
+        var resolved = VertexInputResolver.ResolveVertexInputs(_context, header.Shader, tables, source.UserData, control, clipSpace, out var words);
+        kept.Header = header;
+        kept.Words = words;
+        kept.PositionExportControl = control;
+        kept.ClipSpace = clipSpace;
+        kept.Info = resolved;
+        return resolved;
     }
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
@@ -383,6 +400,28 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             .Distinct()
             .Order()
             .ToArray());
+
+    private bool SameVertexTables(KeptVertexInput kept, VertexTableMetadata tables, uint[] userData)
+    {
+        if (kept.Words is not { } words)
+        {
+            return true;
+        }
+
+        var attributeTable = VertexInputResolver.ReadTablePointer(userData, tables.VertexAttributeRegister);
+        var bufferTable = VertexInputResolver.ReadTablePointer(userData, tables.VertexBufferRegister);
+        return attributeTable != 0 && bufferTable != 0 &&
+            VertexInputResolver.SameTableWords(_context, words, attributeTable, bufferTable, _vertexTableScratch);
+    }
+
+    private static bool SameBits(in ClipSpaceTransform left, in ClipSpaceTransform right) =>
+        left.Enabled == right.Enabled &&
+        BitConverter.SingleToUInt32Bits(left.ScaleX) == BitConverter.SingleToUInt32Bits(right.ScaleX) &&
+        BitConverter.SingleToUInt32Bits(left.ScaleY) == BitConverter.SingleToUInt32Bits(right.ScaleY) &&
+        BitConverter.SingleToUInt32Bits(left.OffsetX) == BitConverter.SingleToUInt32Bits(right.OffsetX) &&
+        BitConverter.SingleToUInt32Bits(left.OffsetY) == BitConverter.SingleToUInt32Bits(right.OffsetY) &&
+        BitConverter.SingleToUInt32Bits(left.HalfExtentX) == BitConverter.SingleToUInt32Bits(right.HalfExtentX) &&
+        BitConverter.SingleToUInt32Bits(left.HalfExtentY) == BitConverter.SingleToUInt32Bits(right.HalfExtentY);
 
     // One past the highest parameter location the pixel program reads, resolved as its translator does.
     internal static uint ReadVertexOutputCount(ReadOnlySpan<uint> attributes, PixelInputInfo info)
@@ -1175,4 +1214,13 @@ internal sealed class KeptUserData
     public ulong UserDataStamp;
     public ulong ProgramsStamp;
     public uint[]? Words;
+}
+
+internal sealed class KeptVertexInput
+{
+    public ShaderHeaderEntry? Header;
+    public VertexTableWords? Words;
+    public uint PositionExportControl;
+    public ClipSpaceTransform ClipSpace;
+    public VertexInputInfo? Info;
 }

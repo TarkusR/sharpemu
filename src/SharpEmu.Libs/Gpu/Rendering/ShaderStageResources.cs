@@ -165,6 +165,13 @@ public sealed class VertexInputInfo
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
     public ShaderStageResources Stage { get; set; }
+
+    public VertexInputInfo WithoutStage()
+    {
+        var copy = (VertexInputInfo)MemberwiseClone();
+        copy.Stage = default;
+        return copy;
+    }
 }
 
 public sealed record MeshDrawConfiguration
