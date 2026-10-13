@@ -2222,6 +2222,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             return isTexelBuffer && SynchronizeTexelFromImage(buffer, guestAddress, size);
         }
 
+        if (isWritten && !isTexelBuffer && _tracker.IsGpuOwned(guestAddress, size))
+        {
+            return false;
+        }
+
         profileScope.SwitchPhase(isWritten
             ? RenderPhaseProfile.Phase.BufferDirtySyncWritten
             : isTexelBuffer ? RenderPhaseProfile.Phase.BufferDirtySyncTexel : RenderPhaseProfile.Phase.BufferDirtySyncUpload);

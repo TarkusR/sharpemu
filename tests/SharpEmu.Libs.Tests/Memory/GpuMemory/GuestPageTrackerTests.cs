@@ -747,6 +747,42 @@ public sealed class GuestPageTrackerTests : IDisposable
     }
 
     [NativePageProtectionFact]
+    public void AWrittenUploadLeavesBlocksTheGpuOwnsAloneAndStillMarksTheRest()
+    {
+        var address = AllocateAligned(Region * 2, Region);
+        var range = Region + Page * 4;
+        Assert.False(_tracker.IsGpuOwned(address, range));
+        _tracker.ForEachUploadRange(address, range, true, NoRange, NoUpload);
+        Assert.True(_tracker.IsGpuOwned(address, range));
+        Assert.False(_tracker.IsGpuOwned(address, range + Page));
+
+        // Nothing is reported or re-marked while the GPU owns every page.
+        var ranges = 0;
+        var callbacks = 0;
+        ResetLog();
+        _tracker.ForEachUploadRange(address, range, true, (_, _) => ranges++, () => callbacks++);
+        Assert.Equal(0, ranges);
+        Assert.Equal(1, callbacks);
+        Assert.Empty(_space.Protects);
+
+        // One page of the second block goes back to the CPU and is written there: only that
+        // block is walked again, the page is uploaded and the GPU owns the range once more.
+        var returned = address + Region + Page;
+        _tracker.ClearGpuDirtyPages(returned, Page);
+        Assert.False(_tracker.IsGpuOwned(address, range));
+        _tracker.MarkCpuDirtyPages(returned, Page);
+        var uploaded = new List<(ulong Address, ulong Size)>();
+        _tracker.ForEachUploadRange(address, range, true, (start, bytes) => uploaded.Add((start, bytes)), NoUpload);
+        Assert.Equal([(returned, Page)], uploaded);
+        Assert.True(_tracker.IsGpuOwned(address, range));
+        Assert.False(_tracker.HasCpuDirtyPages(address, range));
+
+        _tracker.ClearGpuDirtyPages(address, Region * 2);
+        _tracker.UntrackMemory(address, Region * 2);
+        Release(address, Region * 2);
+    }
+
+    [NativePageProtectionFact]
     public void RepeatedCpuWritesKeepReadOnlyHotPagesWritableAndDirty()
     {
         var address = Allocate(1);

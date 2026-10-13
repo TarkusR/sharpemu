@@ -65,6 +65,12 @@ public sealed class TrackedRegion
         return true;
     }
 
+    public bool IsGpuOwned(ulong offset, ulong size)
+    {
+        var (start, end) = GetPageRange(BaseAddress + offset, size);
+        return _gpuDirty.AllInRange(start, end);
+    }
+
     public bool IsCpuWriteHot(ulong offset, ulong size)
     {
         var (start, end) = GetPageRange(BaseAddress + offset, size);

@@ -109,6 +109,28 @@ public sealed class GuestPageTracker
         return false;
     }
 
+    public bool IsGpuOwned(ulong vaddr, ulong size)
+    {
+        ValidateRange(vaddr, size);
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is not { } region || !region.IsGpuOwned(offset, bytes))
+            {
+                return false;
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return true;
+    }
+
     public bool IsCpuWriteHotRange(ulong vaddr, ulong size)
     {
         RejectUploadCallbackReentry();
@@ -324,6 +346,11 @@ public sealed class GuestPageTracker
             {
                 VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
                 {
+                    if (isWritten && region.IsGpuOwned(offset, bytes))
+                    {
+                        return false;
+                    }
+
                     using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadLockWait) : default)
                         region.Lock.Enter();
                     held.Add(region);
@@ -350,14 +377,15 @@ public sealed class GuestPageTracker
                 uploadFunc();
             if (isWritten)
             {
-                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+                for (; releasedCount < held.Count; releasedCount++)
                 {
+                    var region = held[releasedCount];
+                    var address = Math.Max(vaddr, region.BaseAddress);
+                    var end = Math.Min(vaddr + size, region.BaseAddress + BlockBytes);
                     using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadOwnership))
-                        region.ChangeState(WriteOrigin.Gpu, enable: true, region.BaseAddress + offset, bytes);
+                        region.ChangeState(WriteOrigin.Gpu, enable: true, address, end - address);
                     region.Lock.Exit();
-                    releasedCount++;
-                    return false;
-                });
+                }
             }
         }
         catch
