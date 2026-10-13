@@ -37,6 +37,17 @@ public sealed class SpanSnapshot(ulong[] starts, ulong[] ends)
         end = 0;
         return false;
     }
+
+    public bool Overlaps(ulong address, ulong size)
+    {
+        var index = Array.BinarySearch(starts, address + size);
+        if (index < 0)
+        {
+            index = ~index;
+        }
+
+        return index > 0 && ends[index - 1] > address;
+    }
 }
 
 public sealed class SpanSet

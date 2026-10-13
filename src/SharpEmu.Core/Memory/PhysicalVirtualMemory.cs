@@ -2407,7 +2407,15 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // identity-mapped guest page protected by the image tracker.
         GuestImageWriteTracker.NotifyManagedWrite(destinationAddress, length);
         GuestGpuMemoryHook.MarkCpuWrite(destinationAddress, length);
-        var copied = TryCopyCore(destinationAddress, sourceAddress, length);
+        var copied = _backedSpace is { } backed && !_disposed && backed.TryCopySingleView(destinationAddress, sourceAddress, length);
+        if (copied)
+        {
+            NotifyBackedWriteWatch(destinationAddress, length);
+        }
+        else
+        {
+            copied = TryCopyCore(destinationAddress, sourceAddress, length);
+        }
 
         // As in TryWrite: an upload after the mark may have taken the bytes from before the copy.
         GuestGpuMemoryHook.MarkCpuWriteLanded(destinationAddress, length);

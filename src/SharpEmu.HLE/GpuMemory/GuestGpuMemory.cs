@@ -207,15 +207,7 @@ public sealed class GuestGpuMemory : IDisposable
             return false;
         }
 
-        _spansLock.EnterReadLock();
-        try
-        {
-            return _spans.Overlaps(address, size);
-        }
-        finally
-        {
-            _spansLock.ExitReadLock();
-        }
+        return Volatile.Read(ref _spanSnapshot).Overlaps(address, size);
     }
 
     // The host mapping takes the guest protection here; the views themselves are mapped read-write.
