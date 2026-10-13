@@ -824,7 +824,12 @@ public sealed partial class RenderExecutor
         }
 
         using var resolveScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSynchronousResolution);
+        var resolveStarted = Diagnostics.ProgramPrefetchTally.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         state.Programs = ResolveGraphicsPrograms(banks, in inputs);
+        if (resolveStarted != 0)
+        {
+            Diagnostics.ProgramPrefetchTally.NoteRenderResolve(System.Diagnostics.Stopwatch.GetTimestamp() - resolveStarted);
+        }
     }
 
     private static void TraceDrawState(ulong submitId, RegisterBanks banks, in DrawCall draw, in DrawState state)

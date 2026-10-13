@@ -117,12 +117,18 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         }
 
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchOrderWait);
+        var started = Diagnostics.ProgramPrefetchTally.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         lock (_lock)
         {
             while (_finished < count)
             {
                 Monitor.Wait(_lock);
             }
+        }
+
+        if (started != 0)
+        {
+            Diagnostics.ProgramPrefetchTally.NoteFinishedWait(System.Diagnostics.Stopwatch.GetTimestamp() - started);
         }
     }
 
@@ -160,6 +166,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         var job = Current;
         if (job is null || !ReferenceEquals(job.Banks, banks))
         {
+            if (Diagnostics.ProgramPrefetchTally.Enabled)
+            {
+                Diagnostics.ProgramPrefetchTally.NoteTake(job is null ? Diagnostics.ProgramPrefetchTally.Take.NoJob : Diagnostics.ProgramPrefetchTally.Take.OtherBanks);
+            }
+
             return false;
         }
 
@@ -168,7 +179,17 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
         if (job.State != 1 || !job.Inputs.Equals(inputs) || !_concurrent.IsStillCurrent(job.Assumptions!))
         {
+            if (Diagnostics.ProgramPrefetchTally.Enabled)
+            {
+                Diagnostics.ProgramPrefetchTally.NoteTake(job.State != 1 ? Diagnostics.ProgramPrefetchTally.Take.Abandoned : !job.Inputs.Equals(inputs) ? Diagnostics.ProgramPrefetchTally.Take.InputsDiffer : Diagnostics.ProgramPrefetchTally.Take.Stale);
+            }
+
             return false;
+        }
+
+        if (Diagnostics.ProgramPrefetchTally.Enabled)
+        {
+            Diagnostics.ProgramPrefetchTally.NoteTake(Diagnostics.ProgramPrefetchTally.Take.Taken);
         }
 
         programs = job.Programs!;
@@ -194,12 +215,18 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             return;
         }
 
+        var started = Diagnostics.ProgramPrefetchTally.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         lock (_lock)
         {
             while (job.State == 0)
             {
                 Monitor.Wait(_lock);
             }
+        }
+
+        if (started != 0)
+        {
+            Diagnostics.ProgramPrefetchTally.NoteTakeWait(System.Diagnostics.Stopwatch.GetTimestamp() - started);
         }
     }
 
@@ -222,6 +249,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 }
 
                 job = _queue.Peek();
+                var gateStarted = Diagnostics.ProgramPrefetchTally.Enabled && job.Gate > Volatile.Read(ref _executedGate) ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 if (job.Gate > Volatile.Read(ref _executedGate))
                 {
                     // The gate usually opens within a few items: spin before sleeping.
@@ -254,6 +282,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 }
 
                 Volatile.Write(ref _sleepingOnGate, long.MaxValue);
+                if (gateStarted != 0)
+                {
+                    Diagnostics.ProgramPrefetchTally.NoteGateSleep(System.Diagnostics.Stopwatch.GetTimestamp() - gateStarted);
+                }
+
                 if (_stopping)
                 {
                     return;
@@ -263,7 +296,13 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                 _running = true;
             }
 
+            var resolveStarted = Diagnostics.ProgramPrefetchTally.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             Resolve(job);
+            if (resolveStarted != 0)
+            {
+                Diagnostics.ProgramPrefetchTally.NoteWorkerResolve(System.Diagnostics.Stopwatch.GetTimestamp() - resolveStarted);
+            }
+
             lock (_lock)
             {
                 _outstanding--;
