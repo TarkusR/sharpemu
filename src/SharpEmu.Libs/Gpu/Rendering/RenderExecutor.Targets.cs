@@ -30,26 +30,18 @@ public sealed partial class RenderExecutor
             return false;
         }
 
-        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        var layout = ResolveTargetLayout(banks);
+        for (var index = 0; index < layout.ColorCount; index++)
         {
-            if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
-            {
-                continue;
-            }
-
-            if (ColorTargetResolver.Resolve(context, slot, DrawLayerOffset, ignoreTargetMask: false, out var resolvedSlot) is not { } resolution)
-            {
-                continue;
-            }
-
+            ref readonly var resolution = ref layout.Colors[index];
             var request = resolution.Request;
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("color-request", $"slot={slot} address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");
             var image = _host.FindImage(ref request, exactFormat: false);
             _host.BindRenderTarget(image);
-            state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, resolvedSlot, image);
+            state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, layout.ColorSlots[index], image);
         }
 
-        if (DepthTargetResolver.Resolve(context, _host.FormatSupport, _host.Fatal) is { } depthTarget)
+        if (layout.Depth is { } depthTarget)
         {
             var request = depthTarget.Target.Request;
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("depth-request", $"address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");
@@ -58,7 +50,7 @@ public sealed partial class RenderExecutor
             state.Depth = new DepthAttachmentState(in depthTarget, image);
         }
 
-        state.PixelActive = HasActivePixelShader(banks);
+        state.PixelActive = layout.PixelActive;
         if (state.ColorCount == 0 && !state.Depth.HasTarget && !state.PixelActive &&
             VertexStageWritesMemory(banks, ref state))
         {
@@ -84,6 +76,42 @@ public sealed partial class RenderExecutor
         }
 
         return true;
+    }
+
+    private DrawResolution ResolveTargetLayout(RegisterBanks banks)
+    {
+        var resolution = _drawResolution;
+        var contextStamp = banks.Stamp(RegisterStamp.Context);
+        var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
+        if (resolution.TargetContextStamp == contextStamp && resolution.TargetProgramsStamp == programsStamp)
+        {
+            return resolution;
+        }
+
+        var context = banks.Context;
+        resolution.ColorCount = 0;
+        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        {
+            if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
+            {
+                continue;
+            }
+
+            if (ColorTargetResolver.Resolve(context, slot, DrawLayerOffset, ignoreTargetMask: false, out var resolvedSlot) is not { } color)
+            {
+                continue;
+            }
+
+            resolution.Colors[resolution.ColorCount] = color;
+            resolution.ColorSlots[resolution.ColorCount++] = resolvedSlot;
+        }
+
+        resolution.Depth = DepthTargetResolver.Resolve(context, _host.FormatSupport, _host.Fatal);
+        resolution.PixelActive = HasActivePixelShader(banks);
+        resolution.TargetContextStamp = contextStamp;
+        resolution.TargetProgramsStamp = programsStamp;
+        resolution.TargetVersion++;
+        return resolution;
     }
 
     // Whether the bound vertex (or emulated geometry) stage stores to a buffer or a

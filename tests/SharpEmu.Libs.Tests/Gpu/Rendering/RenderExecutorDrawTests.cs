@@ -949,9 +949,44 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("begin_rendering 64x64x1 colors=1 samples=1", _host.Calls);
 
         banks.Context.RenderTargetMask = 0xFF;
+        banks.MarkWritten(RegisterStamps.ContextBits);
         _executor.DrawIndexed(1, banks, Indexed(3));
         Assert.Contains("begin_rendering 32x32x1 colors=2 samples=1", _host.Calls);
         Assert.Contains("create_graphics_pipeline colors=2 depth=False topology=TriangleList restart=False", _pipelines.Calls);
+    }
+
+    [Fact]
+    public void TargetLayout_IsKeptUntilAContextRegisterIsWritten()
+    {
+        var banks = Banks(withDepth: true);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        var resolved = TargetLayoutVersion();
+
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        Assert.Equal(resolved, TargetLayoutVersion());
+        Assert.Equal(2, _host.Calls.Count(static call => call.StartsWith("begin_rendering 64x64x1 colors=1", StringComparison.Ordinal)));
+
+        banks.MarkWritten(RegisterStamps.ContextBits);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        Assert.Equal(resolved + 1, TargetLayoutVersion());
+    }
+
+    private uint TargetLayoutVersion() =>
+        ((DrawResolution)typeof(RenderExecutor).GetField("_drawResolution", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(_executor)!).TargetVersion;
+
+    [Fact]
+    public void TargetLayout_BelongsToItsBanks()
+    {
+        var first = Banks();
+        var second = Banks();
+        second.Context.ColorTargets[0] = RegisterWords.Color(SecondColorBase, 32, 32);
+        _executor.DrawIndexed(1, first, Indexed(3));
+        _executor.DrawIndexed(1, second, Indexed(3));
+        _executor.DrawIndexed(1, first, Indexed(3));
+
+        Assert.Equal(2, _host.Calls.Count(static call => call.StartsWith("begin_rendering 64x64x1", StringComparison.Ordinal)));
+        Assert.Single(_host.Calls, static call => call.StartsWith("begin_rendering 32x32x1", StringComparison.Ordinal));
     }
 
     [Fact]

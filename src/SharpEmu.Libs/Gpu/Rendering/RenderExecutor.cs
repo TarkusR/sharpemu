@@ -51,6 +51,7 @@ public sealed partial class RenderExecutor
     private static int _geometryWarningShown;
 
     private readonly IRenderHost _host;
+    private readonly DrawResolution _drawResolution = new();
     private readonly IShaderPipelineProvider _pipelines;
     private readonly bool _strictDrawResources;
     private readonly HashSet<(ulong ShaderHash, ImageType ImageType, ImageViewType ViewType)> _reportedDrawImageTypeMismatches = [];

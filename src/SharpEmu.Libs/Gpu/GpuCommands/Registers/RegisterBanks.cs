@@ -10,8 +10,8 @@ public sealed class RegisterBanks
 {
     private ContextRegisters? _savedContext;
     private uint? _savedCompositeDepthSizeXy;
+    private static long _writeSerial;
     private ulong[] _stamps = InitialStamps();
-    private ulong _writeSerial = 1;
 
     public RegisterBanks(Func<string, Exception> fatal)
         : this(fatal, new ContextRegisters(), new ShaderProgramRegisters(), new UserConfigRegisters())
@@ -47,15 +47,21 @@ public sealed class RegisterBanks
     {
         while (stampBits != 0)
         {
-            _stamps[System.Numerics.BitOperations.TrailingZeroCount(stampBits)] = ++_writeSerial;
+            _stamps[System.Numerics.BitOperations.TrailingZeroCount(stampBits)] = NextSerial();
             stampBits &= stampBits - 1;
         }
     }
 
+    private static ulong NextSerial() => (ulong)Interlocked.Increment(ref _writeSerial);
+
     private static ulong[] InitialStamps()
     {
         var stamps = new ulong[RegisterStamps.Count];
-        stamps.AsSpan().Fill(1);
+        for (var index = 0; index < stamps.Length; index++)
+        {
+            stamps[index] = NextSerial();
+        }
+
         return stamps;
     }
 
@@ -75,7 +81,6 @@ public sealed class RegisterBanks
             UserDataMarker = UserDataMarker,
             IndexTypeAndSize = IndexTypeAndSize,
             _stamps = (ulong[])_stamps.Clone(),
-            _writeSerial = _writeSerial,
         };
         return clone;
     }
