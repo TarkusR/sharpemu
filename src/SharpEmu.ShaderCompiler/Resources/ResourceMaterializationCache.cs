@@ -959,6 +959,19 @@ public sealed partial class ResourceMaterializationCache
         return null;
     }
 
+    public enum MaterializeOutcome { Failed, Hit, RebaseHit, TableRefresh, Volatile, BecameVolatile, FirstSighting, Miss, Uncacheable, Count }
+
+    private static readonly bool OutcomeTimingEnabled = Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE") == "1";
+    private static readonly long[] _outcomeCounts = new long[(int)MaterializeOutcome.Count];
+    private static readonly long[] _outcomeTicks = new long[(int)MaterializeOutcome.Count];
+    private static long _outcomeLookupTicks;
+    private static long _outcomeValidateTicks;
+    private static long _outcomeValidatedVariants;
+    private MaterializeOutcome _outcome;
+    private long _lookupTicks;
+    private long _validateTicks;
+    private long _validatedVariants;
+
     public bool Materialize(
         ShaderResourcePlan plan,
         ResourceRuntimeInputs inputs,
@@ -970,12 +983,45 @@ public sealed partial class ResourceMaterializationCache
         var timing = new MaterializationTiming(MissDiagnosticsEnabled);
         try
         {
-            return MaterializeCore(plan, inputs, residentReader, ref snapshot, ref specialization, out failure, ref timing);
+            if (!OutcomeTimingEnabled)
+            {
+                return MaterializeCore(plan, inputs, residentReader, ref snapshot, ref specialization, out failure, ref timing);
+            }
+
+            _outcome = MaterializeOutcome.Failed;
+            _validateTicks = 0;
+            _validatedVariants = 0;
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var result = MaterializeCore(plan, inputs, residentReader, ref snapshot, ref specialization, out failure, ref timing);
+            var outcome = result ? _outcome : MaterializeOutcome.Failed;
+            Interlocked.Increment(ref _outcomeCounts[(int)outcome]);
+            Interlocked.Add(ref _outcomeTicks[(int)outcome], System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            Interlocked.Add(ref _outcomeLookupTicks, _lookupTicks - started);
+            Interlocked.Add(ref _outcomeValidateTicks, _validateTicks);
+            Interlocked.Add(ref _outcomeValidatedVariants, _validatedVariants);
+            return result;
         }
         finally
         {
             timing.Complete(plan);
         }
+    }
+
+    public static string TakeOutcomeReport()
+    {
+        static string Ms(long ticks) => FormattableString.Invariant($"{ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
+        var parts = new List<string>();
+        for (var index = 0; index < (int)MaterializeOutcome.Count; index++)
+        {
+            var count = Interlocked.Exchange(ref _outcomeCounts[index], 0);
+            var ticks = Interlocked.Exchange(ref _outcomeTicks[index], 0);
+            if (count != 0)
+                parts.Add(FormattableString.Invariant($"{(MaterializeOutcome)index}={count}/{Ms(ticks)}ms"));
+        }
+
+        return FormattableString.Invariant($"[PERF][RESOURCE_OUTCOMES] lookup_ms={Ms(Interlocked.Exchange(ref _outcomeLookupTicks, 0))} ") +
+            FormattableString.Invariant($"validate_ms={Ms(Interlocked.Exchange(ref _outcomeValidateTicks, 0))} validated_variants={Interlocked.Exchange(ref _outcomeValidatedVariants, 0)} ") +
+            string.Join(" ", parts);
     }
 
     private bool MaterializeCore(
@@ -992,12 +1038,14 @@ public sealed partial class ResourceMaterializationCache
         var rebase = RebaseOf(drawKey, plan);
         var key = KeyOf(drawKey, inputs.UserData, learned, rebase.Active);
         var found = TryFind(key, plan, inputs, rebase.Active, out var cached);
+        _lookupTicks = OutcomeTimingEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         Entry? stale = null;
         (List<(int Buffer, uint Word)> Patches, ResourceSnapshot Snapshot, Entry From)? learning = null;
         if (found)
         {
             if (cached.VolatileLookups > 0)
             {
+                _outcome = MaterializeOutcome.Volatile;
                 cached.VolatileLookups--;
                 Interlocked.Increment(ref _totalVolatile);
                 return MaterializeUnrecorded(plan, inputs, ref snapshot, ref specialization, out failure);
@@ -1020,8 +1068,16 @@ public sealed partial class ResourceMaterializationCache
                     CountDiagnostic(Diagnostic.RefreshDescriptorSkipped);
                     continue;
                 }
-                if (Validate(variant, residentReader, rebase, inputs.UserData,
-                    out var variantUnreadable, out var descriptorChanged, out rejection))
+                var validateStarted = OutcomeTimingEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                var validated = Validate(variant, residentReader, rebase, inputs.UserData,
+                    out var variantUnreadable, out var descriptorChanged, out rejection);
+                if (validateStarted != 0)
+                {
+                    _validateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - validateStarted;
+                    _validatedVariants++;
+                }
+
+                if (validated)
                 {
                     if (previous is not null)
                     {
@@ -1030,6 +1086,7 @@ public sealed partial class ResourceMaterializationCache
                         Store(key, variant);
                     }
 
+                    _outcome = MaterializeOutcome.Hit;
                     variant.StaleLookups = 0;
                     variant.VolatilePeriod = 0;
                     Hits++;
@@ -1084,6 +1141,7 @@ public sealed partial class ResourceMaterializationCache
                         Store(key, refreshedFrom);
                     }
 
+                    _outcome = MaterializeOutcome.RebaseHit;
                     Hits++;
                     Interlocked.Increment(ref _totalHits);
                     snapshot = rebased;
@@ -1113,6 +1171,7 @@ public sealed partial class ResourceMaterializationCache
                         CountDiagnostic(Diagnostic.RefreshOlderVariant);
                     }
                     Store(key, refreshed);
+                    _outcome = MaterializeOutcome.TableRefresh;
                     TableRefreshes++;
                     Interlocked.Increment(ref _totalRefreshes);
                     snapshot = rebase.Apply(WithCurrentUserData(refreshed.Snapshot, inputs.UserData), inputs.UserData);
@@ -1129,6 +1188,7 @@ public sealed partial class ResourceMaterializationCache
                 Interlocked.Increment(ref _totalStaleUnreadable);
             if (_sightings is not null && ++cached.StaleLookups >= VolatileStaleLookups)
             {
+                _outcome = MaterializeOutcome.BecameVolatile;
                 cached.VolatilePeriod = Math.Clamp(cached.VolatilePeriod * 2, MinVolatilePeriod, MaxVolatilePeriod);
                 cached.VolatileLookups = cached.VolatilePeriod;
                 cached.StaleLookups = VolatileStaleLookups - 2;
@@ -1142,6 +1202,7 @@ public sealed partial class ResourceMaterializationCache
             ref var sighting = ref sightings[key & (SightingSlots - 1)];
             if (sighting != key)
             {
+                _outcome = MaterializeOutcome.FirstSighting;
                 sighting = key;
                 Interlocked.Increment(ref _totalFirstSightings);
                 return MaterializeUnrecorded(plan, inputs, ref snapshot, ref specialization, out failure);
@@ -1155,6 +1216,7 @@ public sealed partial class ResourceMaterializationCache
         }
 
         timing.ChangePhase(MaterializationPhase.Materialization);
+        _outcome = MaterializeOutcome.Miss;
         Misses++;
         RecordMiss(plan, key, found);
         Interlocked.Increment(ref _totalMisses);
@@ -1177,6 +1239,7 @@ public sealed partial class ResourceMaterializationCache
 
             if (recorder.Failed)
             {
+                _outcome = MaterializeOutcome.Uncacheable;
                 Uncacheable++;
                 Interlocked.Increment(ref _totalUncacheable);
                 return true;

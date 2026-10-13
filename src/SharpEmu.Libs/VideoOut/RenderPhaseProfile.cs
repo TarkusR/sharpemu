@@ -549,6 +549,7 @@ internal static class RenderPhaseProfile
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
+        Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeOutcomeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeAsyncReadbackReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Vulkan.GpuSyncProfile.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.ProgramPrefetchTally.TakeReport());
