@@ -179,6 +179,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly KeptUserData _vertexUserData = new();
     private readonly KeptUserData _pixelUserData = new();
     private readonly KeptVertexInput _vertexInput = new();
+    private readonly KeptPixelInput _pixelInput = new();
 
     private GraphicsPrograms GetGraphicsProgramsCore(
         RegisterBanks banks,
@@ -229,30 +230,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 RenderTrace.Write($"PixelDrawState shader=0x{pixelSource.Address:X16} hash=0x{pixelSource.Hash:X16} " +
                     $"user_data=[{string.Join(",", pixelSource.UserData.Select(word => $"{word:X8}"))}]");
             using var pixelProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PixelInputResolution);
-            var pixelProgram = _programs.Decode(pixelSource);
-            var attributes = GetPixelAttributes(pixelProgram);
-            attributeCount = attributes.Length == 0 ? 0 : attributes[^1] + 1;
-            var inputCount = shaderInterface.PixelInputControl & 0x3Fu;
-            if (inputCount == 0)
-            {
-                inputCount = Math.Min(attributeCount, MaxPixelInputs);
-            }
-
-            if (inputCount > MaxPixelInputs)
-            {
-                throw SubmissionScheduler.Fatal($"The pixel program declares too many interpolators: shader=0x{pixel.Address:X16} count={inputCount}.");
-            }
-
-            dropUnwritten = depthBound ||
-                LeavesSingleDualSourceTarget(context, targetExportMapping, pixelProgram.PixelColorExportMasks) ||
-                UnwrittenTargetBoundsRenderArea(context, targetExportMapping, pixelProgram.PixelColorExportMasks);
-            pixelOutputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null,
-                out var outputModes, out var outputMappings);
-            pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount,
-                InputSemantics(pixelHeader));
-            // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
-            // the vertex program must declare every location the pixel program reads.
-            attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(attributes, pixelInfo));
+            pixelInfo = PreparePixelInput(banks, pixelSource, pixelHeader, targetExportMapping, depthBound, _pixelInput,
+                out pixelOutputs, out attributeCount, out dropUnwritten);
             pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
         }
 
@@ -366,6 +345,73 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     // The vertex tables of the draw and the clip-space transform when clipping is off.
+    private PixelInputInfo PreparePixelInput(RegisterBanks banks, ShaderSource source, ShaderHeaderEntry header,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping, bool depthBound, KeptPixelInput kept, out Gen5PixelOutputBinding[] outputs,
+        out uint attributeCount, out bool dropUnwritten)
+    {
+        var key = new PixelInputKey(banks.Stamp(RegisterStamp.Context), header, source.Hash, Pack(targetExportMapping),
+            targetExportMapping.Length, depthBound);
+        if (kept.Info is { } info && kept.Key == key)
+        {
+            outputs = kept.Outputs;
+            attributeCount = kept.AttributeCount;
+            dropUnwritten = kept.DropUnwritten;
+            return info.WithoutStage();
+        }
+
+        var resolved = ResolvePixelInput(banks.Context, source, header, targetExportMapping, depthBound, out outputs, out attributeCount,
+            out dropUnwritten);
+        kept.Key = key;
+        kept.Info = resolved;
+        kept.Outputs = outputs;
+        kept.AttributeCount = attributeCount;
+        kept.DropUnwritten = dropUnwritten;
+        return resolved;
+    }
+
+    private PixelInputInfo ResolvePixelInput(ContextRegisters context, ShaderSource source, ShaderHeaderEntry header,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping, bool depthBound, out Gen5PixelOutputBinding[] outputs, out uint attributeCount,
+        out bool dropUnwritten)
+    {
+        var shaderInterface = context.ShaderInterface;
+        var pixelProgram = _programs.Decode(source);
+        var attributes = GetPixelAttributes(pixelProgram);
+        attributeCount = attributes.Length == 0 ? 0 : attributes[^1] + 1;
+        var inputCount = shaderInterface.PixelInputControl & 0x3Fu;
+        if (inputCount == 0)
+        {
+            inputCount = Math.Min(attributeCount, MaxPixelInputs);
+        }
+
+        if (inputCount > MaxPixelInputs)
+        {
+            throw SubmissionScheduler.Fatal($"The pixel program declares too many interpolators: shader=0x{source.Address:X16} count={inputCount}.");
+        }
+
+        dropUnwritten = depthBound ||
+            LeavesSingleDualSourceTarget(context, targetExportMapping, pixelProgram.PixelColorExportMasks) ||
+            UnwrittenTargetBoundsRenderArea(context, targetExportMapping, pixelProgram.PixelColorExportMasks);
+        outputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null,
+            out var outputModes, out var outputMappings);
+        var info = PixelStageInputResolver.Resolve(_context, source.Registered, shaderInterface, outputModes, outputMappings, inputCount,
+            InputSemantics(header));
+        // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
+        // the vertex program must declare every location the pixel program reads.
+        attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(attributes, info));
+        return info;
+    }
+
+    private static ulong Pack(ReadOnlySpan<ColorComponentMap> mappings)
+    {
+        var packed = 0ul;
+        for (var index = 0; index < mappings.Length && index < sizeof(ulong); index++)
+        {
+            packed |= (ulong)mappings[index].Packed << (index * 8);
+        }
+
+        return packed;
+    }
+
     private VertexInputInfo PrepareVertexInput(ShaderSource source, ShaderHeaderEntry header, ShaderInterfaceRegisters shaderInterface,
         ContextRegisters context, KeptVertexInput kept)
     {
@@ -1224,3 +1270,20 @@ internal sealed class KeptVertexInput
     public ClipSpaceTransform ClipSpace;
     public VertexInputInfo? Info;
 }
+
+internal sealed class KeptPixelInput
+{
+    public PixelInputKey Key;
+    public PixelInputInfo? Info;
+    public Gen5PixelOutputBinding[] Outputs = [];
+    public uint AttributeCount;
+    public bool DropUnwritten;
+}
+
+internal readonly record struct PixelInputKey(
+    ulong ContextStamp,
+    ShaderHeaderEntry? Header,
+    ulong Hash,
+    ulong ExportMappings,
+    int ExportMappingCount,
+    bool DepthBound);

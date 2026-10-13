@@ -117,6 +117,22 @@ public sealed class KeptStageInputsTests : IDisposable
     }
 
     [Fact]
+    public void PixelInput_IsKeptUntilAContextRegisterIsWritten()
+    {
+        var first = PixelLookup();
+        var second = PixelLookup();
+        SetKillEnable(true);
+        var changed = PixelLookup();
+
+        Assert.NotSame(first, second);
+        Assert.Same(first.InterpolatorSettings, second.InterpolatorSettings);
+        Assert.True(second.Stage.IsValid);
+        Assert.False(second.KillEnable);
+        Assert.NotSame(first.InterpolatorSettings, changed.InterpolatorSettings);
+        Assert.True(changed.KillEnable);
+    }
+
+    [Fact]
     public void VertexInput_IsKeptWhileItsTablesHoldTheSameWords()
     {
         var first = Lookup();

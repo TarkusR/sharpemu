@@ -239,6 +239,13 @@ public sealed class PixelInputInfo
     public ShaderStageResources Stage { get; set; }
 
     public bool PositionXY => PositionX && PositionY;
+
+    public PixelInputInfo WithoutStage()
+    {
+        var copy = (PixelInputInfo)MemberwiseClone();
+        copy.Stage = default;
+        return copy;
+    }
 }
 
 public sealed class ComputeInputInfo
