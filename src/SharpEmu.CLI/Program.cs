@@ -31,6 +31,16 @@ internal static partial class Program
     private const int STARTF_USESTDHANDLES = 0x00000100;
     private const uint HANDLE_FLAG_INHERIT = 0x00000001;
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
+    private const string YoungGenerationSizeEnvironment = "DOTNET_GCgen0size";
+    private const string YoungGenerationSize = "10000000";
+    private const string SurvivorGenerationBudgetEnvironment = "DOTNET_GCGen1MaxBudget";
+    private const string SurvivorGenerationBudget = "8000000";
+    private static readonly (string Name, string Value)[] ServerGarbageCollector =
+    [
+        ("DOTNET_gcServer", "1"),
+        ("DOTNET_GCHeapCount", "4"),
+        ("DOTNET_GCNoAffinitize", "1"),
+    ];
     private const int ATTACH_PARENT_PROCESS = -1;
     private const int STD_INPUT_HANDLE = -10;
     private const int STD_OUTPUT_HANDLE = -11;
@@ -90,6 +100,23 @@ internal static partial class Program
         }
 
         args = NormalizeInternalArguments(args, out var isMitigatedChild);
+        if (!isMitigatedChild && Environment.GetEnvironmentVariable(YoungGenerationSizeEnvironment) is null)
+        {
+            Environment.SetEnvironmentVariable(YoungGenerationSizeEnvironment, YoungGenerationSize);
+        }
+
+        if (!isMitigatedChild && Environment.GetEnvironmentVariable(SurvivorGenerationBudgetEnvironment) is null)
+        {
+            Environment.SetEnvironmentVariable(SurvivorGenerationBudgetEnvironment, SurvivorGenerationBudget);
+        }
+
+        foreach (var (name, value) in ServerGarbageCollector)
+        {
+            if (!isMitigatedChild && Environment.GetEnvironmentVariable(name) is null)
+            {
+                Environment.SetEnvironmentVariable(name, value);
+            }
+        }
 
         if (args.Length == 0)
         {
