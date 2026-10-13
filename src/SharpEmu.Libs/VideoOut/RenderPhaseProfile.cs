@@ -339,6 +339,41 @@ internal static class RenderPhaseProfile
     [ThreadStatic] private static Phase _current;
     [ThreadStatic] private static long _lastTimestamp;
     [ThreadStatic] private static int _scopeDepth;
+    [ThreadStatic] private static long[]? _threadTicks;
+    [ThreadStatic] private static long[]? _threadEntries;
+
+    private static readonly long[] _workerTicks = new long[(int)Phase.Count];
+    private static readonly long[] _workerEntries = new long[(int)Phase.Count];
+
+    internal static void AttachResolveWorker()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        _threadTicks = _workerTicks;
+        _threadEntries = _workerEntries;
+        _current = Phase.IdleNoQueuedWork;
+        _lastTimestamp = Stopwatch.GetTimestamp();
+        _scopeDepth = 1;
+    }
+
+    internal static void ReportResolveWorker(double seconds, long frames)
+    {
+        var parts = new List<string>();
+        for (var index = 0; index < (int)Phase.Count; index++)
+        {
+            var ticks = Interlocked.Exchange(ref _workerTicks[index], 0);
+            var entries = Interlocked.Exchange(ref _workerEntries[index], 0);
+            if (ticks > 0)
+            {
+                parts.Add(FormattableString.Invariant($"{(Phase)index}={ticks * 1000.0 / Stopwatch.Frequency:F2}ms/n{entries}"));
+            }
+        }
+
+        Console.Error.WriteLine(FormattableString.Invariant($"[PERF][RESOLVE_MS] window_s={seconds:F1} frames={frames} ") + string.Join(" ", parts));
+    }
 
     internal readonly ref struct Scope
     {
@@ -371,7 +406,14 @@ internal static class RenderPhaseProfile
             }
 
             Charge(phase);
-            _entries[(int)phase]++;
+            if (_threadEntries is { } threadEntries)
+            {
+                Interlocked.Increment(ref threadEntries[(int)phase]);
+            }
+            else
+            {
+                _entries[(int)phase]++;
+            }
         }
     }
 
@@ -384,7 +426,15 @@ internal static class RenderPhaseProfile
 
         var previous = Charge(phase);
         _scopeDepth++;
-        _entries[(int)phase]++;
+        if (_threadEntries is { } threadEntries)
+        {
+            Interlocked.Increment(ref threadEntries[(int)phase]);
+        }
+        else
+        {
+            _entries[(int)phase]++;
+        }
+
         return new Scope(previous);
     }
 
@@ -405,8 +455,16 @@ internal static class RenderPhaseProfile
         var previous = _current;
         if (_lastTimestamp != 0)
         {
-            _ticks[(int)previous] += now - _lastTimestamp;
-            if (FrameTraceEnabled)
+            if (_threadTicks is { } threadTicks)
+            {
+                Interlocked.Add(ref threadTicks[(int)previous], now - _lastTimestamp);
+            }
+            else
+            {
+                _ticks[(int)previous] += now - _lastTimestamp;
+            }
+
+            if (FrameTraceEnabled && _threadTicks is null)
             {
                 _framePhaseTicks[(int)previous] += now - _lastTimestamp;
             }
@@ -494,6 +552,7 @@ internal static class RenderPhaseProfile
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeAsyncReadbackReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Vulkan.GpuSyncProfile.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.ProgramPrefetchTally.TakeReport());
+        ReportResolveWorker(seconds, frames);
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeLookupReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeDccReport());
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializationProfile.WriteReport();

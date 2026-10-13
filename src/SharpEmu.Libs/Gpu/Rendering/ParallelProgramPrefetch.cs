@@ -233,6 +233,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private void Run()
     {
         SubmissionScheduler.ThrowOnFatal = true;
+        VideoOut.RenderPhaseProfile.AttachResolveWorker();
         while (true)
         {
             Job job;
@@ -315,6 +316,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private void Resolve(Job job)
     {
+        using var profile = VideoOut.RenderPhaseProfile.Measure(VideoOut.RenderPhaseProfile.Phase.DrawProgramResolution);
         _concurrent.BeginConcurrentResolve();
         try
         {
