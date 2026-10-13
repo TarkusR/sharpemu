@@ -821,6 +821,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
                 // The buffers' copies are collected as the sweep visits them and staged when it ends.
                 _sweepActive = true;
+                _inDeviceAddressSweep = true;
                 try
                 {
                     if (_bdaSweepPlan is { } plan && _bufferPages.Complete)
@@ -840,7 +841,15 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 finally
                 {
                     _sweepActive = false;
-                    FlushSweepUploads();
+                    try
+                    {
+                        FlushSweepUploads();
+                    }
+                    finally
+                    {
+                        _inDeviceAddressSweep = false;
+                        CloseSweepBarrier();
+                    }
                 }
 
                 _bdaSweepEpoch = epoch;
@@ -855,6 +864,49 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
+    private bool _inDeviceAddressSweep;
+    private CommandBuffer _sweepBarrierBuffer;
+
+    private void OpenSweepBarrier(CommandBuffer native)
+    {
+        if (_sweepBarrierBuffer.Handle == native.Handle)
+        {
+            return;
+        }
+
+        CloseSweepBarrier();
+        _sweepBarrierBuffer = native;
+        RecordSweepBarrier(native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit,
+            AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit | AccessFlags2.TransferReadBit | AccessFlags2.TransferWriteBit,
+            AccessFlags2.TransferWriteBit);
+    }
+
+    private void CloseSweepBarrier()
+    {
+        if (_sweepBarrierBuffer.Handle == 0)
+        {
+            return;
+        }
+
+        _sweepBarrierBuffer = default;
+        var current = _scheduler.Current;
+        current.EndRendering();
+        RecordSweepBarrier(new CommandBuffer(current.Handle), PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit,
+            AccessFlags2.TransferWriteBit, AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit);
+    }
+
+    private void RecordSweepBarrier(CommandBuffer native, PipelineStageFlags sourceStages, PipelineStageFlags destinationStages,
+        AccessFlags2 sourceAccess, AccessFlags2 destinationAccess)
+    {
+        var barrier = new MemoryBarrier2
+        {
+            SType = StructureType.MemoryBarrier2,
+            SrcAccessMask = sourceAccess,
+            DstAccessMask = destinationAccess,
+        };
+        VulkanSynchronization.PipelineBarrier(_device.Vk, native, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null);
+    }
+
     private long _bdaSweepEpoch = -1;
     private ulong _bdaSweepMapping;
     private GuestPageTracker.SweepPlan? _bdaSweepPlan;
@@ -2350,6 +2402,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         command.EndRendering();
         var native = new CommandBuffer(command.Handle);
         var vk = _device.Vk;
+        var sweep = _inDeviceAddressSweep;
         var before = new BufferMemoryBarrier2
         {
             SType = StructureType.BufferMemoryBarrier2,
@@ -2361,20 +2414,31 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             Offset = 0,
             Size = buffer.Size,
         };
-        VulkanSynchronization.PipelineBarrier(vk,
-            native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
-            0, null, 1, &before, 0, null);
+        if (sweep)
+        {
+            OpenSweepBarrier(native);
+        }
+        else
+        {
+            VulkanSynchronization.PipelineBarrier(vk,
+                native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
+                0, null, 1, &before, 0, null);
+        }
+
         fixed (BufferCopy* pointer = regions)
         {
             vk.CmdCopyBuffer(native, source.Handle, buffer.Handle, (uint)regions.Length, pointer);
         }
 
-        var after = before;
-        after.SrcAccessMask = AccessFlags2.TransferWriteBit;
-        after.DstAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit;
-        VulkanSynchronization.PipelineBarrier(vk,
-            native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
-            0, null, 1, &after, 0, null);
+        if (!sweep)
+        {
+            var after = before;
+            after.SrcAccessMask = AccessFlags2.TransferWriteBit;
+            after.DstAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit;
+            VulkanSynchronization.PipelineBarrier(vk,
+                native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
+                0, null, 1, &after, 0, null);
+        }
     }
 
     private bool SynchronizeTexelFromImage(GpuBuffer buffer, ulong guestAddress, ulong size)
