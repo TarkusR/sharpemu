@@ -459,6 +459,7 @@ internal static partial class VulkanVideoPresenter
 
         private void Run()
         {
+            SharpEmu.HLE.Host.HostLaneReservation.ApplyToFrontEndThread();
             try
             {
                 var lastProgress = Stopwatch.GetTimestamp();
