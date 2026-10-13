@@ -81,6 +81,12 @@ public sealed partial class GuestImageCache
             return;
         }
 
+        if (image.Parked)
+        {
+            image.Parked = false;
+            _parked.Remove(imageIdentifier);
+        }
+
         if (!image.DepthOwner.IsValid)
         {
             var associations = new List<ResourceSlotIdentifier>();
@@ -140,6 +146,82 @@ public sealed partial class GuestImageCache
         }
 
         DeleteImage(imageIdentifier);
+    }
+
+    private void ParkOrReleaseImage(ResourceSlotIdentifier imageIdentifier)
+    {
+        var image = _slots[imageIdentifier];
+        var park = !image.Parked && image.IsGpuModified && !image.IsBufferModified && !image.IsCpuDirty &&
+            !image.DepthOwner.IsValid && image.Description.Samples <= 1;
+        if (!park)
+        {
+            ReleaseImage(imageIdentifier);
+            return;
+        }
+
+        image.Parked = true;
+        image.ParkedTick = _collectionTick;
+        _parked.Add(imageIdentifier);
+        InvalidateLookups();
+    }
+
+    private bool TryUnparkImage(in ImageDescription requested, out ResourceSlotIdentifier result)
+    {
+        result = ResourceSlotIdentifier.Invalid;
+        for (var index = _parked.Count - 1; index >= 0; index--)
+        {
+            var imageIdentifier = _parked[index];
+            var image = _slots.TryGet(imageIdentifier);
+            if (image == null || !image.Registered || !image.Parked)
+            {
+                _parked.RemoveAt(index);
+                continue;
+            }
+
+            if (!HasSameBacking(image.Description, requested, exactFormat: true) || image.Description.Resources != requested.Resources ||
+                image.Description.Type != requested.Type)
+            {
+                continue;
+            }
+
+            if (image.IsCpuDirty || image.IsBufferModified)
+            {
+                continue;
+            }
+
+            _parked.RemoveAt(index);
+            image.Parked = false;
+            image.LastAccessTick = _scheduler.CurrentTick;
+            TouchImage(image);
+            InvalidateLookups();
+            result = imageIdentifier;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ExpireParkedImages(ulong tick)
+    {
+        for (var index = _parked.Count - 1; index >= 0; index--)
+        {
+            var imageIdentifier = _parked[index];
+            var image = _slots.TryGet(imageIdentifier);
+            if (image == null || !image.Registered || !image.Parked)
+            {
+                _parked.RemoveAt(index);
+                continue;
+            }
+
+            if (tick - Math.Min(tick, image.ParkedTick) <= ParkedFramesBeforeRemoval && _parked.Count <= ParkedImageLimit)
+            {
+                continue;
+            }
+
+            _parked.RemoveAt(index);
+            image.Parked = false;
+            ReleaseImage(imageIdentifier);
+        }
     }
 
     private void TouchImage(CachedImage image)
@@ -324,7 +406,7 @@ public sealed partial class GuestImageCache
     }
 
     // Caller holds the lock; the query epoch marks each image once per query.
-    private ImageQueryResults FindImagesInRange(ulong address, ulong size, bool pageOverlap)
+    private ImageQueryResults FindImagesInRange(ulong address, ulong size, bool pageOverlap, bool includeParked = false)
     {
         var result = new ImageQueryResults();
         if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive))
@@ -351,7 +433,7 @@ public sealed partial class GuestImageCache
             {
                 var imageIdentifier = owners[ownerIndex];
                 var image = _slots.TryGet(imageIdentifier);
-                if (image == null || image.QueryEpoch == queryEpoch)
+                if (image == null || image.QueryEpoch == queryEpoch || (image.Parked && !includeParked))
                 {
                     continue;
                 }
@@ -442,7 +524,7 @@ public sealed partial class GuestImageCache
         var pageBegin = address & ~(TrackerLayout.PageBytes - 1);
         var pageEnd = (address + size + TrackerLayout.PageBytes - 1) & ~(TrackerLayout.PageBytes - 1);
         var covered = false;
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true, includeParked: true))
         {
             var owner = _slots.TryGet(imageIdentifier);
             if (owner == null)
@@ -499,10 +581,21 @@ public sealed partial class GuestImageCache
         if (ImageClearTrace.Enabled)
             _metadataHistory.RecordRange(CreateMetadataEvent("gpu-write-notification", address, size));
         RecordResourceHistory("gpu-buffer-write-notification", address, size);
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        var found = new List<ResourceSlotIdentifier>();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true, includeParked: true))
+        {
+            found.Add(imageIdentifier);
+        }
+
+        foreach (var imageIdentifier in found)
         {
             var image = _slots[imageIdentifier];
             if (!image.Overlaps(address, size))
+            {
+                continue;
+            }
+
+            if (image.IsGpuModified && IsNestedAliasWrite(image, found, address, size))
             {
                 continue;
             }
@@ -644,7 +737,7 @@ public sealed partial class GuestImageCache
 
         using var held = _lock.Hold();
         RecordResourceHistory("gpu-buffer-write-notification", address, size);
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true, includeParked: true))
         {
             var image = _slots[imageIdentifier];
             if (image.DepthOwner.IsValid || !image.Overlaps(address, size))
@@ -660,6 +753,28 @@ public sealed partial class GuestImageCache
 
             image.MarkBufferModified();
         }
+    }
+
+    private bool IsNestedAliasWrite(CachedImage image, List<ResourceSlotIdentifier> found, ulong address, ulong size)
+    {
+        var outer = image.Description.Data;
+        foreach (var otherIdentifier in found)
+        {
+            var other = _slots[otherIdentifier];
+            if (ReferenceEquals(other, image))
+            {
+                continue;
+            }
+
+            var inner = other.Description.Data;
+            if (inner.Size < outer.Size && inner.Address >= outer.Address && inner.Address + inner.Size <= outer.Address + outer.Size &&
+                address >= inner.Address && address + size <= inner.Address + inner.Size)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public ImageRegionInfo QueryRegion(ulong address, ulong size)
@@ -734,7 +849,7 @@ public sealed partial class GuestImageCache
             _surfaceMetadata.Remove(metadataAddress);
         }
 
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false, includeParked: true))
         {
             var owner = _slots.TryGet(imageIdentifier);
             if (owner == null)

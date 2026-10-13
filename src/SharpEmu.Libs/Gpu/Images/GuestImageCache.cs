@@ -17,6 +17,9 @@ namespace SharpEmu.Libs.Gpu.Images;
 public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestImageStore, IDisposable
 {
     private const ulong TicksBeforeRemoval = 32;
+    private const ulong ParkedFramesBeforeRemoval = 8;
+    private const int ParkedImageLimit = 64;
+    private readonly List<ResourceSlotIdentifier> _parked = new();
     private const ulong MiB = 1024 * 1024;
 
     private readonly GpuDeviceInfo _device;
@@ -281,7 +284,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             if (exactMatch) _exactImageMatches++;
             else _overlapImageMatches++;
         }
-        if (!result.IsValid)
+        if (!result.IsValid && !TryUnparkImage(request.Description, out result))
         {
             if (RenderPhaseProfile.Enabled)
             {

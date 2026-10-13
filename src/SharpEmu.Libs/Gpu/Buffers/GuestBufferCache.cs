@@ -468,6 +468,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         var (destination, destinationOffset) = ObtainBuffer(guestAddress, size, true, true, bufferIdentifier);
         destination.Fill(destinationOffset, size, value);
+        if (size >= 0x10000 && images.TryClearImageFromBuffer(guestAddress, size, value))
+        {
+            return;
+        }
+
         if ((publishFill || images.OverlapsDccMetadata(guestAddress, size)) && TryWriteFillToBacking(guestAddress, size, value))
         {
             _gpuModifiedRanges.Remove(guestAddress, size);

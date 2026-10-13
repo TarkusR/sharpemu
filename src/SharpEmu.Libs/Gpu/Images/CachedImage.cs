@@ -85,6 +85,8 @@ public sealed unsafe partial class CachedImage : IDisposable
     public ResourceSlotIdentifier DepthOwner;
     public ulong LastAccessTick;
     public int RecencyEntryIndex;
+    public bool Parked;
+    public ulong ParkedTick;
 
     public CachedImage(GpuDeviceInfo device, SubmissionScheduler scheduler, IGuestBackedSpace guestBacking, in ImageDescription description,
         ImageBackingPool? pool = null, Action? reportAllocationFailure = null)

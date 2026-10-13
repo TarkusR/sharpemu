@@ -919,7 +919,7 @@ public sealed unsafe partial class GuestImageCache
         using var held = _lock.Hold();
         var selected = ResourceSlotIdentifier.Invalid;
         ImageAspectFlags aspect = 0;
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false, includeParked: true))
         {
             var owner = _slots.TryGet(imageIdentifier);
             if (owner == null)

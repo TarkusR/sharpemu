@@ -485,7 +485,7 @@ public sealed partial class GuestImageCache
             {
                 if (safeToDelete)
                 {
-                    ReleaseImage(cachedImageIdentifier);
+                    ParkOrReleaseImage(cachedImageIdentifier);
                 }
 
                 return new OverlapResolution(mergedImageIdentifier);
@@ -559,7 +559,7 @@ public sealed partial class GuestImageCache
 
         if (requested.Data.Address >= cachedInfo.Data.Address && safeToDelete)
         {
-            ReleaseImage(cachedImageIdentifier);
+            ParkOrReleaseImage(cachedImageIdentifier);
         }
 
         return new OverlapResolution(mergedImageIdentifier);

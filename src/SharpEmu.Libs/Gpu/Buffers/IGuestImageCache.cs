@@ -28,4 +28,6 @@ public interface IGuestImageCache
     void InvalidateMemoryCopiesFromGpu(ulong address, ulong size) { }
 
     bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size);
+
+    bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear);
 }
