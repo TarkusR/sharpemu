@@ -23,6 +23,9 @@ public static partial class Gen5ShaderTranslator
     private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
     private const uint NullScalarRegister = 125;
     private static readonly ConditionalWeakTable<object, FusedProgramRegistry> _fusedProgramsByMemory = new();
+    private static long _fusedProgramRegistrations;
+
+    public static long FusedProgramRegistrations => Interlocked.Read(ref _fusedProgramRegistrations);
 
     private sealed class FusedProgramRegistry
     {
@@ -96,6 +99,7 @@ public static partial class Gen5ShaderTranslator
             entryHeaderAddress,
             continuationAddress,
             continuationHeaderAddress));
+        Interlocked.Increment(ref _fusedProgramRegistrations);
     }
 
     public static bool UnregisterFusedProgram(CpuContext ctx, ulong entryAddress)

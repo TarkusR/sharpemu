@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
@@ -32,6 +33,28 @@ public sealed record RegisteredShader(
 // The two code objects the guest joined into one program; the entry ends in a jump to the continuation.
 public readonly record struct FusedProgramParts(ulong ContinuationAddress, ulong ContinuationHeaderAddress);
 
+internal sealed class ShaderHeaderEntry
+{
+    public ShaderHeaderEntry(RegisteredShader shader, long registrations)
+    {
+        Shader = shader;
+        Registrations = registrations;
+        CodeRanges = shader.CodeRanges;
+    }
+
+    public RegisteredShader Shader { get; }
+
+    public long Registrations { get; }
+
+    public (ulong Address, uint SizeBytes)[] CodeRanges { get; }
+
+    public VertexTableMetadata? VertexTables { get; set; }
+
+    public bool InputSemanticsRead { get; set; }
+
+    public uint[]? InputSemantics { get; set; }
+}
+
 // Resolves the header the guest registered for a code address; a missing header stops the draw.
 public sealed class ShaderHeaderRegistry
 {
@@ -44,6 +67,8 @@ public sealed class ShaderHeaderRegistry
     private readonly CpuContext _context;
     private readonly Func<ulong, ulong> _headerOf;
     private readonly Func<ulong, FusedProgramParts?> _fusedPartsOf;
+    private readonly Dictionary<ulong, ShaderHeaderEntry> _entries = new();
+    private static long _registrations;
 
     public ShaderHeaderRegistry(CpuContext context, Func<ulong, ulong> headerOf, Func<ulong, FusedProgramParts?> fusedPartsOf)
     {
@@ -74,7 +99,24 @@ public sealed class ShaderHeaderRegistry
         return ranges.ToArray();
     }
 
-    public RegisteredShader Require(ulong codeAddress, string label)
+    public static void NoteRegistration() => Interlocked.Increment(ref _registrations);
+
+    public RegisteredShader Require(ulong codeAddress, string label) => RequireEntry(codeAddress, label).Shader;
+
+    internal ShaderHeaderEntry RequireEntry(ulong codeAddress, string label)
+    {
+        var registrations = Interlocked.Read(ref _registrations) + Gen5ShaderTranslator.FusedProgramRegistrations;
+        if (_entries.TryGetValue(codeAddress, out var entry) && entry.Registrations == registrations)
+        {
+            return entry;
+        }
+
+        entry = new ShaderHeaderEntry(Read(codeAddress, label), registrations);
+        _entries[codeAddress] = entry;
+        return entry;
+    }
+
+    private RegisteredShader Read(ulong codeAddress, string label)
     {
         var headerAddress = _headerOf(codeAddress);
         if (headerAddress == 0)

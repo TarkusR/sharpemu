@@ -186,10 +186,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         }
 
         public GraphicsPrograms GetGraphicsPrograms(
-            VertexStageRegisters vertex,
-            PixelStageRegisters pixel,
-            ShaderInterfaceRegisters shaderInterface,
-            ContextRegisters context,
+            RegisterBanks banks,
             ReadOnlySpan<ColorComponentMap> targetExportMapping,
             bool pixelActive,
             bool depthBound)

@@ -98,8 +98,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             };
         }
         var mappings = Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray();
-        GraphicsPrograms Prepare() => cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
-            banks.Context.ShaderInterface, banks.Context, mappings, pixelActive: true, depthBound: false);
+        GraphicsPrograms Prepare() => cache.GetGraphicsPrograms(banks, mappings, pixelActive: true, depthBound: false);
         Assert.True(Prepare().Available);
         var outputs = guest.Compiler.Requests[0].PixelOutputs;
         Assert.Equal(enabled && !bypass ? 2 : 1, outputs.Count);
@@ -134,8 +133,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         banks.Shader.Vertex.ExportAddress = vertexAddress;
         banks.Shader.Pixel.Address = pixelAddress;
         var mappings = Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray();
-        GraphicsPrograms Prepare() => cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
-            banks.Context.ShaderInterface, banks.Context, mappings, pixelActive: true, depthBound: false);
+        GraphicsPrograms Prepare() => cache.GetGraphicsPrograms(banks, mappings, pixelActive: true, depthBound: false);
         Gen5PixelOutputBinding LastOutput() => Assert.Single(guest.Compiler.Requests
             .Last(request => request.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel).PixelOutputs);
 
@@ -174,8 +172,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 2;
         banks.UserConfig.GeometryEngineControl.PrimitiveGroupSize = 8;
         banks.UserConfig.GeometryEngineControl.VertexGroupSize = 24;
-        GraphicsPrograms Prepare() => cache.GetMeshGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
-            banks.Context.ShaderInterface, banks.Context, banks.UserConfig, [], pixelActive: false, depthBound: false);
+        GraphicsPrograms Prepare() => cache.GetMeshGraphicsPrograms(banks, banks.UserConfig, [], pixelActive: false, depthBound: false);
 
         var first = Prepare().VertexInput.Stage;
         Assert.Equal(0u, first.Program!.UserDataBase);
@@ -242,8 +239,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         banks.UserConfig.GeometryEngineControl.VertexGroupSize = 24;
         var mapping = Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray();
 
-        GraphicsPrograms Prepare() => cache.GetMeshGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
-            banks.Context.ShaderInterface, banks.Context, banks.UserConfig, mapping, pixelActive: true, depthBound);
+        GraphicsPrograms Prepare() => cache.GetMeshGraphicsPrograms(banks, banks.UserConfig, mapping, pixelActive: true, depthBound);
         if (limit is "components")
         {
             var error = Assert.Throws<SchedulerFatalException>(() => Prepare());
@@ -283,7 +279,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 
         public List<GraphicsPipelineDescription> Descriptions { get; } = new();
 
-        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => Graphics;
+        public GraphicsPrograms GetGraphicsPrograms(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => Graphics;
 
         public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram)
         {
@@ -562,7 +558,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     {
         private readonly GraphicsPrograms _programs = Programs();
 
-        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => _programs;
+        public GraphicsPrograms GetGraphicsPrograms(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => _programs;
 
         public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram) =>
             cache.CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram);

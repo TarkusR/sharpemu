@@ -114,18 +114,9 @@ public sealed partial class RenderExecutor
                 userConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleList;
             }
 
-            return _pipelines.GetMeshGraphicsPrograms(
-                banks.Shader.Vertex, banks.Shader.Pixel, context.ShaderInterface, context,
-                userConfig, inputs.Mapping, inputs.PixelActive, inputs.DepthBound);
+            return _pipelines.GetMeshGraphicsPrograms(banks, userConfig, inputs.Mapping, inputs.PixelActive, inputs.DepthBound);
         }
 
-        return _pipelines.GetGraphicsPrograms(
-            banks.Shader.Vertex,
-            banks.Shader.Pixel,
-            context.ShaderInterface,
-            context,
-            inputs.Mapping,
-            inputs.PixelActive,
-            inputs.DepthBound);
+        return _pipelines.GetGraphicsPrograms(banks, inputs.Mapping, inputs.PixelActive, inputs.DepthBound);
     }
 }

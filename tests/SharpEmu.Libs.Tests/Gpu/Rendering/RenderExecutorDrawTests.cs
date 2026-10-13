@@ -57,6 +57,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
         var snapshot = banks.Snapshot();
         banks.PrepareContextWrite();
         banks.Context.DepthCountControl = 1;
+        banks.MarkWritten(RegisterStamps.ContextBits);
 
         _executor.DrawAuto(1, snapshot, Auto(3));
         _executor.DrawAuto(2, banks, Auto(3));

@@ -35,7 +35,7 @@ public sealed partial class RenderExecutor
         {
             ref readonly var resolution = ref layout.Colors[index];
             var request = resolution.Request;
-            if (MeshDrawTrace.Active) MeshDrawTrace.Write("color-request", $"slot={slot} address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("color-request", $"slot={layout.ColorSlots[index]} address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");
             var image = _host.FindImage(ref request, exactFormat: false);
             _host.BindRenderTarget(image);
             state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, layout.ColorSlots[index], image);

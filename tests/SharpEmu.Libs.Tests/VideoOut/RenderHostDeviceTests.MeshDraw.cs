@@ -109,8 +109,7 @@ public sealed unsafe partial class RenderHostDeviceTests
     {
         public bool MeshShadersSupported => true;
 
-        public GraphicsPrograms GetMeshGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel,
-            ShaderInterfaceRegisters shaderInterface, ContextRegisters context, UserConfigRegisters userConfig,
+        public GraphicsPrograms GetMeshGraphicsPrograms(RegisterBanks banks, UserConfigRegisters userConfig,
             ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound)
         {
             var instructions = new List<Gen5ShaderInstruction>();
@@ -168,8 +167,7 @@ public sealed unsafe partial class RenderHostDeviceTests
             };
         }
 
-        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel,
-            ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        public GraphicsPrograms GetGraphicsPrograms(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping,
             bool pixelActive, bool depthBound) => throw new InvalidOperationException("The test requires mesh programs.");
 
         public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth,

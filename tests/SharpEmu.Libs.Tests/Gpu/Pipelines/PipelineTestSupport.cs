@@ -239,6 +239,7 @@ internal sealed class PipelineTestGuest
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan((int)InputSemanticsCountOffset), inputSemanticsCount);
         Write(headerAddress, header);
         _headers[codeAddress] = headerAddress;
+        ShaderHeaderRegistry.NoteRegistration();
     }
 
     public void Write(ulong address, byte[] bytes)

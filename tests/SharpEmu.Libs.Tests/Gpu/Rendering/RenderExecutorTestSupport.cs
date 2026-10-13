@@ -486,10 +486,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     public bool MeshDepthBound { get; private set; }
 
     public GraphicsPrograms GetMeshGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         UserConfigRegisters userConfig,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
@@ -514,10 +511,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     public List<ColorComponentMap[]> ExportMappings { get; } = new();
 
     public GraphicsPrograms GetGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound)

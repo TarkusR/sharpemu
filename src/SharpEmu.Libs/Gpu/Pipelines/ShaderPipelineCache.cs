@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
@@ -53,8 +54,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     public int ComputePipelineCount => _computePipelines.Count;
 
     // The user data of one stage: the count from its resource register, else the registers the guest wrote.
-    private static uint[] UserData(UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, ulong shaderAddress, string label,
-        bool includeGeometryPointer = false, ulong geometryPointer = 0)
+    private static ReadOnlySpan<uint> UserData(UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, ulong shaderAddress, string label)
     {
         var count = declaredCount;
         if (count == 0 && probeWrittenRegisters)
@@ -67,26 +67,61 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             throw SubmissionScheduler.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.");
         }
 
-        var prefix = includeGeometryPointer ? (int)VertexUserDataBase : 0;
-        var values = new uint[prefix + (int)count];
-        registers.Values.AsSpan(0, (int)count).CopyTo(values.AsSpan(prefix));
-        if (includeGeometryPointer)
-        {
-            values[0] = (uint)geometryPointer;
-            values[1] = (uint)(geometryPointer >> 32);
-        }
-        return values;
+        return registers.Values.AsSpan(0, (int)count);
     }
 
-    private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, uint userDataBase,
+    private static uint[] KeptUserData(KeptUserData kept, ulong userDataStamp, ulong programsStamp, UserScalarRegisters registers, uint declaredCount,
+        ulong shaderAddress, string label)
+    {
+        if (kept.Words is { } words && kept.UserDataStamp == userDataStamp && kept.ProgramsStamp == programsStamp)
+        {
+            return words;
+        }
+
+        var current = UserData(registers, declaredCount, probeWrittenRegisters: true, shaderAddress, label);
+        if (kept.Words is null || !current.SequenceEqual(kept.Words))
+        {
+            kept.Words = current.ToArray();
+        }
+
+        kept.UserDataStamp = userDataStamp;
+        kept.ProgramsStamp = programsStamp;
+        return kept.Words;
+    }
+
+    private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, uint[] userData, uint userDataBase, out ShaderHeaderEntry header,
         ulong geometryPointer = 0)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
-        var registered = _registry.Require(codeAddress, label);
-        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, registered.CodeRanges, label);
-        var includeGeometryPointer = stage == ShaderStage.Mesh && registered.IsFused;
-        var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label, includeGeometryPointer, geometryPointer);
-        return new ShaderSource(registered, hash, userData, includeGeometryPointer ? 0 : userDataBase, stage);
+        header = _registry.RequireEntry(codeAddress, label);
+        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, header.CodeRanges, label);
+        if (stage == ShaderStage.Mesh && header.Shader.IsFused)
+        {
+            var withPointer = new uint[VertexUserDataBase + userData.Length];
+            userData.CopyTo(withPointer.AsSpan((int)VertexUserDataBase));
+            withPointer[0] = (uint)geometryPointer;
+            withPointer[1] = (uint)(geometryPointer >> 32);
+            return new ShaderSource(header.Shader, hash, withPointer, 0, stage);
+        }
+
+        return new ShaderSource(header.Shader, hash, userData, userDataBase, stage);
+    }
+
+    private uint[]? InputSemantics(ShaderHeaderEntry header)
+    {
+        if (!header.InputSemanticsRead)
+        {
+            header.InputSemanticsRead = true;
+            header.InputSemantics = ReadInputSemantics(header.Shader);
+        }
+
+        return header.InputSemantics;
+    }
+
+    private uint[]? ReadInputSemantics(RegisteredShader shader)
+    {
+        var words = new uint[Math.Min(shader.InputSemanticsCount, (uint)PixelInputInfo.InterpolatorCount)];
+        return words.Length == 0 || _context.Memory.TryRead(shader.InputSemanticsAddress, MemoryMarshal.AsBytes(words.AsSpan())) ? words : null;
     }
 
     // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
@@ -95,26 +130,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly object _resolveGate = new();
 
     public GraphicsPrograms GetGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound)
-        => GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context,
-            targetExportMapping, pixelActive, depthBound, null);
+        => GetGraphicsProgramsCore(banks, targetExportMapping, pixelActive, depthBound, null);
 
     public GraphicsPrograms GetMeshGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         UserConfigRegisters userConfig,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound)
     {
+        var vertex = banks.Shader.Vertex;
+        var context = banks.Context;
+        var shaderInterface = context.ShaderInterface;
         var mesh = PrepareMeshInput(vertex, shaderInterface, context, userConfig);
         if (MeshDrawTrace.Active)
         {
@@ -141,15 +172,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
             return new GraphicsPrograms { Available = false };
         }
-        return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context,
-            targetExportMapping, pixelActive, depthBound, mesh);
+        return GetGraphicsProgramsCore(banks, targetExportMapping, pixelActive, depthBound, mesh);
     }
 
+    private readonly KeptUserData _vertexUserData = new();
+    private readonly KeptUserData _pixelUserData = new();
+
     private GraphicsPrograms GetGraphicsProgramsCore(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
@@ -159,25 +189,28 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lock (_resolveGate)
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound, mesh);
+            return ResolveGraphicsProgramsCore(banks, targetExportMapping, pixelActive, depthBound, mesh);
         }
     }
 
     private GraphicsPrograms ResolveGraphicsProgramsCore(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
         MeshDrawConfiguration? mesh)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-        var vertexSource = PrepareSource(
-            vertex.ExportAddress, mesh is null ? ShaderStage.Vertex : ShaderStage.Mesh,
-            mesh is null ? "vertex" : "mesh", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
-            probeWrittenRegisters: true, VertexUserDataBase, vertex.GeometryUserDataAddress);
+        var vertex = banks.Shader.Vertex;
+        var pixel = banks.Shader.Pixel;
+        var context = banks.Context;
+        var shaderInterface = context.ShaderInterface;
+        var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
+        var vertexLabel = mesh is null ? "vertex" : "mesh";
+        var vertexUserData = KeptUserData(_vertexUserData, banks.Stamp(RegisterStamp.VertexUserData), programsStamp,
+            vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount, vertex.ExportAddress, vertexLabel);
+        var vertexSource = PrepareSource(vertex.ExportAddress, mesh is null ? ShaderStage.Vertex : ShaderStage.Mesh, vertexLabel, vertexUserData,
+            VertexUserDataBase, out var vertexHeader, vertex.GeometryUserDataAddress);
         var vertexInfo = mesh is null ? PrepareVertexInput(vertexSource, shaderInterface, context) : new VertexInputInfo();
         vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
         ShaderSource? pixelSource = null;
@@ -187,9 +220,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var attributeCount = 0u;
         if (pixelActive)
         {
-            pixelSource = PrepareSource(
-                pixel.Address, ShaderStage.Pixel, "pixel", pixel.UserScalars, pixel.Resource2.UserScalarCount,
-                probeWrittenRegisters: true, userDataBase: 0);
+            var pixelUserData = KeptUserData(_pixelUserData, banks.Stamp(RegisterStamp.PixelUserData), programsStamp,
+                pixel.UserScalars, pixel.Resource2.UserScalarCount, pixel.Address, "pixel");
+            pixelSource = PrepareSource(pixel.Address, ShaderStage.Pixel, "pixel", pixelUserData, userDataBase: 0, out var pixelHeader);
             if (RenderTrace.Enabled)
                 RenderTrace.Write($"PixelDrawState shader=0x{pixelSource.Address:X16} hash=0x{pixelSource.Hash:X16} " +
                     $"user_data=[{string.Join(",", pixelSource.UserData.Select(word => $"{word:X8}"))}]");
@@ -213,7 +246,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 UnwrittenTargetBoundsRenderArea(context, targetExportMapping, pixelProgram.PixelColorExportMasks);
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null,
                 out var outputModes, out var outputMappings);
-            pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
+            pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount,
+                InputSemantics(pixelHeader));
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(attributes, pixelInfo));
@@ -660,7 +694,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionZ)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-        var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0);
+        var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
+        var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", userData, userDataBase: 0, out _);
         var program = _programs.Decode(source);
         if (_skipRayTracing)
         {
@@ -1133,4 +1168,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return _host.GetComputePipelineCompletion(program);
         }
     }
+}
+
+internal sealed class KeptUserData
+{
+    public ulong UserDataStamp;
+    public ulong ProgramsStamp;
+    public uint[]? Words;
 }

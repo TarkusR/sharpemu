@@ -128,6 +128,7 @@ public static partial class AgcExports
             TraceAgcShader($"agc.fused_shader_retired code=0x{codeAddress:X16} replacement_header=0x{headerAddress:X16}");
         }
         _shaderHeadersByCode[codeAddress] = headerAddress;
+        Gpu.Pipelines.ShaderHeaderRegistry.NoteRegistration();
 
         TryRegisterEmbeddedFusedProgram(ctx, codeAddress, headerAddress);
 
