@@ -977,6 +977,23 @@ public sealed class RenderExecutorDrawTests : IDisposable
             .GetValue(_executor)!).TargetVersion;
 
     [Fact]
+    public void Pipeline_IsKeptUntilSomethingItIsBuiltFromChanges()
+    {
+        var banks = Banks(withDepth: true);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        Assert.Single(_pipelines.PipelineRequests);
+        Assert.Equal(2, _host.Calls.Count(static call => call.StartsWith("bind_pipeline", StringComparison.Ordinal)));
+
+        banks.MarkWritten(RegisterStamps.ContextBits);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        Assert.Equal(2, _pipelines.PipelineRequests.Count);
+
+        _executor.DrawIndexed(1, Banks(withDepth: true), Indexed(3));
+        Assert.Equal(3, _pipelines.PipelineRequests.Count);
+    }
+
+    [Fact]
     public void TargetLayout_BelongsToItsBanks()
     {
         var first = Banks();

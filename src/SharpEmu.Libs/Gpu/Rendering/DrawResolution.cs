@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -21,6 +23,8 @@ internal sealed class DrawResolution
 
     public DynamicStateKey DynamicKey;
     public DynamicDrawState Dynamic;
+
+    public readonly KeptPipeline Pipeline = new();
 }
 
 internal readonly record struct DynamicStateKey(
@@ -31,3 +35,27 @@ internal readonly record struct DynamicStateKey(
     uint BoundSlots,
     bool FirstColorFound,
     bool DepthFound);
+
+internal sealed class KeptPipeline
+{
+    public bool Valid;
+    public PipelineKey Key;
+    public RenderingState Rendering;
+    public PipelineHandle Handle;
+}
+
+internal readonly record struct PipelineKey(
+    ulong ContextStamp,
+    ulong DynamicStamp,
+    uint TargetVersion,
+    uint ColorCount,
+    uint BoundSlots,
+    bool DepthBound,
+    VertexAttributeResource[] VertexAttributes,
+    VertexInputBuffer[] VertexBuffers,
+    uint[]? PixelInterpolators,
+    ulong VertexProgram,
+    ulong PixelProgram,
+    int Topology,
+    bool PrimitiveRestart,
+    bool DisableBlending);

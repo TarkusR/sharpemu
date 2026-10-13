@@ -347,18 +347,7 @@ public sealed partial class RenderExecutor
         DropUnwrittenColorTargets(context, ref state, pixelProgram);
         state.Rendering = AcquireAttachments(ref state);
         // Nothing after the pipeline touches guest memory.
-        var pipeline = _pipelines.CreateGraphicsPipeline(
-            BoundColors(ref state),
-            in state.Depth,
-            vertexInput,
-            state.PixelActive ? pixelInput : null,
-            context,
-            in state.Rendering,
-            topology,
-            primitiveRestart,
-            state.Programs.DisableBlending,
-            state.Programs.Vertex,
-            state.Programs.Pixel);
+        var pipeline = ResolvePipeline(banks, ref state, vertexInput, state.PixelActive ? pixelInput : null, topology, primitiveRestart);
         if (setBindDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x100);
@@ -484,6 +473,60 @@ public sealed partial class RenderExecutor
 
         return "recorded";
     }
+
+    private PipelineHandle ResolvePipeline(RegisterBanks banks, ref DrawState state, VertexInputInfo vertexInput, PixelInputInfo? pixelInput,
+        PrimitiveTopology topology, bool primitiveRestart)
+    {
+        var resolution = _drawResolution;
+        var boundSlots = 0u;
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            boundSlots |= 1u << (int)state.Colors[index].Slot;
+        }
+
+        var key = new PipelineKey(
+            banks.Stamp(RegisterStamp.Context),
+            banks.Stamp(RegisterStamp.ContextDynamic),
+            resolution.TargetVersion,
+            state.ColorCount,
+            boundSlots,
+            state.Depth.HasTarget,
+            vertexInput.Attributes,
+            vertexInput.Buffers,
+            pixelInput?.InterpolatorSettings,
+            state.Programs.Vertex.Id,
+            state.Programs.Pixel.Id,
+            (int)topology,
+            primitiveRestart,
+            state.Programs.DisableBlending);
+        var kept = resolution.Pipeline;
+        if (kept.Valid && kept.Key == key && kept.Rendering.Equals(state.Rendering))
+        {
+            return kept.Handle;
+        }
+
+        var pipeline = CreatePipeline(banks, ref state, vertexInput, pixelInput, topology, primitiveRestart);
+        kept.Key = key;
+        kept.Rendering = state.Rendering;
+        kept.Handle = pipeline;
+        kept.Valid = true;
+        return pipeline;
+    }
+
+    private PipelineHandle CreatePipeline(RegisterBanks banks, ref DrawState state, VertexInputInfo vertexInput, PixelInputInfo? pixelInput,
+        PrimitiveTopology topology, bool primitiveRestart) =>
+        _pipelines.CreateGraphicsPipeline(
+            BoundColors(ref state),
+            in state.Depth,
+            vertexInput,
+            pixelInput,
+            banks.Context,
+            in state.Rendering,
+            topology,
+            primitiveRestart,
+            state.Programs.DisableBlending,
+            state.Programs.Vertex,
+            state.Programs.Pixel);
 
     private const ulong IndexedIndirectArgumentsSize = 20;
 
