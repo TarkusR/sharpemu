@@ -801,6 +801,11 @@ public sealed partial class RenderExecutor
 
     private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false)
     {
+        if (state.Programs is not null)
+        {
+            return;
+        }
+
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawProgramResolution);
         var inputs = GraphicsProgramInputs.Create();
         Span<ColorComponentMap> targetExportMapping = inputs.Mapping;
