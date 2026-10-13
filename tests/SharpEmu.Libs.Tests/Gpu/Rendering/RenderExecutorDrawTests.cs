@@ -990,6 +990,23 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
+    public void DynamicState_FollowsAViewportWrite()
+    {
+        var banks = Banks();
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        Assert.Equal(_host.DynamicStates[0], _host.DynamicStates[1]);
+
+        banks.Context.ScreenViewport.Viewports[0] = banks.Context.ScreenViewport.Viewports[0] with { XScale = 16, XOffset = 16 };
+        banks.MarkWritten(1u << (int)RegisterStamp.ContextDynamic);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Equal(3, _host.DynamicStates.Count);
+        Assert.Equal(32f, _host.DynamicStates[2].ViewportWidth);
+        Assert.NotEqual(_host.DynamicStates[1], _host.DynamicStates[2]);
+    }
+
+    [Fact]
     public void ShaderBufferWrites_EndRenderingAndBarrierAfterTheDraw()
     {
         var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);

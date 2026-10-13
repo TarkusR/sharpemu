@@ -18,4 +18,16 @@ internal sealed class DrawResolution
 
     public ulong ValidatedContextStamp;
     public ulong ValidatedUserConfigStamp;
+
+    public DynamicStateKey DynamicKey;
+    public DynamicDrawState Dynamic;
 }
+
+internal readonly record struct DynamicStateKey(
+    ulong ContextStamp,
+    ulong DynamicStamp,
+    uint TargetVersion,
+    uint ColorCount,
+    uint BoundSlots,
+    bool FirstColorFound,
+    bool DepthFound);

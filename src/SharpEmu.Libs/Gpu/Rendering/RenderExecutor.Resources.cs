@@ -386,7 +386,7 @@ public sealed partial class RenderExecutor
             _host.BindIndexBuffer(indexBuffer.Binding, indexBuffer.Type);
         }
 
-        _host.SetDynamicState(BuildDynamicState(banks, in state, submitId, packetAddress));
+        _host.SetDynamicState(ResolveDynamicState(banks, in state, submitId, packetAddress));
         if (setAutoDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x400);

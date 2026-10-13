@@ -29,6 +29,33 @@ public sealed partial class RenderExecutor
     }
 
     // The dynamic state of a draw from the context bank and the resolved targets.
+    private DynamicDrawState ResolveDynamicState(RegisterBanks banks, in DrawState state, ulong submitId, ulong packetAddress)
+    {
+        var resolution = _drawResolution;
+        var boundSlots = 0u;
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            boundSlots |= 1u << (int)state.Colors[index].Slot;
+        }
+
+        var key = new DynamicStateKey(
+            banks.Stamp(RegisterStamp.Context),
+            banks.Stamp(RegisterStamp.ContextDynamic),
+            resolution.TargetVersion,
+            state.ColorCount,
+            boundSlots,
+            state.ColorCount > 0 && state.Colors[0].Image.IsValid,
+            state.Depth.Image.IsValid);
+        if (key == resolution.DynamicKey && ScissorTrace.Instance is not { Active: true })
+        {
+            return resolution.Dynamic;
+        }
+
+        resolution.Dynamic = BuildDynamicState(banks, in state, submitId, packetAddress);
+        resolution.DynamicKey = key;
+        return resolution.Dynamic;
+    }
+
     private DynamicDrawState BuildDynamicState(RegisterBanks banks, in DrawState state, ulong submitId, ulong packetAddress)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawDynamicStatePreparation);
