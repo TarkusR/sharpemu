@@ -778,9 +778,17 @@ public sealed partial class ResourceMaterializationCache
         }
     }
 
-    public ResourceMaterializationCache(int generationCapacity = 16384)
+    private const int VolatileStaleLookups = 3;
+    private const int MinVolatilePeriod = 32;
+    private const int MaxVolatilePeriod = 1024;
+    private const int SightingSlots = 1 << 15;
+
+    private readonly ulong[]? _sightings;
+
+    public ResourceMaterializationCache(int generationCapacity = 16384, bool limitChurn = false)
     {
         _generationCapacity = Math.Max(1, generationCapacity);
+        _sightings = limitChurn ? new ulong[SightingSlots] : null;
     }
 
     private static long _totalHits;
@@ -816,6 +824,9 @@ public sealed partial class ResourceMaterializationCache
         CountDiagnostic(reason);
         return false;
     }
+    private static long _totalFirstSightings;
+    private static long _totalVolatile;
+
 
     [ThreadStatic]
     private static bool _readingTable;
@@ -830,6 +841,7 @@ public sealed partial class ResourceMaterializationCache
     public long Misses { get; private set; }
     public long Uncacheable { get; private set; }
     public long TableRefreshes { get; private set; }
+    public long Unrecorded { get; private set; }
 
     // Process-wide counters since the previous call, for the periodic render report.
     public static string TakeReport()
@@ -841,6 +853,8 @@ public sealed partial class ResourceMaterializationCache
         var staleUnreadable = Interlocked.Exchange(ref _totalStaleUnreadable, 0);
         var refreshes = Interlocked.Exchange(ref _totalRefreshes, 0);
         var notFound = Interlocked.Exchange(ref _totalNotFound, 0);
+        var firstSightings = Interlocked.Exchange(ref _totalFirstSightings, 0);
+        var volatileLookups = Interlocked.Exchange(ref _totalVolatile, 0);
         var refusals = string.Join(",", RefreshRefusalNames.Select((name, index) => FormattableString.Invariant($"{name}:{Interlocked.Exchange(ref _refreshRefusals[index], 0)}")));
         var total = hits + misses;
         var diagnostics = DiagnosticsEnabled
@@ -982,6 +996,13 @@ public sealed partial class ResourceMaterializationCache
         (List<(int Buffer, uint Word)> Patches, ResourceSnapshot Snapshot, Entry From)? learning = null;
         if (found)
         {
+            if (cached.VolatileLookups > 0)
+            {
+                cached.VolatileLookups--;
+                Interlocked.Increment(ref _totalVolatile);
+                return MaterializeUnrecorded(plan, inputs, ref snapshot, ref specialization, out failure);
+            }
+
             var unreadable = false;
             Entry? previous = null;
             var variantIndex = 0;
@@ -1009,6 +1030,8 @@ public sealed partial class ResourceMaterializationCache
                         Store(key, variant);
                     }
 
+                    variant.StaleLookups = 0;
+                    variant.VolatilePeriod = 0;
                     Hits++;
                     Interlocked.Increment(ref _totalHits);
                     snapshot = rebase.Apply(WithCurrentUserData(variant.Snapshot, inputs.UserData), inputs.UserData);
@@ -1104,6 +1127,27 @@ public sealed partial class ResourceMaterializationCache
             Interlocked.Increment(ref _refreshRefusals[refreshedFrom is not null ? 5 : _lastRefreshRefusal]);
             if (unreadable)
                 Interlocked.Increment(ref _totalStaleUnreadable);
+            if (_sightings is not null && ++cached.StaleLookups >= VolatileStaleLookups)
+            {
+                cached.VolatilePeriod = Math.Clamp(cached.VolatilePeriod * 2, MinVolatilePeriod, MaxVolatilePeriod);
+                cached.VolatileLookups = cached.VolatilePeriod;
+                cached.StaleLookups = VolatileStaleLookups - 2;
+                cached.Next = null;
+                Interlocked.Increment(ref _totalVolatile);
+                return MaterializeUnrecorded(plan, inputs, ref snapshot, ref specialization, out failure);
+            }
+        }
+        else if (_sightings is { } sightings)
+        {
+            ref var sighting = ref sightings[key & (SightingSlots - 1)];
+            if (sighting != key)
+            {
+                sighting = key;
+                Interlocked.Increment(ref _totalFirstSightings);
+                return MaterializeUnrecorded(plan, inputs, ref snapshot, ref specialization, out failure);
+            }
+
+            sighting = 0;
         }
         else
         {
@@ -1160,6 +1204,8 @@ public sealed partial class ResourceMaterializationCache
 
             if (found)
             {
+                built.StaleLookups = cached.StaleLookups;
+                built.VolatilePeriod = cached.VolatilePeriod;
                 built.Next = cached;
                 var depth = 1;
                 for (var variant = built; variant.Next is not null; variant = variant.Next)
@@ -1313,6 +1359,13 @@ public sealed partial class ResourceMaterializationCache
         {
             ReturnRecorder(recorder);
         }
+    }
+
+    private bool MaterializeUnrecorded(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ref ResourceSnapshot snapshot,
+        ref ResourceSpecialization specialization, out ResourceMaterializationFailure failure)
+    {
+        Unrecorded++;
+        return ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failure);
     }
 
     private ReadRecorder TakeRecorder()
@@ -1949,6 +2002,9 @@ public sealed partial class ResourceMaterializationCache
         public int[]? TableCopySources { get; set; }
         public (int Range, int Offset)[]? BaseWordProbes { get; set; }
         public Entry? Next { get; set; }
+        public int StaleLookups { get; set; }
+        public int VolatileLookups { get; set; }
+        public int VolatilePeriod { get; set; }
 
         // A rebased word is an address the hit patches in, so it does not distinguish entries.
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ulong[] rebased)

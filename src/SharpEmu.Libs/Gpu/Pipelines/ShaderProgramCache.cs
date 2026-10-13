@@ -161,7 +161,7 @@ internal sealed class ShaderProgramCache
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
     private readonly ResourceMaterializationCache? _materializations =
-        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") == "0" ? null : new();
+        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") == "0" ? null : new(limitChurn: true);
     private ulong _nextProgramId;
 
     public ResourceMaterializationCache? Materializations => _materializations;
