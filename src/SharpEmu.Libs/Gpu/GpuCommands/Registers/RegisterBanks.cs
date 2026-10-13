@@ -10,6 +10,8 @@ public sealed class RegisterBanks
 {
     private ContextRegisters? _savedContext;
     private uint? _savedCompositeDepthSizeXy;
+    private ulong[] _stamps = InitialStamps();
+    private ulong _writeSerial = 1;
 
     public RegisterBanks(Func<string, Exception> fatal)
         : this(fatal, new ContextRegisters(), new ShaderProgramRegisters(), new UserConfigRegisters())
@@ -39,6 +41,24 @@ public sealed class RegisterBanks
 
     public bool ContextPushed => _savedContext is not null;
 
+    public ulong Stamp(RegisterStamp stamp) => _stamps[(int)stamp];
+
+    public void MarkWritten(uint stampBits)
+    {
+        while (stampBits != 0)
+        {
+            _stamps[System.Numerics.BitOperations.TrailingZeroCount(stampBits)] = ++_writeSerial;
+            stampBits &= stampBits - 1;
+        }
+    }
+
+    private static ulong[] InitialStamps()
+    {
+        var stamps = new ulong[RegisterStamps.Count];
+        stamps.AsSpan().Fill(1);
+        return stamps;
+    }
+
     // A depth extent carried by a composite binding packet; a direct write clears it.
     public uint? CompositeDepthSizeXy { get; set; }
 
@@ -54,6 +74,8 @@ public sealed class RegisterBanks
             CompositeDepthSizeXy = CompositeDepthSizeXy,
             UserDataMarker = UserDataMarker,
             IndexTypeAndSize = IndexTypeAndSize,
+            _stamps = (ulong[])_stamps.Clone(),
+            _writeSerial = _writeSerial,
         };
         return clone;
     }
@@ -74,6 +96,7 @@ public sealed class RegisterBanks
             CompositeDepthSizeXy = CompositeDepthSizeXy,
             UserDataMarker = UserDataMarker,
             IndexTypeAndSize = IndexTypeAndSize,
+            _stamps = (ulong[])_stamps.Clone(),
         };
         _contextShared = _vertexShared = _pixelShared = _computeShared = _userConfigShared = true;
         _pixelScalarsShared = _hullScalarsShared = _geometryScalarsShared = _legacyVertexScalarsShared = _exportScalarsShared = _computeScalarsShared = true;
@@ -340,6 +363,7 @@ public sealed class RegisterBanks
         CompositeDepthSizeXy = null;
         UserDataMarker = UserScalarKind.Unknown;
         IndexTypeAndSize = 0;
+        MarkWritten(RegisterStamps.AllBits);
     }
 
     public void ApplyContextState(ContextStateOperation operation)
@@ -373,6 +397,8 @@ public sealed class RegisterBanks
             default:
                 throw Fatal($"The context state operation is unknown: operation={(uint)operation}.");
         }
+
+        MarkWritten(RegisterStamps.ContextBits);
         if (Rendering.RenderTrace.Enabled)
         {
             var currentViewport = Context.ScreenViewport.Viewports[0];

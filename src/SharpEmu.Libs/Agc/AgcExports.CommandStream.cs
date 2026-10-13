@@ -619,6 +619,7 @@ public static partial class AgcExports
             var banks = retained.Banks;
             banks.Context.ColorTargets[0] = words;
             banks.Context.RenderTargetMask = 0xF;
+            banks.MarkWritten(RegisterStamps.ContextBits);
             var arguments = retained.Arguments;
             if (RenderTrace.Enabled)
             {
