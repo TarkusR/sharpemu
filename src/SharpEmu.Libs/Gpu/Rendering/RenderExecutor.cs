@@ -271,7 +271,7 @@ public sealed partial class RenderExecutor
                 $"indexAddress=0x{arguments.IndexAddress:X16} instances=0x{arguments.InstanceCount:X8} baseVertex=0x{(uint)arguments.BaseVertex:X8} firstInstance=0x{arguments.FirstInstance:X8}");
         }
 
-        ValidateDrawRegisters(banks);
+        ValidateChangedDrawRegisters(banks);
         if (!ResolveTopology(userConfig, autoDraw: false, out var topology))
         {
             TraceDisposition("no-topology");
@@ -430,7 +430,7 @@ public sealed partial class RenderExecutor
                 $"firstVertex=0x{arguments.FirstVertex:X8} firstInstance=0x{arguments.FirstInstance:X8}");
         }
 
-        ValidateDrawRegisters(banks);
+        ValidateChangedDrawRegisters(banks);
         var draw = new DrawCall("DrawAuto", RecordedOperation.DrawIndexAuto, arguments.VertexCount, arguments.InstanceCount, arguments.FirstInstance);
         var state = DrawState.Create();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
@@ -783,6 +783,21 @@ public sealed partial class RenderExecutor
         _pipelines.MeshShadersSupported && RequiresMeshExecution(banks.Context.ShaderStages) &&
         banks.Shader.Vertex.ExportAddress != 0 &&
         (banks.Context.ShaderStages & TessellationStageBits) == 0;
+
+    private void ValidateChangedDrawRegisters(RegisterBanks banks)
+    {
+        var resolution = _drawResolution;
+        var contextStamp = banks.Stamp(RegisterStamp.Context);
+        var userConfigStamp = banks.Stamp(RegisterStamp.UserConfig);
+        if (resolution.ValidatedContextStamp == contextStamp && resolution.ValidatedUserConfigStamp == userConfigStamp)
+        {
+            return;
+        }
+
+        ValidateDrawRegisters(banks);
+        resolution.ValidatedContextStamp = contextStamp;
+        resolution.ValidatedUserConfigStamp = userConfigStamp;
+    }
 
     private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false)
     {

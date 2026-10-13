@@ -15,4 +15,7 @@ internal sealed class DrawResolution
     public readonly uint[] ColorSlots = new uint[RenderingState.ColorAttachmentCapacity];
     public DepthTargetState? Depth;
     public bool PixelActive;
+
+    public ulong ValidatedContextStamp;
+    public ulong ValidatedUserConfigStamp;
 }
