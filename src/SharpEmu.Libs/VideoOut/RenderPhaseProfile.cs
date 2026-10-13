@@ -487,6 +487,7 @@ internal static class RenderPhaseProfile
         GpuWaitSiteProfile.Report();
         ComputeCompileProfile.Report();
         SharpEmu.ShaderCompiler.Vulkan.ShaderTranslationProfile.Report();
+        SharpEmu.Libs.Diagnostics.SubmitSiteTally.Report();
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
