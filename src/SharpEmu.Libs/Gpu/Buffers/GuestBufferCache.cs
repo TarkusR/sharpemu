@@ -781,18 +781,19 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void PrepareBda(IEnumerable<GuestSpan> mapped)
     {
-        var spans = mapped as IReadOnlyCollection<GuestSpan> ?? mapped.ToList();
+        var spans = mapped as IReadOnlyList<GuestSpan> ?? mapped.ToList();
         PrepareBda(spans, MappingKey(spans));
     }
 
-    public void PrepareBda(IReadOnlyCollection<GuestSpan> mapped, ulong mapping)
+    public void PrepareBda(IReadOnlyList<GuestSpan> spans, ulong mapping)
     {
         var traceAddress = GuestGpuMemoryHook.TraceAddress;
         var traceCovered = false;
         if (traceAddress != 0)
         {
-            foreach (var span in mapped)
+            for (var index = 0; index < spans.Count; index++)
             {
+                var span = spans[index];
                 if (traceAddress != 0 && GuestGpuMemoryHook.Traces(span.Address, span.Size))
                     traceCovered = true;
                 SynchronizeBuffersInRange(span.Address, span.Size);
@@ -800,11 +801,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
         else
         {
-            var spans = mapped;
             if (_retirementPolicy.CurrentTick != _bdaTouchTick || mapping != _bdaTouchMapping)
             {
-                foreach (var span in spans)
-                    TouchBuffersInRange(span.Address, span.Size);
+                for (var index = 0; index < spans.Count; index++)
+                    TouchBuffersInRange(spans[index].Address, spans[index].Size);
                 _bdaTouchTick = _retirementPolicy.CurrentTick;
                 _bdaTouchMapping = mapping;
             }
@@ -812,12 +812,30 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var epoch = _tracker.CpuDirtyEpoch;
             if (epoch != _bdaSweepEpoch || mapping != _bdaSweepMapping)
             {
+                if (!_bdaSweepPlanBuilt || mapping != _bdaSweepPlanMapping)
+                {
+                    _bdaSweepPlan = GuestPageTracker.PlanSweep(spans);
+                    _bdaSweepPlanMapping = mapping;
+                    _bdaSweepPlanBuilt = true;
+                }
+
                 // The buffers' copies are collected as the sweep visits them and staged when it ends.
                 _sweepActive = true;
                 try
                 {
-                    foreach (var span in spans)
-                        _tracker.ForEachPossiblyCpuDirtyRange(span.Address, span.Size, _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange);
+                    if (_bdaSweepPlan is { } plan && _bufferPages.Complete)
+                    {
+                        // Only a registered buffer has anything to upload, so only the pages buffers cover are looked at.
+                        _sweepSpan = default;
+                        _sweepLastIndex = -1;
+                        _tracker.ForEachCoveredCpuDirtyPageRun(plan, _bufferPages, _uploadBuffersUnderDirtyRun ??= UploadBuffersUnderDirtyRun);
+                    }
+                    else
+                    {
+                        var upload = _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange;
+                        for (var index = 0; index < spans.Count; index++)
+                            _tracker.ForEachPossiblyCpuDirtyRange(spans[index].Address, spans[index].Size, upload);
+                    }
                 }
                 finally
                 {
@@ -839,6 +857,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
     private long _bdaSweepEpoch = -1;
     private ulong _bdaSweepMapping;
+    private GuestPageTracker.SweepPlan? _bdaSweepPlan;
+    private readonly PageCoverage _bufferPages = new();
+    private ulong _bdaSweepPlanMapping;
+    private bool _bdaSweepPlanBuilt;
 
     // The uploads of the running sweep: each one's copies are a run of _sweepCopies, with source
     // offsets inside its own bytes until they are staged.
@@ -972,6 +994,35 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             }
 
             return _sweepCopy.Run(_sweepPieces, count, parallel: total >= ParallelSweepCopyBytes);
+        }
+    }
+
+    private Action<ulong, ulong>? _uploadBuffersUnderDirtyRun;
+    private GuestSpan _sweepSpan;
+    private int _sweepLastIndex;
+
+    private void UploadBuffersUnderDirtyRun(ulong runAddress, ulong runSize)
+    {
+        var blockStart = runAddress & ~(TrackerLayout.BlockBytes - 1);
+        var containing = _tracker.SweepSpan;
+        var lower = Math.Max(containing.Address, blockStart);
+        var span = new GuestSpan(lower, Math.Min(containing.End, blockStart + TrackerLayout.BlockBytes) - lower);
+        if (span != _sweepSpan)
+        {
+            _sweepSpan = span;
+            _sweepLastIndex = -1;
+        }
+
+        var runEnd = runAddress + runSize;
+        var index = Math.Max(_registry.FindFirstOverlappingIndex(runAddress), _sweepLastIndex + 1);
+        for (; index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < runEnd; index++)
+        {
+            _sweepLastIndex = index;
+            var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(index));
+            var start = Math.Max(buffer.CpuAddress, span.Address);
+            var finish = Math.Min(buffer.CpuAddress + buffer.Size, span.End);
+            if (start < finish && _tracker.MayHaveCpuDirtyPages(start, finish - start))
+                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
         }
     }
 
@@ -1803,6 +1854,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 $"device-address-registration insert={insert} buffer={bufferIdentifier} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
         if (insert)
         {
+            _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: true);
             _registry.RegisterBuffer(bufferIdentifier, _retirementPolicy.CurrentTick);
             var addresses = new ulong[sizePages];
             for (ulong page = 0; page < sizePages; page++)
@@ -1814,6 +1866,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
         else
         {
+            _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: false);
             _registry.BeginRetirement(bufferIdentifier);
             _bdaPageTable.Fill(first * sizeof(ulong), sizePages * sizeof(ulong), 0);
         }

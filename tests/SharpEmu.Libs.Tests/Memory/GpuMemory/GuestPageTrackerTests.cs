@@ -271,6 +271,119 @@ public sealed class GuestPageTrackerTests : IDisposable
     }
 
     [NativePageProtectionFact]
+    public void TheCoveredPageRunWalkVisitsTheDirtyPagesTheCoverageHolds()
+    {
+        const ulong size = Region * 6;
+        var address = AllocateAligned(size, Region);
+        GuestSpan[] spans =
+        [
+            new(address + Page, Page * 3),
+            new(address + Page * 8, Region - Page * 8),
+            new(address + Region, Region * 2 + Page),
+            new(address + Region * 3 + Page * 4, Page),
+            new(address + Region * 3 + Page * 9, Page * 2),
+            new(address + Region * 4 + Page, Region + Page * 5),
+        ];
+        var plan = GuestPageTracker.PlanSweep(spans);
+        Assert.NotNull(plan);
+        var covered = new List<(ulong Address, ulong Size)>
+        {
+            (address + Page * 2, Page * 4),
+            (address + Page * 8, Page * 8),
+            (address + Region - Page * 2, Page * 4),
+            (address + Region * 3, Page * 16),
+            (address + Region * 4 + Page * 3, Region),
+        };
+        var coverage = new PageCoverage();
+        foreach (var (start, bytes) in covered)
+        {
+            coverage.Set(start, bytes, covered: true);
+        }
+
+        List<(ulong Page, int Span)> Walk()
+        {
+            var pages = new List<(ulong Page, int Span)>();
+            _tracker.ForEachCoveredCpuDirtyPageRun(plan, coverage, (runAddress, runSize) =>
+            {
+                var span = Array.IndexOf(spans, _tracker.SweepSpan);
+                Assert.True(runAddress >= spans[span].Address && runAddress + runSize <= spans[span].End);
+                for (var page = runAddress; page < runAddress + runSize; page += Page)
+                {
+                    pages.Add((page, span));
+                }
+            });
+            return pages;
+        }
+
+        List<(ulong Page, int Span)> Expected()
+        {
+            var pages = new List<(ulong Page, int Span)>();
+            for (var page = address; page < address + size; page += Page)
+            {
+                var span = Array.FindIndex(spans, candidate => page >= candidate.Address && page < candidate.End);
+                if (span >= 0 && covered.Any(range => page >= range.Address && page < range.Address + range.Size) &&
+                    _tracker.MayHaveCpuDirtyPages(page, Page))
+                {
+                    pages.Add((page, span));
+                }
+            }
+
+            return pages;
+        }
+
+        // No block has a region yet, so every covered page inside a span is visited.
+        Assert.NotEmpty(Expected());
+        Assert.Equal(Expected(), Walk());
+
+        _tracker.ForEachUploadRange(address, size, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.Empty(Walk());
+        Assert.Empty(Walk());
+
+        // A covered page in a span, an uncovered page, and a covered page outside every span.
+        _tracker.MarkCpuDirtyPages(address + Page * 9, 8);
+        _tracker.MarkCpuDirtyPages(address + Page * 6, 8);
+        _tracker.MarkCpuDirtyPages(address + Page * 5, 8);
+        _tracker.MarkCpuDirtyPages(address + Region * 4 + Page * 4, 8);
+        Assert.Equal([(address + Page * 9, 1), (address + Region * 4 + Page * 4, 5)], Walk());
+        Assert.Equal(Expected(), Walk());
+
+        _tracker.ForEachUploadRange(address, size, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.Empty(Walk());
+
+        // A block found clean is looked at again once one of its pages turns dirty.
+        _tracker.MarkCpuDirtyPages(address + Region * 5 + Page * 2, 8);
+        Assert.Equal([(address + Region * 5 + Page * 2, 5)], Walk());
+
+        // A dirty page the coverage does not hold is skipped until the coverage gains it.
+        _tracker.ForEachUploadRange(address, size, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        _tracker.MarkCpuDirtyPages(address + Region * 5 + Page * 4, 8);
+        Assert.Empty(Walk());
+        coverage.Set(address + Region * 5 + Page * 4, Page, covered: true);
+        covered.Add((address + Region * 5 + Page * 4, Page));
+        Assert.Equal([(address + Region * 5 + Page * 4, 5)], Walk());
+        Assert.Equal(Expected(), Walk());
+        coverage.Set(address + Region * 5 + Page * 4, Page, covered: false);
+        Assert.Empty(Walk());
+
+        Assert.True(coverage.Complete);
+        coverage.Set(TrackerLayout.SpaceBytes, Page, covered: true);
+        Assert.False(coverage.Complete);
+        _tracker.UntrackMemory(address, size);
+        Release(address, size);
+    }
+
+    [Fact]
+    public void ASweepPlanNeedsSortedDisjointSpansInsideTheTrackedSpace()
+    {
+        Assert.NotNull(GuestPageTracker.PlanSweep([]));
+        Assert.NotNull(GuestPageTracker.PlanSweep([new GuestSpan(Region, Page), new GuestSpan(Region + Page, Page)]));
+        Assert.Null(GuestPageTracker.PlanSweep([new GuestSpan(Region * 2, Page), new GuestSpan(Region, Page)]));
+        Assert.Null(GuestPageTracker.PlanSweep([new GuestSpan(Region, Page * 2), new GuestSpan(Region + Page, Page)]));
+        Assert.Null(GuestPageTracker.PlanSweep([new GuestSpan(Region, 0)]));
+        Assert.Null(GuestPageTracker.PlanSweep([new GuestSpan(TrackerLayout.SpaceBytes, Page)]));
+    }
+
+    [NativePageProtectionFact]
     public void RangeInvalidationBatchesOwnershipTransferAcrossRegions()
     {
         const ulong size = Region * 2;

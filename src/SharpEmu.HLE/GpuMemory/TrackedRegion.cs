@@ -18,6 +18,11 @@ public sealed class TrackedRegion
     private PageMask _repeatedCpuWrites;
     private PageMask _hotCpuWrites;
     private readonly CpuDirtySummary? _summary;
+    private int _cpuDirtyVersion;
+
+    public int CpuDirtyVersion => Volatile.Read(ref _cpuDirtyVersion);
+
+    public PageMask CpuDirtyPages(in PageMask pages) => _cpuDirty & pages;
 
     public TrackedRegion(PageGuard pages, ulong baseAddress, CpuDirtySummary? summary = null)
     {
@@ -242,6 +247,7 @@ public sealed class TrackedRegion
             return;
         }
 
+        Interlocked.Increment(ref _cpuDirtyVersion);
         if (track)
         {
             _pages.AddWatchMask(BaseAddress, mask, blockReads: false);

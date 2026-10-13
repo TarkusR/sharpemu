@@ -571,6 +571,148 @@ public sealed class GuestPageTracker
         }
     }
 
+    public sealed class SweepPlan
+    {
+        internal GuestSpan[] Spans { get; init; } = [];
+        internal ulong[] Blocks { get; init; } = [];
+        internal int FirstWord { get; init; }
+    }
+
+    public static SweepPlan? PlanSweep(IReadOnlyList<GuestSpan> spans)
+    {
+        if (spans.Count == 0)
+        {
+            return new SweepPlan();
+        }
+
+        var previousEnd = 0UL;
+        for (var index = 0; index < spans.Count; index++)
+        {
+            var span = spans[index];
+            if (span.Size == 0 || !span.IsValid || span.Address < previousEnd)
+            {
+                return null;
+            }
+
+            previousEnd = span.End;
+        }
+
+        var firstWord = (int)(spans[0].Address / BlockBytes / 64);
+        var lastWord = (int)((previousEnd - 1) / BlockBytes / 64);
+        var blocks = new ulong[lastWord - firstWord + 1];
+        var copy = new GuestSpan[spans.Count];
+        for (var index = 0; index < copy.Length; index++)
+        {
+            var span = spans[index];
+            copy[index] = span;
+            var last = (span.End - 1) / BlockBytes;
+            for (var block = span.Address / BlockBytes; block <= last; block++)
+            {
+                blocks[(int)(block / 64) - firstWord] |= 1UL << (int)(block % 64);
+            }
+        }
+
+        return new SweepPlan { Spans = copy, Blocks = blocks, FirstWord = firstWord };
+    }
+
+    private SweepPlan? _sweepPlan;
+    private Action<ulong, ulong>? _sweepVisit;
+    private int _sweepNextSpan;
+
+    public GuestSpan SweepSpan { get; private set; }
+
+    public void ForEachCoveredCpuDirtyPageRun(SweepPlan plan, PageCoverage coverage, Action<ulong, ulong> visit)
+    {
+        _sweepPlan = plan;
+        _sweepVisit = visit;
+        _sweepNextSpan = 0;
+        try
+        {
+            for (var offset = 0; offset < plan.Blocks.Length; offset++)
+            {
+                var word = plan.FirstWord + offset;
+                var pending = plan.Blocks[offset] & coverage.BlockWord(word) &
+                    (~(ulong)Volatile.Read(ref _presentRegions[word]) | _cpuDirtySummary.Word(word));
+                while (pending != 0)
+                {
+                    var block = (ulong)word * 64 + (ulong)System.Numerics.BitOperations.TrailingZeroCount(pending);
+                    pending &= pending - 1;
+                    if (coverage.BlockAt(block) is not { } covered)
+                    {
+                        continue;
+                    }
+
+                    PageMask runs;
+                    if (Volatile.Read(ref _regions[block]) is { } region)
+                    {
+                        var version = region.CpuDirtyVersion;
+                        if (covered.CleanRegionVersion == version && covered.CleanCoverageVersion == covered.Version)
+                        {
+                            continue;
+                        }
+
+                        runs = region.CpuDirtyPages(in covered.Pages);
+                        if (runs.None)
+                        {
+                            covered.CleanRegionVersion = version;
+                            covered.CleanCoverageVersion = covered.Version;
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        runs = covered.Pages;
+                    }
+
+                    foreach (var (runStart, runEnd) in runs)
+                    {
+                        ClipSweepRun(block * BlockBytes + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _sweepPlan = null;
+            _sweepVisit = null;
+        }
+    }
+
+    private void ClipSweepRun(ulong runAddress, ulong runSize)
+    {
+        var spans = _sweepPlan!.Spans;
+        var runEnd = runAddress + runSize;
+        var index = _sweepNextSpan;
+        if (index < spans.Length && spans[index].End <= runAddress)
+        {
+            var low = index + 1;
+            var high = spans.Length;
+            while (low < high)
+            {
+                var middle = low + ((high - low) >> 1);
+                if (spans[middle].End <= runAddress)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+
+            index = low;
+        }
+
+        _sweepNextSpan = index;
+        for (; index < spans.Length && spans[index].Address < runEnd; index++)
+        {
+            var span = spans[index];
+            var start = Math.Max(runAddress, span.Address);
+            SweepSpan = span;
+            _sweepVisit!(start, Math.Min(runEnd, span.End) - start);
+        }
+    }
+
     private bool IsKnownCpuClean(ulong vaddr, ulong size)
     {
         ValidateRange(vaddr, size);

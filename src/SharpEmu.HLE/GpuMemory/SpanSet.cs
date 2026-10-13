@@ -139,6 +139,16 @@ public sealed class SpanSet
         return new SpanSnapshot(starts, ends);
     }
 
+    public void CopyTo(List<GuestSpan> destination)
+    {
+        destination.EnsureCapacity(destination.Count + _spans.Count);
+        for (var index = 0; index < _spans.Count; index++)
+        {
+            var start = _spans.GetKeyAtIndex(index);
+            destination.Add(new GuestSpan(start, _spans.GetValueAtIndex(index) - start));
+        }
+    }
+
     public void ForEach(Action<ulong, ulong> visit)
     {
         foreach (var (start, end) in _spans)
