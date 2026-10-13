@@ -236,8 +236,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         if (!isWritten &&
-            !_tracker.HasGpuDirtyPages(guestAddress, size) &&
             _tracker.HasCpuDirtyPages(guestAddress, size) &&
+            !(_tracker.MayHaveGpuDirtyPages(guestAddress, size) && _tracker.HasGpuDirtyPages(guestAddress, size)) &&
             (size <= CachingPageSize || (!isTexelBuffer && _tracker.IsCpuWriteHotRange(guestAddress, size))))
         {
             using var streamProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStreamUpload);
@@ -2225,6 +2225,13 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         profileScope.SwitchPhase(isWritten
             ? RenderPhaseProfile.Phase.BufferDirtySyncWritten
             : isTexelBuffer ? RenderPhaseProfile.Phase.BufferDirtySyncTexel : RenderPhaseProfile.Phase.BufferDirtySyncUpload);
+        if (isTexelBuffer && !isWritten && !_tracker.MayHaveCpuDirtyPages(guestAddress, size))
+        {
+            if (BufferUploadProfile.Enabled)
+                BufferUploadProfile.Record(guestAddress, size, 0, 0, 0, System.Diagnostics.Stopwatch.GetTimestamp() - startedAt);
+            return SynchronizeTexelFromImage(buffer, guestAddress, size);
+        }
+
         var collector = _uploadCollector;
         if (collector is null || collector.InUse)
         {
