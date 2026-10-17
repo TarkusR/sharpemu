@@ -422,6 +422,7 @@ public sealed class SubmissionSchedulerTests
             using var memory = new GuestGpuMemory(new RecordingAddressSpace());
             memory.AttachStores(stores, stores);
             memory.Register(0x10000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write);
+            stores.Order.Clear();
             memory.AttachGpuQueue(new InlineRelay(), scheduler);
             scheduler.QueuePriorityCompletionAction(() =>
             {

@@ -167,5 +167,6 @@ public static class GuestGpuMemoryHook
     }
 
     public static string GetSummary() =>
-        $"gpu_memory: mapped={Interlocked.Read(ref _mapped)} unmapped={Interlocked.Read(ref _unmapped)} faults_resolved={Interlocked.Read(ref _faultsResolved)} faults_declined={Interlocked.Read(ref _faultsDeclined)}";
+        $"gpu_memory: mapped={Interlocked.Read(ref _mapped)} unmapped={Interlocked.Read(ref _unmapped)} faults_resolved={Interlocked.Read(ref _faultsResolved)} faults_declined={Interlocked.Read(ref _faultsDeclined)} " +
+        $"mapped_content_invalidations={GuestGpuMemory.MappedContentInvalidations} mapped_content_owned={GuestGpuMemory.MappedContentOwned}";
 }

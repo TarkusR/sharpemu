@@ -11,6 +11,12 @@ public interface IGpuQueueRelay
 
     void Post(Action work);
 
+    bool TryPost(Action work)
+    {
+        Post(work);
+        return true;
+    }
+
     // Return after the work completes. Run it directly when called on the GPU worker.
     void RunOnGpuQueue(Action work);
 
@@ -243,6 +249,40 @@ public sealed class GuestGpuMemory : IDisposable
             _pages.Permissions.Set(address, size, protection);
         using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegisterReapply))
             _pages.Reapply(address, size);
+        InvalidateMappedContent(address, size);
+    }
+
+    private static long _mappedContentInvalidations;
+    private static long _mappedContentOwned;
+
+    public static long MappedContentInvalidations => Interlocked.Read(ref _mappedContentInvalidations);
+
+    public static long MappedContentOwned => Interlocked.Read(ref _mappedContentOwned);
+
+    private void InvalidateMappedContent(ulong address, ulong size)
+    {
+        var attachment = Volatile.Read(ref _attachment);
+        if (attachment?.Gpu is { } gpu && !gpu.IsGpuQueueThread)
+        {
+            _ = gpu.TryPost(() => MarkMappedContent(address, size));
+            return;
+        }
+
+        MarkMappedContent(address, size);
+    }
+
+    private void MarkMappedContent(ulong address, ulong size)
+    {
+        Interlocked.Increment(ref _mappedContentInvalidations);
+        var buffers = Buffers?.MarkCpuWrite(address, size) ?? false;
+        var images = Images?.MarkCpuWrite(address, size) ?? false;
+        if (buffers || images)
+        {
+            Interlocked.Increment(ref _mappedContentOwned);
+        }
+
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, $"map-content buffers={buffers} images={images}");
     }
 
     // A guest mprotect on a covered range: the ledger changes, then every page gets its derived protection.
