@@ -269,7 +269,7 @@ public unsafe class GpuBuffer : IDisposable
         command.EndRendering();
         NoteGpuWrite(destinationOffset, size);
         var vk = _device.Vk;
-        var native = new CommandBuffer(command.Handle);
+        var native = new CommandBuffer(command.TransferHandle);
         var before = stackalloc BufferMemoryBarrier2[2];
         before[0] = source.CreateBarrier(sourceOffset, size, sourceBefore, AccessFlags.TransferReadBit);
         before[1] = CreateBarrier(destinationOffset, size, destinationBefore, AccessFlags.TransferWriteBit);
@@ -300,7 +300,7 @@ public unsafe class GpuBuffer : IDisposable
         command.EndRendering();
         NoteGpuWrite(offset, size);
         var vk = _device.Vk;
-        var native = new CommandBuffer(command.Handle);
+        var native = new CommandBuffer(command.TransferHandle);
         var before = CreateBarrier(offset, size, MemoryAccess, AccessFlags.TransferWriteBit);
         VulkanSynchronization.PipelineBarrier(vk,
             native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,

@@ -26,6 +26,9 @@ internal static class GpuSyncProfile
 {
     private static long _deferredBarriers;
     private static long _skippedBarriers;
+    private static long _transferKeptDeferred;
+
+    public static void CountTransferKeptDeferred() => Interlocked.Increment(ref _transferKeptDeferred);
     private static readonly long[] _deferredPromotions = new long[(int)DeferredBarrierPromotion.Count];
     private static readonly long[] _chainDecisions = new long[(int)Rendering.ChainDecision.Count];
 
@@ -44,7 +47,7 @@ internal static class GpuSyncProfile
     }
 
     private static string TakeChainReport() =>
-        FormattableString.Invariant($"deferred={Interlocked.Exchange(ref _deferredBarriers, 0)} skipped={Interlocked.Exchange(ref _skippedBarriers, 0)} ") +
+        FormattableString.Invariant($"deferred={Interlocked.Exchange(ref _deferredBarriers, 0)} skipped={Interlocked.Exchange(ref _skippedBarriers, 0)} transfer_kept={Interlocked.Exchange(ref _transferKeptDeferred, 0)} ") +
         FormattableString.Invariant($"promoted_handle={Interlocked.Exchange(ref _deferredPromotions[(int)DeferredBarrierPromotion.Handle], 0)} promoted_request={Interlocked.Exchange(ref _deferredPromotions[(int)DeferredBarrierPromotion.Request], 0)} ") +
         FormattableString.Invariant($"chain_open={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Open], 0)} chain_start={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Start], 0)} ") +
         FormattableString.Invariant($"chain_skipped={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Skipped], 0)} chain_overlap={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Overlap], 0)} chain_conservative={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Conservative], 0)}");

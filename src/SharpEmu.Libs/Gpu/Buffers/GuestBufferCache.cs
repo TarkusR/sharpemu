@@ -2462,7 +2462,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-upload", guestAddress, size, $"bytes={totalSize} copies={regions.Length}");
         var command = _scheduler.Current;
         command.EndRendering();
-        var native = new CommandBuffer(command.Handle);
+        var native = new CommandBuffer(command.TransferHandle);
         var vk = _device.Vk;
         var sweep = _inDeviceAddressSweep;
         var before = new BufferMemoryBarrier2

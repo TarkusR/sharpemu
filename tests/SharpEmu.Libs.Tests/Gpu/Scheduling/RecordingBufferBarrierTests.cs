@@ -64,6 +64,29 @@ public sealed class RecordingBufferBarrierTests
     }
 
     [Fact]
+    public void ATransferHandleFlushesPendingRequestsButKeepsTheDeferredBarrier()
+    {
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        _device.CompleteOnSubmit = true;
+        var recorded = new List<MemoryBarrierRequest>();
+        scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
+        var promotions = RecordingBuffer.DeferredPromotions;
+
+        scheduler.Current.DeferMemoryBarrier(ComputeToAll);
+        _ = scheduler.Current.TransferHandle;
+        Assert.Empty(recorded);
+        Assert.Equal(promotions, RecordingBuffer.DeferredPromotions);
+
+        scheduler.Current.RequestMemoryBarrier(AllToCompute);
+        scheduler.Current.DeferMemoryBarrier(ComputeToAll);
+        _ = scheduler.Current.TransferHandle;
+        Assert.Equal([AllToCompute.Union(ComputeToAll)], recorded);
+
+        _ = scheduler.Current.Handle;
+        Assert.Single(recorded);
+    }
+
+    [Fact]
     public void ARequestFoldsTheDeferredBarrierIntoOneRecord()
     {
         using var scheduler = NewActiveScheduler(_device, _rendering);

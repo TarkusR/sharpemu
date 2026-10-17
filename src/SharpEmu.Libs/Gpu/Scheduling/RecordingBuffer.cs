@@ -104,6 +104,28 @@ public sealed class RecordingBuffer
         }
     }
 
+    // For transfers that record their own range barriers: a pending barrier still flushes, a
+    // deferred one stays deferred because the transfer orders itself against earlier work.
+    public nint TransferHandle
+    {
+        get
+        {
+            if (IsInvalid)
+            {
+                throw SubmissionScheduler.Fatal("The command buffer is not recording.");
+            }
+
+            if (_hasDeferredBarrier && Vulkan.GpuSyncProfile.Enabled)
+            {
+                Vulkan.GpuSyncProfile.CountTransferKeptDeferred();
+            }
+
+            FlushPendingBarrier();
+            _handleWasRequested = true;
+            return Buffer;
+        }
+    }
+
     public nint StateHandle
     {
         get
