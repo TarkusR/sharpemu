@@ -98,14 +98,15 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void WriteMipStatisticsFields(uint[] shaderData, BindingLayout layout, ShaderResourceInfo info, uint[][] images)
+        private void WriteMipStatisticsFields(uint[] shaderData, BindingLayout layout, ShaderResourceInfo info, uint[][] images, uint[]? statistics)
         {
             for (var index = 0; index < layout.MipStatisticsCount; index++)
             {
                 var image = index < info.Images.Count ? info.Images[index] : null;
                 var words = index < images.Length ? images[index] : null;
+                var current = statistics is not null && index < statistics.Length ? statistics[index] : ResourceSnapshot.NoMipStatistics;
                 shaderData[layout.MipStatisticsDword + (uint)index] = image is { MipStatistics: true } && words is { Length: >= 8 }
-                    ? MipStatistics.ImageField(words)
+                    ? MipStatistics.ImageField(words, current)
                     : MipStatistics.NoCounterField;
             }
         }

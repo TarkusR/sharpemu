@@ -960,7 +960,7 @@ public sealed partial class ResourceMaterializationCache
             : string.Empty;
         return FormattableString.Invariant(
             $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}{diagnostics}") +
-            FormattableString.Invariant($" revalidated={Interlocked.Exchange(ref _totalRevalidated, 0)} revalidate_stale={Interlocked.Exchange(ref _totalRevalidateStale, 0)} revalidate_unlinked={Interlocked.Exchange(ref _totalRevalidateUnlinked, 0)}") +
+            FormattableString.Invariant($" revalidated={Interlocked.Exchange(ref _totalRevalidated, 0)} revalidate_stale={Interlocked.Exchange(ref _totalRevalidateStale, 0)} revalidate_unlinked={Interlocked.Exchange(ref _totalRevalidateUnlinked, 0)} stats_masked_hits={Interlocked.Exchange(ref _totalStatisticsMaskedHits, 0)}") +
             TakeChurnReport() +
             TakeStaleDifferenceReport() + TakeMissReport() + TakeDetailReport();
     }
@@ -1202,6 +1202,12 @@ public sealed partial class ResourceMaterializationCache
                     Hits++;
                     Interlocked.Increment(ref _totalHits);
                     snapshot = rebase.Apply(WithCurrentUserData(variant.Snapshot, inputs.UserData), inputs.UserData);
+                    if (_statisticsDiffer)
+                    {
+                        snapshot = WithMipStatistics(snapshot, MipStatisticsOf(variant));
+                        Interlocked.Increment(ref _totalStatisticsMaskedHits);
+                    }
+
                     specialization = variant.Specialization;
                     failure = default;
                     return true;
@@ -1512,6 +1518,7 @@ public sealed partial class ResourceMaterializationCache
                 RangeClean = cached.RangeClean,
                 WordTableOnly = cached.WordTableOnly,
                 BaseWordBuffers = cached.BaseWordBuffers,
+                ImageStatisticsWords = cached.ImageStatisticsWords,
                 TableRefreshable = true,
                 // Published entries must not share mutable scratch storage.
                 Bytes = current.AsSpan(0, currentLength).ToArray(),
@@ -2116,12 +2123,20 @@ public sealed partial class ResourceMaterializationCache
         IReadOnlyList<uint> userData, out bool unreadable) =>
         Validate(entry, residentReader, rebase, userData, out unreadable, out _, out _);
 
+    private bool _statisticsDiffer;
+    private int _validation;
+    private uint[] _currentStatistics = [];
+    private int[] _statisticsCapturedAt = [];
+    private static long _totalStatisticsMaskedHits;
+
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase, IReadOnlyList<uint> userData,
         out bool unreadable, out bool descriptorChanged, out RejectionSample rejection)
     {
         unreadable = false;
         descriptorChanged = false;
         rejection = default;
+        _statisticsDiffer = false;
+        _validation++;
         // A memory-loaded base usually moved when anything did: its few bytes are checked before
         // ranges that can span kilobytes. The full comparison below still decides a match.
         if (entry.BaseWordBuffers is not null)
@@ -2151,19 +2166,21 @@ public sealed partial class ResourceMaterializationCache
             }
 
             using var comparisonProfile = MeasureDetail(CacheDetail.ValidateCompare);
-            if (!current.SequenceEqual(entry.Bytes.AsSpan(entry.RangeOffsets[index], length)))
+            if (!current.SequenceEqual(entry.Bytes.AsSpan(entry.RangeOffsets[index], length)) && !OnlyMipStatisticsDiffer(entry, index, current))
             {
                 RecordChangedWords(entry, index, current);
                 CountDiagnostic(Diagnostic.BytesChanged);
                 var previous = entry.Bytes.AsSpan(entry.RangeOffsets[index], length);
                 for (var offset = 0; offset < length; offset += sizeof(uint))
                 {
-                    if (!entry.WordTableOnly[(entry.RangeOffsets[index] + offset) / sizeof(uint)] &&
-                        !current.Slice(offset, sizeof(uint)).SequenceEqual(previous.Slice(offset, sizeof(uint))))
+                    var word = (entry.RangeOffsets[index] + offset) / sizeof(uint);
+                    var now = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current[offset..]);
+                    var was = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(previous[offset..]);
+                    if (!entry.WordTableOnly[word] && ((now ^ was) & ~MipStatisticsMask(entry, word, out _)) != 0)
                     {
                         descriptorChanged = true;
                         rejection = new RejectionSample(index, entry.RangeAddresses[index], length, entry.RangeClean[index],
-                            offset, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current[offset..]));
+                            offset, now);
                         break;
                     }
                 }
@@ -2172,6 +2189,135 @@ public sealed partial class ResourceMaterializationCache
         }
 
         return true;
+    }
+
+    private bool OnlyMipStatisticsDiffer(Entry entry, int range, ReadOnlySpan<byte> current)
+    {
+        if (entry.ImageStatisticsWords is not { } probes)
+            return false;
+        var recorded = entry.Bytes.AsSpan(entry.RangeOffsets[range], current.Length);
+        var firstWord = entry.RangeOffsets[range] / sizeof(uint);
+        for (var offset = 0; offset < current.Length; offset += sizeof(uint))
+        {
+            var now = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current[offset..]);
+            var was = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(recorded[offset..]);
+            if (now == was)
+                continue;
+            var mask = MipStatisticsMask(entry, firstWord + offset / sizeof(uint), out var slot);
+            if (slot < 0 || ((now ^ was) & ~mask) != 0)
+                return false;
+            if (_currentStatistics.Length < probes.Length * 2)
+            {
+                _currentStatistics = new uint[probes.Length * 2];
+                _statisticsCapturedAt = new int[probes.Length * 2];
+            }
+
+            _currentStatistics[slot] = now;
+            _statisticsCapturedAt[slot] = _validation;
+            _statisticsDiffer = true;
+        }
+
+        return true;
+    }
+
+    private static uint MipStatisticsMask(Entry entry, int word, out int slot)
+    {
+        slot = -1;
+        if (entry.ImageStatisticsWords is not { } probes)
+            return 0;
+        for (var image = 0; image < probes.Length; image++)
+        {
+            var probe = probes[image];
+            if (probe < 0)
+                continue;
+            if (probe == word)
+            {
+                slot = image * 2;
+                return ResourceSnapshot.MipStatisticsEnableWordMask;
+            }
+
+            if (probe + 1 == word)
+            {
+                slot = image * 2 + 1;
+                return ResourceSnapshot.MipStatisticsSlotWordMask;
+            }
+        }
+
+        return 0;
+    }
+
+    private uint[] MipStatisticsOf(Entry entry)
+    {
+        var probes = entry.ImageStatisticsWords!;
+        var statistics = new uint[probes.Length];
+        for (var image = 0; image < probes.Length; image++)
+        {
+            var probe = probes[image];
+            if (probe < 0)
+            {
+                statistics[image] = ResourceSnapshot.NoMipStatistics;
+                continue;
+            }
+
+            var word5 = _statisticsCapturedAt.Length > image * 2 && _statisticsCapturedAt[image * 2] == _validation
+                ? _currentStatistics[image * 2]
+                : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(probe * sizeof(uint)));
+            var word6 = _statisticsCapturedAt.Length > image * 2 + 1 && _statisticsCapturedAt[image * 2 + 1] == _validation
+                ? _currentStatistics[image * 2 + 1]
+                : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan((probe + 1) * sizeof(uint)));
+            statistics[image] = ResourceSnapshot.MipStatisticsOf(word5, word6);
+        }
+
+        return statistics;
+    }
+
+    private static ResourceSnapshot WithMipStatistics(ResourceSnapshot snapshot, uint[] statistics) => new()
+    {
+        Buffers = snapshot.Buffers,
+        Images = snapshot.Images,
+        Samplers = snapshot.Samplers,
+        FlattenedResourceTable = snapshot.FlattenedResourceTable,
+        UserData = snapshot.UserData,
+        DeviceAddressRanges = snapshot.DeviceAddressRanges,
+        MipStatistics = statistics,
+        Origin = snapshot.Origin,
+    };
+
+    private static int[]? MapImageStatisticsWords(ResourceSnapshot snapshot, byte[] bytes)
+    {
+        int[]? map = null;
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        for (var image = 0; image < snapshot.Images.Length; image++)
+        {
+            var descriptor = snapshot.Images[image];
+            if (descriptor.Length < 8 || (descriptor[0] == 0 && descriptor[1] == 0))
+                continue;
+            var match = -1;
+            for (var word = 0; word + 8 <= words.Length; word++)
+            {
+                if (words[word] != descriptor[0] || !words.Slice(word, 8).SequenceEqual(descriptor.AsSpan(0, 8)))
+                    continue;
+                if (match >= 0)
+                {
+                    match = -1;
+                    break;
+                }
+
+                match = word;
+            }
+
+            if (match < 0)
+                continue;
+            if (map is null)
+            {
+                map = new int[snapshot.Images.Length];
+                map.AsSpan().Fill(-1);
+            }
+
+            map[image] = match + 5;
+        }
+
+        return map;
     }
 
     private sealed class Entry
@@ -2195,6 +2341,7 @@ public sealed partial class ResourceMaterializationCache
         public required ResourceSpecialization Specialization { get; init; }
         // Per recorded dword: the buffer whose memory-loaded base dword it is, or a negative value.
         public int[]? BaseWordBuffers { get; init; }
+        public int[]? ImageStatisticsWords { get; init; }
         // Filled on the first rebased refresh of the entry; see RangeWindowsOf and TableCopySourcesOf.
         public int[]? RangeWindows { get; set; }
         public int[]? TableCopySources { get; set; }
@@ -2447,6 +2594,7 @@ public sealed partial class ResourceMaterializationCache
             return new Entry
             {
                 BaseWordBuffers = memoryBases.Count == 0 ? null : MapBaseWords(snapshot, memoryBases, bytes),
+                ImageStatisticsWords = MapImageStatisticsWords(snapshot, bytes),
                 Plan = plan,
                 UserData = userData,
                 UsedUserData = _userData.TakeUsed(),

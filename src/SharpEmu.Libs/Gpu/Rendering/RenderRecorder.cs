@@ -200,11 +200,14 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
 
         var descriptors = stage.Resources.Images;
+        var statistics = stage.Resources.MipStatistics;
         for (var index = 0; index < program.Images.Length && index < descriptors.Length; index++)
         {
             if (program.Images[index].Class == ImageResourceClass.Sampled)
             {
-                MipStatistics.Shared.NoteSampled(new TextureDescriptorWords(descriptors[index]));
+                MipStatistics.Shared.NoteSampled(
+                    new TextureDescriptorWords(descriptors[index]),
+                    statistics is not null && index < statistics.Length ? statistics[index] : ShaderCompiler.Resources.ResourceSnapshot.NoMipStatistics);
             }
         }
     }

@@ -1044,7 +1044,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (layout.MipStatisticsCount != 0)
             {
                 LodStatistics().EnsureInitialized();
-                WriteMipStatisticsFields(shaderData, layout, info, snapshot.Images);
+                WriteMipStatisticsFields(shaderData, layout, info, snapshot.Images, snapshot.MipStatistics);
             }
 
             if (layout.Find(DescriptorBindingKind.FlattenedResourceTable) is not null)

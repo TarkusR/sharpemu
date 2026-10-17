@@ -88,6 +88,37 @@ public sealed class ResourceMaterializationCacheTests
     }
 
     [Fact]
+    public void ToggledMipStatisticsBitsReuseTheMaterializationWithTheCurrentSlot()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var first, out _));
+        Assert.Null(first.MipStatistics);
+        var record = HeapBase + 0x100 + 5 * 32;
+        var image = Array.FindIndex(first.Images, words => words[0] == 0x1000);
+        Assert.True(image >= 0);
+
+        heap.Words[record + 5 * 4] = 1u << 25;
+        heap.Words[record + 6 * 4] = 0x2A;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var second, out _));
+        Assert.Same(first.Images, second.Images);
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        Assert.Equal(0x2Au | ResourceSnapshot.MipStatisticsEnabled, second.MipStatistics![image]);
+        Assert.Equal(0u, second.MipStatistics[1 - image]);
+
+        heap.Words[record + 6 * 4] = 0x2B;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var third, out _));
+        Assert.Same(first.Images, third.Images);
+        Assert.Equal(0x2Bu | ResourceSnapshot.MipStatisticsEnabled, third.MipStatistics![image]);
+
+        heap.Words[record] = 0x3000;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var fourth, out _));
+        Assert.NotSame(first.Images, fourth.Images);
+        Assert.Equal((2, 2), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
     public void AChangedDescriptorWordMaterializesAgain()
     {
         var plan = Plan();
