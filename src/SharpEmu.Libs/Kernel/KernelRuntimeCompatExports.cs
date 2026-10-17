@@ -801,6 +801,7 @@ public static class KernelRuntimeCompatExports
             _prtApertures[apertureId] = (apertureBase, apertureSize);
         }
 
+        SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.NoteLazyRange(apertureId, apertureBase, apertureSize);
         Console.Error.WriteLine(
             $"[LOADER][TRACE] set_prt_aperture: id={apertureId} base=0x{apertureBase:X16} size=0x{apertureSize:X16}");
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_ALLOC_IMPORTS"), "1", StringComparison.Ordinal))

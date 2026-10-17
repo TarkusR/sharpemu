@@ -79,6 +79,45 @@ public static class GuestGpuMemoryHook
         }
 
         _current = memory;
+        if (memory != null)
+        {
+            (ulong Address, ulong Size)[] lazy;
+            lock (_lazyRanges)
+            {
+                lazy = _lazyRanges.Values.ToArray();
+            }
+
+            foreach (var (address, size) in lazy)
+            {
+                memory.RegisterLazyRange(address, size);
+            }
+        }
+    }
+
+    private static readonly Dictionary<int, (ulong Address, ulong Size)> _lazyRanges = new();
+
+    // A lazily backed aperture; size zero forgets the aperture again.
+    public static void NoteLazyRange(int id, ulong address, ulong size)
+    {
+        (ulong Address, ulong Size) previous = default;
+        lock (_lazyRanges)
+        {
+            _lazyRanges.Remove(id, out previous);
+            if (size != 0 && IsWithinGpuAddressSpace(address, size))
+            {
+                _lazyRanges[id] = (address, size);
+            }
+        }
+
+        if (previous.Size != 0)
+        {
+            _current?.UnregisterLazyRange(previous.Address, previous.Size);
+        }
+
+        if (size != 0 && IsWithinGpuAddressSpace(address, size))
+        {
+            _current?.RegisterLazyRange(address, size);
+        }
     }
 
     public static bool IsWithinGpuAddressSpace(ulong address, ulong size)
@@ -168,5 +207,5 @@ public static class GuestGpuMemoryHook
 
     public static string GetSummary() =>
         $"gpu_memory: mapped={Interlocked.Read(ref _mapped)} unmapped={Interlocked.Read(ref _unmapped)} faults_resolved={Interlocked.Read(ref _faultsResolved)} faults_declined={Interlocked.Read(ref _faultsDeclined)} " +
-        $"mapped_content_invalidations={GuestGpuMemory.MappedContentInvalidations} mapped_content_owned={GuestGpuMemory.MappedContentOwned}";
+        $"mapped_content_invalidations={GuestGpuMemory.MappedContentInvalidations} mapped_content_owned={GuestGpuMemory.MappedContentOwned} lazy_covered_writes={GuestGpuMemory.LazyCoveredWrites}";
 }

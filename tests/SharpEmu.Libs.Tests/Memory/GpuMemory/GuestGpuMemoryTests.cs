@@ -238,6 +238,29 @@ public sealed class GuestGpuMemoryTests
     }
 
     [Fact]
+    public void RegisterLazyRange_CoversWritesAndFaultsWithoutRegisteringSpans()
+    {
+        _memory.RegisterLazyRange(0x100000, 0x10000);
+
+        Assert.False(_memory.Covers(0x104000, 0x2000));
+        Assert.False(_memory.OverlapsRegistered(0x104000, 0x2000));
+        Assert.True(_memory.MarkCpuWrite(0x104000, 0x2000));
+        Assert.Equal(new[] { "buffer.write 104000+2000", "image.write 104000+2000" }, _stores.Calls);
+
+        _stores.Calls.Clear();
+        _stores.ImageHandles = true;
+        Assert.True(_memory.TryResolveFault(FaultKind.Write, 0x104010));
+        Assert.Equal(new[] { "buffer.write 104000+4000", "image.write 104010+8" }, _stores.Calls);
+
+        _stores.Calls.Clear();
+        _memory.UnregisterLazyRange(0x100000, 0x10000);
+        Assert.False(_memory.MarkCpuWrite(0x104000, 0x2000));
+        Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x104010));
+        Assert.Empty(_stores.Calls);
+        _memory.Dispose();
+    }
+
+    [Fact]
     public void Register_MarksTheMappedContentWrittenOnTheGpuQueue()
     {
         var queue = new InlineQueue { IsGpuQueueThread = false };

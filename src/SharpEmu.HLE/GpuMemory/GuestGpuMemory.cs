@@ -37,6 +37,9 @@ public sealed class GuestGpuMemory : IDisposable
     private readonly ReaderWriterLockSlim _spansLock = new();
     private readonly SpanSet _spans = new();
     private SpanSnapshot? _spanSnapshot = SpanSnapshot.Empty;
+    private readonly SpanSet _lazySpans = new();
+    private SpanSnapshot _lazySnapshot = SpanSnapshot.Empty;
+    private static long _lazyCoveredWrites;
     private long _spanVersion;
 
     public long SpanVersion => Interlocked.Read(ref _spanVersion);
@@ -77,7 +80,7 @@ public sealed class GuestGpuMemory : IDisposable
         // that reaches into the next page faults again there.
         const ulong accessBytes = 8;
         var faultSize = Math.Min(accessBytes, TrackerLayout.PageBytes - (address & (TrackerLayout.PageBytes - 1)));
-        if (!Covers(address, faultSize))
+        if (!CoversWrites(address, faultSize))
         {
             TraceFault("unregistered");
             return false;
@@ -94,7 +97,7 @@ public sealed class GuestGpuMemory : IDisposable
         if (kind == FaultKind.Write)
         {
             var groupAddress = address & ~(GuestWriteGranule - 1);
-            var (markAddress, markSize) = Covers(groupAddress, GuestWriteGranule) && GuestPermits(kind, groupAddress) && GuestPermits(kind, groupAddress + GuestWriteGranule - 1)
+            var (markAddress, markSize) = CoversWrites(groupAddress, GuestWriteGranule) && GuestPermits(kind, groupAddress) && GuestPermits(kind, groupAddress + GuestWriteGranule - 1)
                 ? (groupAddress, GuestWriteGranule)
                 : (address, faultSize);
             handled = (buffers?.MarkCpuWrite(markAddress, markSize) ?? false) | (images?.MarkCpuWrite(address, faultSize) ?? false);
@@ -154,9 +157,14 @@ public sealed class GuestGpuMemory : IDisposable
 
     public bool MarkCpuWrite(ulong address, ulong size)
     {
-        if (!Covers(address, size))
+        if (!CoversWrites(address, size))
         {
             return false;
+        }
+
+        if (!Covers(address, size))
+        {
+            Interlocked.Increment(ref _lazyCoveredWrites);
         }
 
         _ = Buffers?.MarkCpuWrite(address, size);
@@ -169,7 +177,7 @@ public sealed class GuestGpuMemory : IDisposable
     // without a fault. Both stores mark those pages again.
     public void MarkCpuWriteLanded(ulong address, ulong size)
     {
-        if (!Covers(address, size))
+        if (!CoversWrites(address, size))
         {
             return;
         }
@@ -196,6 +204,44 @@ public sealed class GuestGpuMemory : IDisposable
     {
         var snapshot = Volatile.Read(ref _spanSnapshot) ?? throw new ObjectDisposedException(nameof(GuestGpuMemory));
         return snapshot.TryGetContaining(address, out start, out end);
+    }
+
+    // Lazily backed guest ranges (the PRT aperture) hold GPU cache entries without a registered span.
+    private bool CoversWrites(ulong address, ulong size) =>
+        Covers(address, size) || (new GuestSpan(address, size).IsValid && Volatile.Read(ref _lazySnapshot).Contains(address, size));
+
+    public static long LazyCoveredWrites => Interlocked.Read(ref _lazyCoveredWrites);
+
+    public void RegisterLazyRange(ulong address, ulong size)
+    {
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, "lazy-range");
+        _spansLock.EnterWriteLock();
+        try
+        {
+            _lazySpans.Add(address, size);
+            Volatile.Write(ref _lazySnapshot, _lazySpans.Snapshot());
+        }
+        finally
+        {
+            _spansLock.ExitWriteLock();
+        }
+
+        _pages.Permissions.Set(address, size, GuestPageProtection.Read | GuestPageProtection.Write);
+    }
+
+    public void UnregisterLazyRange(ulong address, ulong size)
+    {
+        _spansLock.EnterWriteLock();
+        try
+        {
+            _lazySpans.Remove(address, size);
+            Volatile.Write(ref _lazySnapshot, _lazySpans.Snapshot());
+        }
+        finally
+        {
+            _spansLock.ExitWriteLock();
+        }
     }
 
     public void ForEachSpan(Action<ulong, ulong> visit)
