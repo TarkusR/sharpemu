@@ -212,6 +212,11 @@ public sealed class RecordingBuffer
 
     private void PromoteDeferredBarrier(Vulkan.DeferredBarrierPromotion cause)
     {
+        if (cause == Vulkan.DeferredBarrierPromotion.Handle && Diagnostics.PromotionSiteTally.Enabled)
+        {
+            Diagnostics.PromotionSiteTally.Note();
+        }
+
         var request = _deferredBarrier;
         _hasDeferredBarrier = false;
         Interlocked.Increment(ref _deferredPromotions);

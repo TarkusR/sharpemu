@@ -5,26 +5,33 @@ using System.Diagnostics;
 
 namespace SharpEmu.Libs.Diagnostics;
 
-internal static class SubmitSiteTally
+internal sealed class CallSiteTally(string tag, int sampleEvery)
 {
     private const int SiteFrames = 6;
 
-    public static readonly bool Enabled = VideoOut.RenderPhaseProfile.Enabled;
-
-    private static readonly object _gate = new();
-    private static readonly Dictionary<string, long> _sites = new(StringComparer.Ordinal);
-
     private static readonly HashSet<string> PlumbingTypes = new(StringComparer.Ordinal)
     {
+        "CallSiteTally",
         "SubmitSiteTally",
+        "PromotionSiteTally",
+        "RecordingBuffer",
         "TickTimeline",
         "SubmissionScheduler",
         "VulkanTickDevice",
         "GpuWorkerRelay",
     };
 
-    public static void Note()
+    private readonly object _gate = new();
+    private readonly Dictionary<string, long> _sites = new(StringComparer.Ordinal);
+    private long _calls;
+
+    public void Note()
     {
+        if (sampleEvery > 1 && Interlocked.Increment(ref _calls) % sampleEvery != 0)
+        {
+            return;
+        }
+
         var names = new List<string>(SiteFrames);
         foreach (var frame in new StackTrace(1, false).GetFrames())
         {
@@ -60,7 +67,7 @@ internal static class SubmitSiteTally
         }
     }
 
-    public static void Report()
+    public void Report()
     {
         List<KeyValuePair<string, long>> ranked;
         lock (_gate)
@@ -76,7 +83,29 @@ internal static class SubmitSiteTally
 
         foreach (var (site, count) in ranked)
         {
-            Console.Error.WriteLine(FormattableString.Invariant($"[PERF][SUBMIT_SITE] n={count} site={site}"));
+            Console.Error.WriteLine(FormattableString.Invariant($"[PERF][{tag}] n={count * sampleEvery} site={site}"));
         }
     }
+}
+
+internal static class SubmitSiteTally
+{
+    public static readonly bool Enabled = VideoOut.RenderPhaseProfile.Enabled;
+
+    private static readonly CallSiteTally Tally = new("SUBMIT_SITE", 1);
+
+    public static void Note() => Tally.Note();
+
+    public static void Report() => Tally.Report();
+}
+
+internal static class PromotionSiteTally
+{
+    public static readonly bool Enabled = VideoOut.RenderPhaseProfile.Enabled;
+
+    private static readonly CallSiteTally Tally = new("PROMOTION_SITE", 64);
+
+    public static void Note() => Tally.Note();
+
+    public static void Report() => Tally.Report();
 }

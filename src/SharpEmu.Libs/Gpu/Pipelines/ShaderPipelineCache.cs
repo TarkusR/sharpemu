@@ -128,6 +128,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return hash;
     }
 
+    public static string TakeFastPathReport() =>
+        FormattableString.Invariant($"[PERF][FAST_PATHS] zero_group_skips={Interlocked.Exchange(ref Rendering.RenderExecutor.ZeroGroupSkips, 0)} shader_hash_memo={Interlocked.Exchange(ref _identityMemoHits, 0)} ") +
+        FormattableString.Invariant($"stream_cleaned={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamCleaned, 0)} stream_uses={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamUses, 0)}");
 
     private uint[]? InputSemantics(ShaderHeaderEntry header)
     {

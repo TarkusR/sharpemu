@@ -539,6 +539,7 @@ internal static class RenderPhaseProfile
         ComputeCompileProfile.Report();
         SharpEmu.ShaderCompiler.Vulkan.ShaderTranslationProfile.Report();
         SharpEmu.Libs.Diagnostics.SubmitSiteTally.Report();
+        SharpEmu.Libs.Diagnostics.PromotionSiteTally.Report();
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(BufferUploadProfile.TakeTotalsReport());
@@ -549,6 +550,7 @@ internal static class RenderPhaseProfile
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Rendering.PendingGpuWrites.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.CommandThreadTally.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeKeptProgramsReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeFastPathReport());
         Console.Error.WriteLine(VulkanVideoPresenter.TakeStagePreparationReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.ContentUploadArena.TakeReport());
         ReportResolveWorker(seconds, frames);
