@@ -882,8 +882,9 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         var address = harness.MapBacked(0x10000, ReadWrite);
         harness.Write(address, new byte[0x100]);
 
-        for (var preparationIndex = 0; preparationIndex < 3; preparationIndex++)
+        for (var preparationIndex = 0; preparationIndex < GuestBufferCache.StreamUsesBeforeClean + 1; preparationIndex++)
         {
+            var streamed = preparationIndex + 1 < GuestBufferCache.StreamUsesBeforeClean;
             presenter.Run(() =>
             {
                 Assert.True(stream.TryMap(stream.Size, out _));
@@ -894,8 +895,16 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             {
                 using var preparation = presenter.RenderHost.BeginPreparation();
                 var binding = presenter.RenderHost.ObtainBuffer(address, 0x100, false);
-                Assert.Equal(stream.Handle.Handle, binding.Handle);
-                Assert.Equal(0UL, binding.Offset);
+                if (streamed)
+                {
+                    Assert.Equal(stream.Handle.Handle, binding.Handle);
+                    Assert.Equal(0UL, binding.Offset);
+                }
+                else
+                {
+                    Assert.NotEqual(stream.Handle.Handle, binding.Handle);
+                }
+
                 var transient = presenter.RenderHost.UploadTransient(new byte[0x100], 16);
                 Assert.Equal(stream.Handle.Handle, transient.Handle);
             });

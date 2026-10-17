@@ -251,6 +251,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 (!isTexelBuffer || !RequireImageCache().MayHaveImageBytes(guestAddress, size)))
             {
                 TouchBuffer(memo.Identifier);
+                OverlayGuestPublications?.Invoke(kept, memo.Offset, guestAddress, size);
                 return (kept, memo.Offset);
             }
         }
@@ -260,14 +261,21 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             !(_tracker.MayHaveGpuDirtyPages(guestAddress, size) && _tracker.HasGpuDirtyPages(guestAddress, size)) &&
             (size <= CachingPageSize || (!isTexelBuffer && _tracker.IsCpuWriteHotRange(guestAddress, size))))
         {
-            using var streamProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStreamUpload);
-            if (_stream.TryMap(size, out var streamOffset, StreamOffsetAlignment, allowWait: false) &&
-                _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))
+            if (StreamUseExceeded(guestAddress, size) && !_tracker.IsCpuWriteHotRange(guestAddress, size))
             {
-                _stream.Commit();
-                if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-stream-upload", guestAddress, size, $"offset=0x{streamOffset:X}");
-                OverlayGuestPublications?.Invoke(_stream, streamOffset, guestAddress, size);
-                return (_stream, streamOffset);
+                Interlocked.Increment(ref StreamCleaned);
+            }
+            else
+            {
+                using var streamProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStreamUpload);
+                if (_stream.TryMap(size, out var streamOffset, StreamOffsetAlignment, allowWait: false) &&
+                    _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))
+                {
+                    _stream.Commit();
+                    if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-stream-upload", guestAddress, size, $"offset=0x{streamOffset:X}");
+                    OverlayGuestPublications?.Invoke(_stream, streamOffset, guestAddress, size);
+                    return (_stream, streamOffset);
+                }
             }
         }
 
@@ -329,6 +337,31 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         return ObtainBuffer(guestAddress, size, isWritten: true).Buffer;
+    }
+
+    private const int StreamUseSlots = 1024;
+    internal const int StreamUsesBeforeClean = 3;
+    private readonly (ulong Address, ulong Size, int Uses)[] _streamUses = new (ulong, ulong, int)[StreamUseSlots];
+    public static long StreamCleaned;
+    public static long StreamUses;
+
+    private bool StreamUseExceeded(ulong guestAddress, ulong size)
+    {
+        Interlocked.Increment(ref StreamUses);
+        ref var slot = ref _streamUses[(int)(((guestAddress >> 4) ^ (guestAddress >> 17) ^ (size * 0x9E3779B1UL)) & (StreamUseSlots - 1))];
+        if (slot.Address != guestAddress || slot.Size != size)
+        {
+            slot = (guestAddress, size, 1);
+            return false;
+        }
+
+        if (++slot.Uses < StreamUsesBeforeClean)
+        {
+            return false;
+        }
+
+        slot = default;
+        return true;
     }
 
     public (GpuBuffer Buffer, ulong Offset) ObtainBufferForImage(ulong guestAddress, ulong size)
