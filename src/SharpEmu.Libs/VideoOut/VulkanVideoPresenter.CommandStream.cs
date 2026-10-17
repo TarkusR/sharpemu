@@ -584,7 +584,7 @@ internal static unsafe partial class VulkanVideoPresenter
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
             // Transfers the buffer cache completes in guest memory leave the rendering scope open;
             // its GPU paths end the scope before they record.
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             _bufferCache.FillBuffer(address, size, value, isGds);
         }
 
@@ -598,7 +598,7 @@ internal static unsafe partial class VulkanVideoPresenter
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
             // Transfers the buffer cache completes in guest memory leave the rendering scope open;
             // its GPU paths end the scope before they record.
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             _bufferCache.CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds);
         }
 
@@ -632,7 +632,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
             using var completionScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandEndOfPipe);
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var buffer = _scheduler.Current;
             switch (write.Kind)
             {
@@ -717,7 +717,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 return _commandThread!.Run(() => PrepareFlip(queueId, handle, index, flipMode, flipArgument));
             }
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var publication = _guestPublications.LastRecorded(queueId) is null
                 ? null : _guestPublications.AddAfterPending(queueId, 0, 0);
             if (publication is not null) _guestPublications.Register(publication, _scheduler.CurrentTick);
@@ -911,7 +911,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var surface = new DisplaySurfaceWords(
                     displayBuffer.Address, 0, displayBuffer.PixelFormat, displayBuffer.Width, displayBuffer.Height, displayBuffer.TilingMode, displayBuffer.Option, 0, 0, false);
                 var request = ImageRequestBuilders.DisplaySurface(surface);
-                _ = BeginBatchedGuestCommands();
+                EnsureBatchedGuestCommands();
                 var imageIdentifier = _imageCache.FindImage(ref request);
                 var source = _imageCache.GetImage(imageIdentifier);
                 source.Uses.VideoOut = true;

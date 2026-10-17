@@ -299,7 +299,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 CompleteOverlappingPublications(texture.Request.Description.Data.Address,
                     texture.Request.Description.Data.Size, includeLabels: false);
                 _imageCache.SynchronizeColorMetadata(texture.Request);
-                _ = BeginBatchedGuestCommands();
+                EnsureBatchedGuestCommands();
                 _imageCache.ApplyNativeColorClear(texture.ImageIdentifier, texture.Request);
                 BindImage(texture.ImageIdentifier, texture.IsStorage);
             }
@@ -409,7 +409,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var storage = image.ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage;
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var shape = ImageRequestBuilders.ShapeOf(image);
             var key = ImageBindingKey.Of(words, shape);
             var memos = _imageBindingMemos ??= new Dictionary<ImageBindingKey, ImageBindingMemo>();
@@ -422,7 +422,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CompleteOverlappingPublications(originalResolution.Request.Description.Data.Address,
                 originalResolution.Request.Description.Data.Size, includeLabels: false);
             _imageCache.SynchronizeColorMetadata(originalResolution.Request);
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             TextureRequestResolution resolution;
             ResourceSlotIdentifier imageIdentifier;
             if (known && _imageCache.TryTouchRemembered(memo.Found, ref memo.Generation, memo.Begin, memo.End))

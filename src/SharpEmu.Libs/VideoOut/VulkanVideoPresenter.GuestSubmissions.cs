@@ -63,6 +63,14 @@ internal static unsafe partial class VulkanVideoPresenter
             return commandBuffer;
         }
 
+        // Opens the batch without asking for the native handle, so a deferred barrier stays deferred
+        // until a command is actually recorded.
+        private void EnsureBatchedGuestCommands()
+        {
+            _ = CurrentRecording();
+            OpenGuestBatch();
+        }
+
         private CommandBuffer BeginBatchedGuestStateCommands()
         {
             var recording = CurrentRecording();

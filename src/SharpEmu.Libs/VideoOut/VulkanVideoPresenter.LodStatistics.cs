@@ -68,7 +68,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private void RecordLodStatistics(ulong destination, uint size)
         {
             EndRendering();
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             LodStatistics().Record(destination, size);
         }
 

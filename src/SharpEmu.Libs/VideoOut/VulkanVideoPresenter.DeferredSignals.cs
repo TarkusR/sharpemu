@@ -126,7 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         throw SubmissionScheduler.Fatal($"Cannot publish a held-back command write: address=0x{entry.Address:X16}.");
                 }), _guestPublications.PredecessorTick(entry));
                 _guestPublications.Register(entry, tick);
-                if (tick == _scheduler.CurrentTick) _ = BeginBatchedGuestCommands();
+                if (tick == _scheduler.CurrentTick) EnsureBatchedGuestCommands();
                 if (_scheduler.IsTickKnownComplete(tick)) _scheduler.RunCompletedOperations();
             }
             catch (Exception exception)
@@ -163,7 +163,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var tick = _scheduler.QueueMemoryPublication(
                     () => PublishDeferredSignal(entry, false, static () => { }), _guestPublications.PredecessorTick(entry));
                 _guestPublications.Register(entry, tick);
-                if (tick == _scheduler.CurrentTick) _ = BeginBatchedGuestCommands();
+                if (tick == _scheduler.CurrentTick) EnsureBatchedGuestCommands();
                 if (_scheduler.IsTickKnownComplete(tick)) _scheduler.RunCompletedOperations();
             }
             catch (Exception exception)
@@ -222,7 +222,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var dependency = _guestPublications.PredecessorTick(entry);
                 if (hasSignal)
                 {
-                    _ = BeginBatchedGuestCommands();
+                    EnsureBatchedGuestCommands();
                     dependency = _scheduler.CurrentTick;
                 }
                 var isFlip = write.FlipRequestId != 0;
@@ -269,7 +269,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _signalBatch = batch;
                 }
                 _guestPublications.Register(entry, tick);
-                if (tick == _scheduler.CurrentTick) _ = BeginBatchedGuestCommands();
+                if (tick == _scheduler.CurrentTick) EnsureBatchedGuestCommands();
                 // A device query per label is costly; the render loop runs later completions.
                 if (_scheduler.IsTickKnownComplete(tick)) _scheduler.RunCompletedOperations();
             }

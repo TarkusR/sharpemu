@@ -195,7 +195,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     return false;
                 }
 
-                _ = BeginBatchedGuestCommands();
+                EnsureBatchedGuestCommands();
                 return _scheduler.Active;
             }
         }
@@ -271,7 +271,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageCache.TraceNativeColorMetadata(request);
             _imageCache.TraceTextureMetadata(request);
             _imageCache.SynchronizeColorMetadata(request);
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             if (request.Role == ImageRole.ColorTarget && !request.Description.Metadata.NativeColorClear &&
                 request.Description.DccSliceSize is var sliceSize and not 0)
             {
@@ -326,7 +326,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var view = _imageCache.AcquireDepthTargetView(depth.Image, resolution.Request);
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var layer = resolution.Request.View.BaseLayer;
             if (resolution.HasHtile && resolution.DepthClearEnabled && !_imageCache.ClearMetadata(resolution.HtileAddress))
             {
@@ -463,7 +463,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             EnsureGuestSubmissionCapacity();
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             _preparation = new RenderPreparation(this, _bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream).RetainUpcomingAllocations());
             return _preparation;
         }
@@ -1458,7 +1458,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 sourceImage,
                 new SubresourceRange(sourceMip, 1, sourceLayer, 1),
                 new SubresourceRange(destinationMip, 1, destinationLayer, 1));
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
         }
 
         public void CopyDepthStencilImage(ResourceSlotIdentifier source, ResourceSlotIdentifier destination, in SubresourceRange range, in Extent3D extent, ImageAspectFlags aspects)
@@ -1469,20 +1469,20 @@ internal static unsafe partial class VulkanVideoPresenter
             var sourceImage = _imageCache.GetImage(source);
             var destinationImage = _imageCache.GetImage(destination);
             destinationImage.CopyDepthStencilFrom(sourceImage, in range, in extent, aspects);
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
         }
 
         public bool IsMetadata(ulong address) => _imageCache.IsMetadata(address);
 
         public bool ClearMetadata(ulong address)
         {
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             return _imageCache.ClearMetadata(address);
         }
 
         public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)
         {
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             return _imageCache.TryClearImageFromBuffer(address, size, packedClear);
         }
 

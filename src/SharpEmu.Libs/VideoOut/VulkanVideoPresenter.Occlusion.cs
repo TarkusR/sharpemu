@@ -77,7 +77,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             EndRendering();
             var queries = OcclusionQueries();
-            if (queries.HasGpuResults) _ = BeginBatchedGuestCommands();
+            if (queries.HasGpuResults) EnsureBatchedGuestCommands();
             queries.Reset(queueId);
             return true;
         }
@@ -118,7 +118,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ = CurrentRecording();
                 if (queries.HasGpuResults)
                 {
-                    _ = BeginBatchedGuestCommands();
+                    EnsureBatchedGuestCommands();
                     publication.DumpMask = instanceMask;
                     publication.DumpStride = strideBytes;
                     publication.GpuSlot = (long)queries.RecordGpuDump(publication.Queue);
@@ -129,7 +129,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var needsSubmit = !ready && queries.HasUnsubmitted;
                 if (needsSubmit)
                 {
-                    _ = BeginBatchedGuestCommands();
+                    EnsureBatchedGuestCommands();
                     queries.Submit(_scheduler);
                 }
                 // Ready results also enter the FIFO so a reset cannot overtake an older dump.
@@ -141,7 +141,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _guestPublications.Register(publication, tick);
                 // The slice and render-loop flushes submit the open batch, and a CPU wait submits its tick.
                 // A flush here would split the slice into two submissions.
-                if (needsSubmit || tick == _scheduler.CurrentTick) _ = BeginBatchedGuestCommands();
+                if (needsSubmit || tick == _scheduler.CurrentTick) EnsureBatchedGuestCommands();
                 if (_scheduler.IsTickKnownComplete(tick)) _scheduler.RunCompletedOperations();
             }
             catch (Exception exception)

@@ -269,11 +269,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             // A lookup needs a recording tick; the scheduler starts with the first batch.
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var request = resolution.Request;
             _imageCache.TraceNativeColorMetadata(request);
             _imageCache.SynchronizeColorMetadata(request);
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, exactFormat);
             _imageCache.ApplyNativeColorClear(imageIdentifier, request);
             BindRenderTarget(imageIdentifier);
@@ -496,7 +496,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return null;
             }
 
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var request = resolution.Request;
             var imageIdentifier = _imageCache.FindImage(ref request);
             BindRenderTarget(imageIdentifier);
@@ -645,11 +645,11 @@ internal static unsafe partial class VulkanVideoPresenter
         private TextureResource ResolveTexture(GuestDrawTexture texture)
         {
             var resolution = ImageRequestBuilders.Texture(texture.Descriptor ?? [], texture.Shape);
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var request = resolution.Request;
             _imageCache.TraceTextureMetadata(request);
             _imageCache.SynchronizeColorMetadata(request);
-            _ = BeginBatchedGuestCommands();
+            EnsureBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
@@ -1249,7 +1249,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     sourceImage,
                     new SubresourceRange(source.Resolution.BaseMipLevel, 1, source.Resolution.BaseArrayLayer, 1),
                     new SubresourceRange(destination.Resolution.BaseMipLevel, 1, destination.Resolution.BaseArrayLayer, 1));
-                _ = BeginBatchedGuestCommands();
+                EnsureBatchedGuestCommands();
             }
             finally
             {
