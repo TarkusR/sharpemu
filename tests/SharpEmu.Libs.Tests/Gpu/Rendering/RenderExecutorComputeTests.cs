@@ -175,6 +175,18 @@ public sealed class RenderExecutorComputeTests : IDisposable
     }
 
     [Fact]
+    public void ThreadDimensionInitiator_WithNoThreads_IsSkippedBeforeTheProgramLookup()
+    {
+        var banks = Banks();
+        banks.Shader.Compute.ThreadsX = 8;
+        _executor.Dispatch(1, banks, 0, 17, 1, 0x41 | (1u << 5));
+
+        AssertNotDispatched();
+        Assert.Empty(_pipelines.Calls);
+        Assert.Equal(0, _host.PreparationsOpened);
+    }
+
+    [Fact]
     public void StorageWrites_InsertTheHazardBarrierBeforeThePipelineBind()
     {
         var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);

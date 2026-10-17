@@ -51,18 +51,24 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
-        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && (groupsX == 0 || groupsY == 0 || groupsZ == 0))
+        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
         {
             if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
             {
                 RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
             }
 
+            Interlocked.Increment(ref ZeroGroupSkips);
             Record(record);
             return;
         }
 
-        var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
+        ComputeProgram computeProgram;
+        using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.DrawProgramResolution))
+        {
+            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ);
+        }
+
         if (computeProgram.Consumed)
         {
             Record(record);
@@ -146,6 +152,20 @@ public sealed partial class RenderExecutor
     }
 
     // The dispatch counts threads; the host counts groups of the shader's thread size.
+    public static long ZeroGroupSkips;
+
+    private static bool IsEmptyDispatch(ComputeStageRegisters compute, bool useThreadDimensions, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        if (useThreadDimensions)
+        {
+            groupsX = GroupsFromThreads(groupsX, compute.ThreadsX);
+            groupsY = GroupsFromThreads(groupsY, compute.ThreadsY);
+            groupsZ = GroupsFromThreads(groupsZ, compute.ThreadsZ);
+        }
+
+        return groupsX == 0 || groupsY == 0 || groupsZ == 0;
+    }
+
     public static uint GroupsFromThreads(uint threads, uint groupSize)
     {
         if (threads == 0)
