@@ -96,7 +96,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
         header = _registry.RequireEntry(codeAddress, label);
-        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, header.CodeRanges, label);
+        var hash = IdentityOf(header, codeAddress, label);
         if (stage == ShaderStage.Mesh && header.Shader.IsFused)
         {
             var withPointer = new uint[VertexUserDataBase + userData.Length];
@@ -108,6 +108,26 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         return new ShaderSource(header.Shader, hash, userData, userDataBase, stage);
     }
+
+    private const int IdentityRecheckPeriod = 64;
+    private static long _identityMemoHits;
+
+    internal ulong IdentityOf(ShaderHeaderEntry header, ulong codeAddress, string label)
+    {
+        var uses = header.IdentityUses;
+        if (uses > 0 && uses % IdentityRecheckPeriod != 0)
+        {
+            header.IdentityUses = uses + 1;
+            Interlocked.Increment(ref _identityMemoHits);
+            return header.IdentityHash;
+        }
+
+        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, header.CodeRanges, label);
+        header.IdentityHash = hash;
+        header.IdentityUses = uses + 1;
+        return hash;
+    }
+
 
     private uint[]? InputSemantics(ShaderHeaderEntry header)
     {

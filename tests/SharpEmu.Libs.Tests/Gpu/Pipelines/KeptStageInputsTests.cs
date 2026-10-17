@@ -220,6 +220,29 @@ public sealed class KeptStageInputsTests : IDisposable
         Assert.Equal(8u, _guest.Registry.Require(VertexAddress, "vertex").CodeSizeBytes);
     }
 
+    [Fact]
+    public void ShaderIdentity_IsRehashedAfterARegistrationOrEverySixtyFourthUse()
+    {
+        var entry = _guest.Registry.RequireEntry(VertexAddress, "vertex");
+        var first = _cache.IdentityOf(entry, VertexAddress, "vertex");
+        _guest.WriteWords(VertexAddress, 0xBF800001);
+
+        for (var use = 1; use < 64; use++)
+        {
+            Assert.Equal(first, _cache.IdentityOf(entry, VertexAddress, "vertex"));
+        }
+
+        var rehashed = _cache.IdentityOf(entry, VertexAddress, "vertex");
+        Assert.NotEqual(first, rehashed);
+        Assert.Equal(rehashed, _cache.IdentityOf(entry, VertexAddress, "vertex"));
+
+        _guest.WriteWords(VertexAddress, 0xBF800002);
+        ShaderHeaderRegistry.NoteRegistration();
+        var registered = _guest.Registry.RequireEntry(VertexAddress, "vertex");
+        Assert.NotSame(entry, registered);
+        Assert.NotEqual(rehashed, _cache.IdentityOf(registered, VertexAddress, "vertex"));
+    }
+
     private GraphicsPrograms Programs(bool pixelActive) =>
         _cache.GetGraphicsPrograms(_banks, [], pixelActive, depthBound: false);
 

@@ -53,6 +53,10 @@ internal sealed class ShaderHeaderEntry
     public bool InputSemanticsRead { get; set; }
 
     public uint[]? InputSemantics { get; set; }
+
+    public ulong IdentityHash;
+
+    public int IdentityUses;
 }
 
 // Resolves the header the guest registered for a code address; a missing header stops the draw.
