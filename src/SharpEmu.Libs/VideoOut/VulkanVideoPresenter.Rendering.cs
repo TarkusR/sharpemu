@@ -542,7 +542,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             _boundDepthLayout,
                             AccessFlags.DepthStencilAttachmentReadBit | (remainingWrites != 0 ? AccessFlags.DepthStencilAttachmentWriteBit : 0),
                             new SubresourceRange(depthView.BaseLevel, depthView.LevelCount, depthView.BaseLayer, depthView.LayerCount),
-                            BeginBatchedGuestCommands());
+                            BeginBatchedGuestTransferCommands());
                         break;
                     }
                 }
@@ -555,7 +555,7 @@ internal static unsafe partial class VulkanVideoPresenter
             PrepareDepthFeedback(bindings);
             PrepareStencilFeedback(bindings);
 
-            var command = BeginBatchedGuestCommands();
+            var command = BeginBatchedGuestTransferCommands();
             foreach (var binding in bindings)
             {
                 if (binding.IsHostMovie || binding.CachedImage is not { } image)
@@ -1363,12 +1363,27 @@ internal static unsafe partial class VulkanVideoPresenter
                 AccessFlags.UniformReadBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |
                 AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit);
 
-        public void ShaderWriteHazardBarrier() =>
-            RecordMemoryBarrier(
-                PipelineStageFlags.AllCommandsBit,
-                PipelineStageFlags.ComputeShaderBit,
-                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
-                AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
+        private static readonly MemoryBarrierRequest ShaderWriteHazardRequest = new(
+            PipelineStageFlags.AllCommandsBit,
+            PipelineStageFlags.ComputeShaderBit,
+            AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+            AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
+
+        public void ShaderWriteHazardBarrier()
+        {
+            if (!BatchBarriers)
+            {
+                RecordMemoryBarrier(
+                    PipelineStageFlags.AllCommandsBit,
+                    PipelineStageFlags.ComputeShaderBit,
+                    AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                    AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
+                return;
+            }
+
+            EndRendering();
+            RequestGuestMemoryBarrier(ShaderWriteHazardRequest);
+        }
 
         public void ShaderAccessBarrier() =>
             RecordMemoryBarrier(
