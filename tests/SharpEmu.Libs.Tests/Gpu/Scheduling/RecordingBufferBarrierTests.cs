@@ -42,6 +42,63 @@ public sealed class RecordingBufferBarrierTests
     }
 
     [Fact]
+    public void ADeferredBarrierWaitsForTheFirstNativeCommandOutsideACheckedWindow()
+    {
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        var recorded = new List<MemoryBarrierRequest>();
+        scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
+        var promotions = RecordingBuffer.DeferredPromotions;
+
+        scheduler.Current.DeferMemoryBarrier(ComputeToAll);
+        scheduler.Current.EnterCheckedWindow();
+        _ = scheduler.Current.Handle;
+        _ = scheduler.Current.Handle;
+        scheduler.Current.ExitCheckedWindow();
+        Assert.Empty(recorded);
+        Assert.Equal(promotions, RecordingBuffer.DeferredPromotions);
+
+        _ = scheduler.Current.Handle;
+        Assert.Equal([ComputeToAll], recorded);
+        Assert.Equal(promotions + 1, RecordingBuffer.DeferredPromotions);
+        _device.CompleteOnSubmit = true;
+    }
+
+    [Fact]
+    public void ARequestFoldsTheDeferredBarrierIntoOneRecord()
+    {
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        var recorded = new List<MemoryBarrierRequest>();
+        scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
+        var promotions = RecordingBuffer.DeferredPromotions;
+
+        scheduler.Current.DeferMemoryBarrier(ComputeToAll);
+        scheduler.Current.RequestMemoryBarrier(AllToCompute);
+        scheduler.Current.EnterCheckedWindow();
+        _ = scheduler.Current.Handle;
+        scheduler.Current.ExitCheckedWindow();
+
+        Assert.Equal([AllToCompute.Union(ComputeToAll)], recorded);
+        Assert.Equal(promotions + 1, RecordingBuffer.DeferredPromotions);
+        Assert.Equal(1L, scheduler.Current.RecordedBarriers);
+        _device.CompleteOnSubmit = true;
+    }
+
+    [Fact]
+    public void ADeferredBarrierIsRecordedBeforeTheBufferEnds()
+    {
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        var recorded = new List<string>();
+        scheduler.MemoryBarrierRecorder = (buffer, _) => recorded.Add($"barrier {_device.Name(buffer)} after {_device.Log[^1]}");
+        scheduler.Current.DeferMemoryBarrier(ComputeToAll);
+        scheduler.Current.EnterCheckedWindow();
+        _device.CompleteOnSubmit = true;
+
+        scheduler.Submit();
+
+        Assert.Equal(["barrier b0 after begin b0"], recorded);
+    }
+
+    [Fact]
     public void APendingRequestIsRecordedBeforeTheBufferEnds()
     {
         using var scheduler = NewActiveScheduler(_device, _rendering);

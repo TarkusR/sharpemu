@@ -378,6 +378,40 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void ShaderAccessBarrier() => Calls.Add("access_barrier");
 
+    public bool DeferBarriers { get; set; }
+
+    public long Promotions { get; set; }
+
+    bool IRenderHost.TryDeferShaderAccessBarrier()
+    {
+        if (!DeferBarriers)
+        {
+            ShaderAccessBarrier();
+            return false;
+        }
+
+        Calls.Add("defer_access_barrier");
+        return true;
+    }
+
+    void IRenderHost.BeginCheckedDispatch()
+    {
+        if (DeferBarriers)
+        {
+            Calls.Add("checked_begin");
+        }
+    }
+
+    void IRenderHost.EndCheckedDispatch()
+    {
+        if (DeferBarriers)
+        {
+            Calls.Add("checked_end");
+        }
+    }
+
+    long IRenderHost.DeferredBarrierPromotions => Promotions;
+
     public bool RetainTargetlessDraws { get; set; }
 
     public List<(RegisterBanks Banks, GraphicsPrograms Programs, TargetlessDrawArguments Arguments)> RetainedDraws { get; } = new();

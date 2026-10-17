@@ -196,6 +196,24 @@ public interface IRenderHost
 
     void ShaderAccessBarrier();
 
+    // False when the host recorded the barrier at once; true when it waits for the next native
+    // command outside a checked dispatch or the next barrier request.
+    bool TryDeferShaderAccessBarrier()
+    {
+        ShaderAccessBarrier();
+        return false;
+    }
+
+    void BeginCheckedDispatch()
+    {
+    }
+
+    void EndCheckedDispatch()
+    {
+    }
+
+    long DeferredBarrierPromotions => 0;
+
     void NoteKnownGpuContents(ulong address, ReadOnlySpan<uint> words)
     {
     }

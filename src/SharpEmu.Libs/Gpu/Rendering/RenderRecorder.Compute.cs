@@ -10,6 +10,7 @@ internal sealed partial class RenderRecorder
 {
     private ComputeProgram? _keptComputeProgram;
     private PipelineHandle _keptComputePipeline;
+    private DispatchChain? _dispatchChain;
 
     public void Record(ResolvedDispatch record)
     {
@@ -100,21 +101,25 @@ internal sealed partial class RenderRecorder
             _host.BindResources(bindings);
             Span<IPreparedBindings> stages = [bindings];
             _host.CommitBindings(PipelineBindPoint.Compute, in pipeline, stages);
-            if (record.HasStorageWrites)
+            var chain = _dispatchChain ??= new DispatchChain();
+            var stage = input.Stage;
+            if (chain.NeedsHazardBarrier(record, in stage, _host.DeferredBarrierPromotions))
             {
                 _host.ShaderWriteHazardBarrier();
             }
 
-            _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
             var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
+            _host.BeginCheckedDispatch();
+            _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
             if (record.IndirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(record.IndirectArgumentsAddress))
             {
                 var (groupsX, groupsY, groupsZ) = PhysicalGroups(input, record);
                 _host.Dispatch(groupsX, groupsY, groupsZ);
             }
 
+            _host.EndCheckedDispatch();
+            chain.Commit(_host.TryDeferShaderAccessBarrier(), _host.DeferredBarrierPromotions);
             _host.EndComputeImageSnapshot(imageSnapshot, bindings);
-            _host.ShaderAccessBarrier();
             if (record.IndirectArgumentsAddress == 0 && computeProgram.KnownWrite is { } known)
             {
                 _host.NoteKnownGpuContents(known.Address, known.Words);

@@ -40,6 +40,10 @@ public sealed class RecordingBuffer
     private bool _handleWasRequested;
     private MemoryBarrierRequest _pendingBarrier;
     private bool _hasPendingBarrier;
+    private MemoryBarrierRequest _deferredBarrier;
+    private bool _hasDeferredBarrier;
+    private bool _checkedWindow;
+    private static long _deferredPromotions;
 
     internal nint Buffer;
 
@@ -68,7 +72,11 @@ public sealed class RecordingBuffer
 
     public bool IsInvalid => Buffer == 0;
 
-    internal bool HasPendingCommands => _handleWasRequested || _hasPendingBarrier || _rendering.IsRendering;
+    internal bool HasPendingCommands => _handleWasRequested || _hasPendingBarrier || _hasDeferredBarrier || _rendering.IsRendering;
+
+    // Grows whenever a deferred barrier is recorded or a buffer starts, so a caller can tell whether
+    // the work it deferred is still outstanding.
+    public static long DeferredPromotions => Interlocked.Read(ref _deferredPromotions);
 
     public long MergedBarriers { get; private set; }
 
@@ -85,6 +93,11 @@ public sealed class RecordingBuffer
             }
 
             // A caller can record native commands after it obtains the handle.
+            if (_hasDeferredBarrier && !_checkedWindow)
+            {
+                PromoteDeferredBarrier(Vulkan.DeferredBarrierPromotion.Handle);
+            }
+
             FlushPendingBarrier();
             _handleWasRequested = true;
             return Buffer;
@@ -112,9 +125,21 @@ public sealed class RecordingBuffer
             throw SubmissionScheduler.Fatal("A memory barrier needs a recording command buffer outside rendering.");
         }
 
+        var merged = request;
+        if (_hasDeferredBarrier)
+        {
+            merged = merged.Union(_deferredBarrier);
+            _hasDeferredBarrier = false;
+            Interlocked.Increment(ref _deferredPromotions);
+            if (Vulkan.GpuSyncProfile.Enabled)
+            {
+                Vulkan.GpuSyncProfile.CountDeferredPromotion(Vulkan.DeferredBarrierPromotion.Request);
+            }
+        }
+
         if (_hasPendingBarrier)
         {
-            _pendingBarrier = _pendingBarrier.Union(request);
+            _pendingBarrier = _pendingBarrier.Union(merged);
             MergedBarriers++;
             if (Vulkan.GpuSyncProfile.Enabled)
             {
@@ -124,8 +149,56 @@ public sealed class RecordingBuffer
             return;
         }
 
-        _pendingBarrier = request;
+        _pendingBarrier = merged;
         _hasPendingBarrier = true;
+    }
+
+    // Recorded by the next native command outside a checked window, or folded into the next request.
+    public void DeferMemoryBarrier(in MemoryBarrierRequest request)
+    {
+        if (IsInvalid || _rendering.IsRendering)
+        {
+            throw SubmissionScheduler.Fatal("A memory barrier needs a recording command buffer outside rendering.");
+        }
+
+        if (_hasPendingBarrier)
+        {
+            _pendingBarrier = _pendingBarrier.Union(request);
+            return;
+        }
+
+        _deferredBarrier = _hasDeferredBarrier ? _deferredBarrier.Union(request) : request;
+        _hasDeferredBarrier = true;
+        if (Vulkan.GpuSyncProfile.Enabled)
+        {
+            Vulkan.GpuSyncProfile.CountDeferredBarrier();
+        }
+    }
+
+    // Native commands inside the window were checked against the deferred barrier's writes.
+    public void EnterCheckedWindow()
+    {
+        if (_hasDeferredBarrier && Vulkan.GpuSyncProfile.Enabled)
+        {
+            Vulkan.GpuSyncProfile.CountSkippedBarrier();
+        }
+
+        _checkedWindow = true;
+    }
+
+    public void ExitCheckedWindow() => _checkedWindow = false;
+
+    private void PromoteDeferredBarrier(Vulkan.DeferredBarrierPromotion cause)
+    {
+        var request = _deferredBarrier;
+        _hasDeferredBarrier = false;
+        Interlocked.Increment(ref _deferredPromotions);
+        if (Vulkan.GpuSyncProfile.Enabled)
+        {
+            Vulkan.GpuSyncProfile.CountDeferredPromotion(cause);
+        }
+
+        RequestMemoryBarrier(request);
     }
 
     private void FlushPendingBarrier()
@@ -180,12 +253,16 @@ public sealed class RecordingBuffer
         _device.BeginBuffer(Buffer);
         _handleWasRequested = false;
         _hasPendingBarrier = false;
+        _hasDeferredBarrier = false;
+        _checkedWindow = false;
+        Interlocked.Increment(ref _deferredPromotions);
         SetDebugInfo((uint)RecordedOperation.Unknown, 0);
     }
 
     internal void End()
     {
         EndRendering();
+        _checkedWindow = false;
         _device.EndBuffer(Handle);
     }
 }

@@ -1377,6 +1377,34 @@ internal static unsafe partial class VulkanVideoPresenter
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit,
                 AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit);
 
+        private static readonly MemoryBarrierRequest ShaderAccessRequest = new(
+            PipelineStageFlags.ComputeShaderBit,
+            PipelineStageFlags.AllCommandsBit,
+            AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit,
+            AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit);
+
+        public bool TryDeferShaderAccessBarrier()
+        {
+            EndRendering();
+            if (!BatchBarriers)
+            {
+                ShaderAccessBarrier();
+                return false;
+            }
+
+            var recording = CurrentRecording();
+            OpenGuestBatch();
+            _scheduler.MemoryBarrierRecorder ??= RecordRequestedMemoryBarrier;
+            recording.DeferMemoryBarrier(ShaderAccessRequest);
+            return true;
+        }
+
+        public void BeginCheckedDispatch() => CurrentRecording().EnterCheckedWindow();
+
+        public void EndCheckedDispatch() => CurrentRecording().ExitCheckedWindow();
+
+        public long DeferredBarrierPromotions => RecordingBuffer.DeferredPromotions;
+
         // Clears the bound targets on the GPU in place of the draw; the store owns the result.
         public void ClearColorTargets(ReadOnlySpan<ColorTargetState> targets, SolidColorClear clear)
         {
