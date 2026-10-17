@@ -41,8 +41,18 @@ internal static unsafe partial class VulkanVideoPresenter
         // Translated draws are recorded into the scheduler's current buffer and
         // submitted once per drained work batch (one vkQueueSubmit per batch).
         private bool _batchOpen;
-        private long _batchOpenedTicks;
+        private const int MinimumFlushDraws = 32;
+        private static readonly long BatchGraceTicks = System.Diagnostics.Stopwatch.Frequency * 3 / 1000;
         private int _batchDrawCount;
+        private long _batchOpenedAt;
+
+        private bool ProducerActive => _commandThread is { IsAlive: true } thread && (thread.HasWork || _commandStream.HasPending);
+
+        private bool BatchShouldFlush =>
+            _batchDrawCount >= MinimumFlushDraws ||
+            _commandThread is null || _window.IsMinimized || _commandStream.BlockedQueueCount != 0 ||
+            (_pendingGuestSubmissions.Count == 0 &&
+             (!ProducerActive || System.Diagnostics.Stopwatch.GetTimestamp() - _batchOpenedAt >= BatchGraceTicks));
         private readonly List<SubmissionUploadResources> _batchResources = new();
 
 
@@ -73,7 +83,6 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!_batchOpen)
             {
                 _batchOpen = true;
-                _batchOpenedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                 _batchDrawCount = 0;
             }
         }
@@ -201,6 +210,13 @@ internal static unsafe partial class VulkanVideoPresenter
             foreach (var resources in submission.Resources)
             {
                 RecycleSubmissionUploads(resources);
+                resources.FeedbackSnapshots = [];
+                resources.OverflowBuffers = null;
+                var spare = _spareSubmissionResources ??= new Stack<SubmissionUploadResources>();
+                if (spare.Count < MaxSpareSubmissionResources)
+                {
+                    spare.Push(resources);
+                }
             }
 
             foreach (var (buffer, memory) in submission.RetireBuffers)

@@ -48,6 +48,8 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
     public int RegisteredCount => _registered.Count;
     public ulong RegisteredBytes { get; private set; }
 
+    public long RegistrationSerial { get; private set; }
+
     public ResourceSlotIdentifier AllocateBuffer(TBuffer resource, ulong address, ulong size)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -111,6 +113,7 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
             _pageOwners[block] ??= new Entry?[OwnersPerBlock];
         var node = entry.RecencyNode ?? new LinkedListNode<Entry>(entry);
         _registered.Add(entry.Address, entry);
+        RegistrationSerial++;
         for (var page = firstPage; page < endPage; page++) SetPageOwner(page, entry);
         entry.LastUseTick = tick;
         entry.RecencyNode = node;
@@ -135,6 +138,7 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
 
         for (var page = firstPage; page < endPage; page++) SetPageOwner(page, null);
         _registered.Remove(entry.Address);
+        RegistrationSerial++;
         _recency.Remove(entry.RecencyNode!);
         RegisteredBytes -= entry.Size;
         entry.State = BufferLifetimeState.Retiring;

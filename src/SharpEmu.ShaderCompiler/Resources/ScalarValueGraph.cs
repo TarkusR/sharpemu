@@ -23,7 +23,7 @@ public sealed partial class ScalarValueGraph
     private readonly List<ScalarValue> _values = [];
 
     private ScalarValueGraph(Gen5ShaderProgram program, IrControlFlowGraph controlFlow, MemoryAccessTable memory, uint userDataBase, uint userDataCount,
-        uint waveSize, ulong excludedUserDataRegisters)
+        uint waveSize, ulong excludedUserDataRegisters, int dynamicUserData)
     {
         Program = program;
         WaveSize = waveSize;
@@ -32,6 +32,7 @@ public sealed partial class ScalarValueGraph
         UserDataBase = userDataBase;
         UserDataCount = userDataCount;
         ExcludedUserDataRegisters = excludedUserDataRegisters;
+        DynamicUserData = dynamicUserData;
     }
 
     public Gen5ShaderProgram Program { get; }
@@ -40,6 +41,7 @@ public sealed partial class ScalarValueGraph
     public uint UserDataBase { get; }
     public uint UserDataCount { get; }
     public ulong ExcludedUserDataRegisters { get; }
+    public int DynamicUserData { get; }
     // A wave32 lane mask fills one SGPR; wave64 fills an aligned pair.
     public uint WaveSize { get; }
 
@@ -64,11 +66,11 @@ public sealed partial class ScalarValueGraph
             : _invariantPhis.GetOrAdd(value, static (phi, memory) => ScalarValueEquivalence.ResolveInvariantPhi(memory, phi), Memory);
 
     public static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64, ulong excludedUserDataRegisters = 0)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64, ulong excludedUserDataRegisters = 0, int dynamicUserData = -1)
     {
         var controlFlow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         var graph = new ScalarValueGraph(program, controlFlow, MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount,
-            waveSize, excludedUserDataRegisters);
+            waveSize, excludedUserDataRegisters, dynamicUserData);
         new Builder(graph).Run();
         return graph;
     }

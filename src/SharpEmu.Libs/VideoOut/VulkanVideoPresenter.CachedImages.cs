@@ -133,6 +133,27 @@ internal static unsafe partial class VulkanVideoPresenter
         // Taken from the presenter's pool; goes back to it when its submission retires.
         public bool Pooled;
         public bool InPool;
+        public StagePreparationMemo? Preparation;
+
+        public void CopyBindingFrom(TextureResource source)
+        {
+            Address = source.Address;
+            ImageIdentifier = source.ImageIdentifier;
+            Request = source.Request;
+            MipLevel = source.MipLevel;
+            IsStorage = source.IsStorage;
+            DestinationSelect = source.DestinationSelect;
+            Width = source.Width;
+            Height = source.Height;
+            RowLength = source.RowLength;
+            CachedImage = null;
+            Image = default;
+            View = default;
+            Layout = ImageLayout.ShaderReadOnlyOptimal;
+            MipViews = [];
+            IsFeedbackSnapshot = false;
+            IsHostMovie = false;
+        }
 
         // Back to the state of a new object, so a reused one never carries a previous binding.
         public void Reset()
@@ -160,6 +181,7 @@ internal static unsafe partial class VulkanVideoPresenter
             DestinationSelect = 0;
             MipViews = [];
             IsFeedbackSnapshot = false;
+            Preparation = null;
         }
     }
 
@@ -938,6 +960,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 var snapshot = CreateDepthFeedbackSnapshot(image, sampledAspect);
+                binding.Preparation?.Invalidate();
                 binding.CachedImage = snapshot;
                 binding.Image = snapshot.Backing.Handle;
                 binding.View = snapshot.GetOrCreateView(binding.Request.View);
@@ -966,7 +989,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount), command);
             var range = new ImageSubresourceRange(aspects, view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
             var value = new ClearDepthStencilValue(depth.ClearDepthValue, depth.ClearStencilValue);
-            _vk.CmdClearDepthStencilImage(command, depth.Image.Backing.Handle, ImageLayout.TransferDstOptimal, &value, 1, &range);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdClearDepthStencilImage(command, depth.Image.Backing.Handle, ImageLayout.TransferDstOptimal, &value, 1, &range);
+            }
         }
 
         private void RecordDrawTextureTransitions(TextureResource[] bindings, DepthAttachment? depth, GuestDepthState depthState)
@@ -1102,7 +1128,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     ImageSubresource = new ImageSubresourceLayers { AspectMask = ImageAspectFlags.ColorBit, MipLevel = 0, LayerCount = 1 },
                     ImageExtent = new Extent3D(texture.Width, texture.Height, 1),
                 };
-                _vk.CmdCopyBufferToImage(_commandBuffer, texture.StagingBuffer, texture.Image, ImageLayout.TransferDstOptimal, 1, &copyRegion);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdCopyBufferToImage(_commandBuffer, texture.StagingBuffer, texture.Image, ImageLayout.TransferDstOptimal, 1, &copyRegion);
+                }
                 var toShaderRead = new ImageMemoryBarrier2
                 {
                     SType = StructureType.ImageMemoryBarrier2,
@@ -1168,7 +1197,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     var range = new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
                     target.Image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, range, command);
                     var vkRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
-                    _vk.CmdClearColorImage(command, target.Image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                    {
+                        _vk.CmdClearColorImage(command, target.Image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                    }
                 }
 
                 if (_traceVulkanShaderEnabled)

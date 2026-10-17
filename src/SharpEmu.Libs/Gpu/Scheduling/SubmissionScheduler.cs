@@ -88,6 +88,8 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
     public ulong CurrentTick => _timeline.CurrentTick;
 
+    public ulong CompletedTick => _timeline.CompletedTick;
+
     public Action<nint, MemoryBarrierRequest>? MemoryBarrierRecorder { get; set; }
 
     public TickTimeline Timeline => _timeline;

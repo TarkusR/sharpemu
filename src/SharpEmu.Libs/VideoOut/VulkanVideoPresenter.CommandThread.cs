@@ -21,7 +21,8 @@ internal static partial class VulkanVideoPresenter
         // no more, since a GPU round trip (a readback, a label wait) waits for everything queued.
         // Measured in Astro Bot: 4096 items halved the frame rate of a crowd scene, 16 starved the
         // render thread, 32 to 64 kept it busy.
-        private const int MaxOutstanding = 64;
+        private const int MaxOutstanding = 128;
+        private const int ShadowSweepCount = 64;
 
         private enum Kind : byte
         {
@@ -40,31 +41,39 @@ internal static partial class VulkanVideoPresenter
             public byte[]? Data;
             // The guest range a queued fill or copy writes; zero for other items.
             public ulong RangeSize;
-            // Resolution jobs submitted before this non-draw item; they finish before it runs.
-            public long JobsBefore;
+            public long Sequence;
             public bool Sync;
             public volatile bool Done;
             public Exception? Failure;
         }
 
+        private sealed class Shadow
+        {
+            public ulong Address;
+            public int Length;
+            public long Sequence;
+            public KnownGpuWrite Known = null!;
+        }
+
         private readonly CommandStreamQueue _queue;
         private readonly ICpuMemory _memory;
         private readonly Action<AgcExports.DeferredWork> _runDeferred;
-        private readonly ParallelProgramPrefetch? _prefetch;
+        private readonly Func<SliceResult> _runSlice;
         private readonly Thread _thread;
         private readonly object _lock = new();
         private List<Item> _incoming = new();
         private List<Item> _draining = new();
         private int _drainIndex;
         private int _outstanding;
+        private long _enqueued;
+        private long _executed;
+        private long _waitingForSequence = long.MaxValue;
         // What the producer sleeps on: room in the queue, or its synchronous item.
         private volatile bool _waitingForSpace;
         private volatile bool _waitingForSync;
         private volatile bool _consumerIdle;
         private volatile bool _stopping;
         private volatile Exception? _failure;
-        private long _enqueuedNonDraw;
-        private long _executedNonDraw;
 
         // The interpreter's stores the render thread has not applied yet, oldest first; reads on
         // this thread see them over guest memory.
@@ -77,14 +86,18 @@ internal static partial class VulkanVideoPresenter
         private readonly List<Item> _pendingRanges = new();
         private volatile int _pendingRangeCount;
 
+        private readonly List<Shadow> _shadows = new();
+        private readonly Stack<Shadow> _spareShadows = new();
+        private long _shadowGeneration;
+
         private static readonly long RetryTicks = CommandStreamQueue.AllBlockedRetryMilliseconds * Stopwatch.Frequency / 1000L;
 
-        public CommandThread(CommandStreamQueue queue, ICpuMemory memory, Action<AgcExports.DeferredWork> runDeferred, ParallelProgramPrefetch? prefetch)
+        public CommandThread(CommandStreamQueue queue, ICpuMemory memory, Action<AgcExports.DeferredWork> runDeferred, Func<SliceResult> runSlice)
         {
             _queue = queue;
             _memory = memory;
             _runDeferred = runDeferred;
-            _prefetch = prefetch;
+            _runSlice = runSlice;
             _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu command stream" };
         }
 
@@ -92,9 +105,15 @@ internal static partial class VulkanVideoPresenter
 
         public bool IsProducerThread => Environment.CurrentManagedThreadId == _thread.ManagedThreadId;
 
-        public long Gate => _enqueuedNonDraw;
-
         public bool HasWork => Volatile.Read(ref _outstanding) != 0 || _failure is not null;
+
+        public long NextSequence => Volatile.Read(ref _enqueued) + 1;
+
+        public long Executed => Volatile.Read(ref _executed);
+
+        public long ShadowGeneration => Volatile.Read(ref _shadowGeneration);
+
+        public bool HasPendingStores => _pendingWriteCount != 0;
 
         // Read by the render loop before it waits, so a queued item wakes it.
         public bool ConsumerIdle
@@ -178,6 +197,92 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
+        public void NoteKnownWrite(KnownGpuWrite known, long sequence)
+        {
+            if (_shadows.Count >= ShadowSweepCount)
+            {
+                SweepShadows();
+            }
+
+            var shadow = _spareShadows.TryPop(out var spare) ? spare : new Shadow();
+            shadow.Address = known.Address;
+            shadow.Length = known.ByteCount;
+            shadow.Sequence = sequence;
+            shadow.Known = known;
+            _shadows.Add(shadow);
+            Interlocked.Increment(ref _shadowGeneration);
+        }
+
+        private void SweepShadows()
+        {
+            var executed = Volatile.Read(ref _executed);
+            var kept = 0;
+            for (var index = 0; index < _shadows.Count; index++)
+            {
+                var shadow = _shadows[index];
+                if (shadow.Sequence <= executed)
+                {
+                    shadow.Known = null!;
+                    _spareShadows.Push(shadow);
+                    continue;
+                }
+
+                _shadows[kept++] = shadow;
+            }
+
+            _shadows.RemoveRange(kept, _shadows.Count - kept);
+        }
+
+        public bool HasShadow(ulong address, ulong size)
+        {
+            var executed = Volatile.Read(ref _executed);
+            var end = address + size;
+            foreach (var shadow in _shadows)
+            {
+                if (shadow.Sequence > executed && address < shadow.Address + (ulong)shadow.Length && shadow.Address < end)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public bool TryReadShadow(ulong address, Span<byte> destination, out long sequence)
+        {
+            sequence = 0;
+            if (_shadows.Count == 0)
+            {
+                return false;
+            }
+
+            var end = address + (ulong)destination.Length;
+            lock (_writeLock)
+            {
+                var executed = Volatile.Read(ref _executed);
+                for (var index = _shadows.Count - 1; index >= 0; index--)
+                {
+                    var shadow = _shadows[index];
+                    var shadowEnd = shadow.Address + (ulong)shadow.Length;
+                    if (shadow.Sequence <= executed || address >= shadowEnd || end <= shadow.Address)
+                    {
+                        continue;
+                    }
+
+                    if (address < shadow.Address || end > shadowEnd || !shadow.Known.TryCopyWords((int)(address - shadow.Address), destination))
+                    {
+                        return false;
+                    }
+
+                    sequence = shadow.Sequence;
+                    ApplyPendingStoresLocked(address, destination, shadow.Sequence);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         // Guest memory as the stream sees it: with its own stores applied, queued or not.
         public bool ReadOverlay(ulong address, Span<byte> destination)
         {
@@ -194,34 +299,32 @@ internal static partial class VulkanVideoPresenter
                     return false;
                 }
 
-                var end = address + (ulong)destination.Length;
-                foreach (var write in _pendingWrites)
-                {
-                    var writeEnd = write.Address + (ulong)write.Data!.Length;
-                    if (write.Address >= end || writeEnd <= address)
-                    {
-                        continue;
-                    }
+                ApplyPendingStoresLocked(address, destination, 0);
+                return true;
+            }
+        }
 
-                    var start = Math.Max(address, write.Address);
-                    var stop = Math.Min(end, writeEnd);
-                    write.Data.AsSpan((int)(start - write.Address), (int)(stop - start))
-                        .CopyTo(destination[(int)(start - address)..]);
+        private void ApplyPendingStoresLocked(ulong address, Span<byte> destination, long afterSequence)
+        {
+            var end = address + (ulong)destination.Length;
+            foreach (var write in _pendingWrites)
+            {
+                var writeEnd = write.Address + (ulong)write.Data!.Length;
+                if (write.Sequence <= afterSequence || write.Address >= end || writeEnd <= address)
+                {
+                    continue;
                 }
 
-                return true;
+                var start = Math.Max(address, write.Address);
+                var stop = Math.Min(end, writeEnd);
+                write.Data.AsSpan((int)(start - write.Address), (int)(stop - start))
+                    .CopyTo(destination[(int)(start - address)..]);
             }
         }
 
         private void Enqueue(Item item)
         {
             ThrowIfFailed();
-            if (!item.IsDraw)
-            {
-                item.JobsBefore = _prefetch?.Submitted ?? 0;
-                _enqueuedNonDraw++;
-            }
-
             if (Volatile.Read(ref _outstanding) >= MaxOutstanding)
             {
                 WaitForSpace();
@@ -229,6 +332,7 @@ internal static partial class VulkanVideoPresenter
 
             lock (_lock)
             {
+                item.Sequence = ++_enqueued;
                 _incoming.Add(item);
             }
 
@@ -240,6 +344,22 @@ internal static partial class VulkanVideoPresenter
         }
 
         private void WaitForSpace()
+        {
+            var started = Diagnostics.CommandThreadTally.Enabled ? Stopwatch.GetTimestamp() : 0;
+            try
+            {
+                WaitForSpaceCore();
+            }
+            finally
+            {
+                if (started != 0)
+                {
+                    Diagnostics.CommandThreadTally.NoteSpaceWait(Stopwatch.GetTimestamp() - started);
+                }
+            }
+        }
+
+        private void WaitForSpaceCore()
         {
             lock (_lock)
             {
@@ -257,6 +377,48 @@ internal static partial class VulkanVideoPresenter
                 }
 
                 _waitingForSpace = false;
+            }
+
+            ThrowIfFailed();
+        }
+
+        public void WaitPending(long sequence)
+        {
+            if (Volatile.Read(ref _executed) >= sequence)
+            {
+                return;
+            }
+
+            var started = Diagnostics.CommandThreadTally.Enabled ? Stopwatch.GetTimestamp() : 0;
+            var spinner = new SpinWait();
+            for (var spin = 0; spin < 100 && Volatile.Read(ref _executed) < sequence; spin++)
+            {
+                spinner.SpinOnce(sleep1Threshold: -1);
+            }
+
+            if (Volatile.Read(ref _executed) < sequence)
+            {
+                lock (_lock)
+                {
+                    for (;;)
+                    {
+                        Volatile.Write(ref _waitingForSequence, sequence);
+                        Interlocked.MemoryBarrier();
+                        if (Volatile.Read(ref _executed) >= sequence || _failure is not null)
+                        {
+                            break;
+                        }
+
+                        Monitor.Wait(_lock, 10);
+                    }
+
+                    Volatile.Write(ref _waitingForSequence, long.MaxValue);
+                }
+            }
+
+            if (started != 0)
+            {
+                Diagnostics.CommandThreadTally.NotePendingWait(Stopwatch.GetTimestamp() - started);
             }
 
             ThrowIfFailed();
@@ -328,11 +490,13 @@ internal static partial class VulkanVideoPresenter
                 _draining[_drainIndex++] = null!;
                 Execute(item);
                 ran++;
+                Volatile.Write(ref _executed, item.Sequence);
                 var outstanding = Interlocked.Decrement(ref _outstanding);
                 // One pulse per wait: the producer sets its flag again if it keeps waiting.
                 var wakeForSync = item.Sync && _waitingForSync;
                 var wakeForSpace = _waitingForSpace && outstanding < MaxOutstanding / 2;
-                if (wakeForSync || wakeForSpace)
+                var wakeForSequence = item.Sequence >= Volatile.Read(ref _waitingForSequence);
+                if (wakeForSync || wakeForSpace || wakeForSequence)
                 {
                     if (wakeForSync)
                     {
@@ -342,6 +506,11 @@ internal static partial class VulkanVideoPresenter
                     if (wakeForSpace)
                     {
                         _waitingForSpace = false;
+                    }
+
+                    if (wakeForSequence)
+                    {
+                        Volatile.Write(ref _waitingForSequence, long.MaxValue);
                     }
 
                     lock (_lock)
@@ -368,7 +537,6 @@ internal static partial class VulkanVideoPresenter
                 return;
             }
 
-            _prefetch?.WaitFinished(item.JobsBefore);
             try
             {
                 switch (item.Kind)
@@ -395,7 +563,6 @@ internal static partial class VulkanVideoPresenter
             }
             finally
             {
-                _executedNonDraw++;
                 if (item.RangeSize != 0)
                 {
                     lock (_writeLock)
@@ -405,7 +572,6 @@ internal static partial class VulkanVideoPresenter
                     }
                 }
 
-                _prefetch?.AdvanceGate(_executedNonDraw);
                 if (item.Sync)
                 {
                     item.Done = true;
@@ -460,24 +626,47 @@ internal static partial class VulkanVideoPresenter
         private void Run()
         {
             SharpEmu.HLE.Host.HostLaneReservation.ApplyToFrontEndThread();
+            RenderPhaseProfile.AttachResolveWorker();
             try
             {
                 var lastProgress = Stopwatch.GetTimestamp();
+                var tally = Diagnostics.CommandThreadTally.Enabled;
                 while (!_stopping)
                 {
-                    var result = _queue.ProcessOne();
+                    var started = tally ? Stopwatch.GetTimestamp() : 0;
+                    var result = _runSlice();
+                    if (tally)
+                    {
+                        Diagnostics.CommandThreadTally.NoteSlice(Stopwatch.GetTimestamp() - started);
+                        started = Stopwatch.GetTimestamp();
+                    }
+
                     switch (result)
                     {
                         case SliceResult.NoWork:
                             _ = _queue.WaitForWork(8);
+                            if (tally)
+                            {
+                                Diagnostics.CommandThreadTally.NoteIdle(Stopwatch.GetTimestamp() - started);
+                            }
+
                             break;
                         case SliceResult.AllBlocked:
                             WaitBlocked(ref lastProgress);
+                            if (tally)
+                            {
+                                Diagnostics.CommandThreadTally.NoteBlocked(Stopwatch.GetTimestamp() - started);
+                            }
+
                             break;
                         case SliceResult.BlockedWithoutProgress:
                             if (!_queue.HasUnblockedPending)
                             {
                                 WaitBlocked(ref lastProgress);
+                                if (tally)
+                                {
+                                    Diagnostics.CommandThreadTally.NoteBlocked(Stopwatch.GetTimestamp() - started);
+                                }
                             }
 
                             break;

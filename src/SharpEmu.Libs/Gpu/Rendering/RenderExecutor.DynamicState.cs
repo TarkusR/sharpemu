@@ -44,8 +44,8 @@ public sealed partial class RenderExecutor
             resolution.TargetVersion,
             state.ColorCount,
             boundSlots,
-            state.ColorCount > 0 && state.Colors[0].Image.IsValid,
-            state.Depth.Image.IsValid);
+            state.ColorCount > 0,
+            state.Depth.HasTarget);
         if (key == resolution.DynamicKey && ScissorTrace.Instance is not { Active: true })
         {
             return resolution.Dynamic;
@@ -64,12 +64,12 @@ public sealed partial class RenderExecutor
         var limits = _host.Limits;
         uint framebufferWidth;
         uint framebufferHeight;
-        if (state.ColorCount > 0 && state.Colors[0].Image.IsValid)
+        if (state.ColorCount > 0)
         {
             framebufferWidth = state.Colors[0].Resolution.Extent.Width;
             framebufferHeight = state.Colors[0].Resolution.Extent.Height;
         }
-        else if (state.Depth.Image.IsValid)
+        else if (state.Depth.HasTarget)
         {
             framebufferWidth = state.Depth.Target.Target.Width;
             framebufferHeight = state.Depth.Target.Target.Height;

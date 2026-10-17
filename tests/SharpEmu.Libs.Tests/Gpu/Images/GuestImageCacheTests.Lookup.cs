@@ -74,7 +74,7 @@ public sealed partial class GuestImageCacheTests
     // A title submits dozens of command buffers per frame. An image it writes early in a frame and reads late in it
     // is past the removal window of submissions in between, and an unrelated image the frame requested inside its
     // memory deleted it with its contents: its next use uploaded stale guest memory. An image used this frame stays;
-    // after the frame ends, the overlapping request deletes it as before.
+    // after the frame ends, the overlapping request parks it with its contents.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -95,12 +95,10 @@ public sealed partial class GuestImageCacheTests
             new Extent3D(64, 64, 1), 1, 4, 1);
         harness.Acquire(ref inside);
 
-        Assert.Equal(!frameEnded, harness.Images.Contains(writtenId));
-        if (!frameEnded)
-        {
-            Assert.True(harness.Image(writtenId).IsGpuModified);
-            Assert.Equal(Bytes(Enumerable.Repeat(deviceValue, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(writtenId)));
-        }
+        Assert.True(harness.Images.Contains(writtenId));
+        Assert.Equal(frameEnded, harness.Image(writtenId).Parked);
+        Assert.True(harness.Image(writtenId).IsGpuModified);
+        Assert.Equal(Bytes(Enumerable.Repeat(deviceValue, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(writtenId)));
 
         harness.Shutdown();
     }

@@ -845,6 +845,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 DepthBiasClamp = supportedFeatures.DepthBiasClamp,
                 SampleRateShading = supportedFeatures.SampleRateShading,
                 SamplerAnisotropy = supportedFeatures.SamplerAnisotropy,
+                DrawIndirectFirstInstance = supportedFeatures.DrawIndirectFirstInstance,
             };
 
             if (!supportedFeatures.SampleRateShading)
@@ -1028,10 +1029,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 PNext = &vulkan12Features,
             };
             var meshExtensionAvailable = IsDeviceExtensionAvailable(MeshShaderExtensionName);
+            var drawParametersFeatures = new PhysicalDeviceShaderDrawParametersFeatures
+            {
+                SType = StructureType.PhysicalDeviceShaderDrawParametersFeatures,
+                PNext = meshExtensionAvailable ? &meshFeatures : &vulkan12Features,
+            };
             var featuresQuery = new PhysicalDeviceFeatures2
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
-                PNext = meshExtensionAvailable ? &meshFeatures : &vulkan12Features,
+                PNext = &drawParametersFeatures,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
             _supportsMeshShader = meshExtensionAvailable && meshFeatures.MeshShader &&
@@ -1043,6 +1049,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsShaderLayer = vulkan12Features.ShaderOutputLayer;
             var supportsViewportIndexLayer = IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer") &&
                 vulkan12Features.ShaderOutputViewportIndex && vulkan12Features.ShaderOutputLayer;
+            _supportsShaderDrawParameters = drawParametersFeatures.ShaderDrawParameters;
             var supportsMaintenance8 = maintenance8Features.Maintenance8;
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
@@ -1211,6 +1218,18 @@ internal static unsafe partial class VulkanVideoPresenter
                     };
                     renderingChain = &meshFeatures;
                 }
+
+                if (_supportsShaderDrawParameters)
+                {
+                    drawParametersFeatures = new PhysicalDeviceShaderDrawParametersFeatures
+                    {
+                        SType = StructureType.PhysicalDeviceShaderDrawParametersFeatures,
+                        ShaderDrawParameters = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &drawParametersFeatures;
+                }
+
                 if (_supportsFragmentShaderBarycentric)
                 {
                     barycentricFeatures.PNext = renderingChain;
@@ -1349,6 +1368,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateBufferCache();
             CreateImageCache();
             _descriptorHeap = new DescriptorHeap(_deviceInfo, _scheduler);
+            _contentUploads = new ContentUploadArena(_deviceInfo, _scheduler);
             CreateCommandStream();
             LoadDebugUtilsCommands();
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))

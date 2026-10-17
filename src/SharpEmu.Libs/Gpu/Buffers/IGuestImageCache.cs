@@ -29,5 +29,7 @@ public interface IGuestImageCache
 
     bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size);
 
+    bool MayHaveImageBytes(ulong address, ulong size);
+
     bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear);
 }

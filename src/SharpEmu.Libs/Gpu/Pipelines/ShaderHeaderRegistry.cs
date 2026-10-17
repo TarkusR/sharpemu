@@ -101,19 +101,24 @@ public sealed class ShaderHeaderRegistry
 
     public static void NoteRegistration() => Interlocked.Increment(ref _registrations);
 
+    public static long Registrations => Interlocked.Read(ref _registrations) + Gen5ShaderTranslator.FusedProgramRegistrations;
+
     public RegisteredShader Require(ulong codeAddress, string label) => RequireEntry(codeAddress, label).Shader;
 
     internal ShaderHeaderEntry RequireEntry(ulong codeAddress, string label)
     {
-        var registrations = Interlocked.Read(ref _registrations) + Gen5ShaderTranslator.FusedProgramRegistrations;
-        if (_entries.TryGetValue(codeAddress, out var entry) && entry.Registrations == registrations)
+        var registrations = Registrations;
+        lock (_entries)
         {
+            if (_entries.TryGetValue(codeAddress, out var entry) && entry.Registrations == registrations)
+            {
+                return entry;
+            }
+
+            entry = new ShaderHeaderEntry(Read(codeAddress, label), registrations);
+            _entries[codeAddress] = entry;
             return entry;
         }
-
-        entry = new ShaderHeaderEntry(Read(codeAddress, label), registrations);
-        _entries[codeAddress] = entry;
-        return entry;
     }
 
     private RegisteredShader Read(ulong codeAddress, string label)

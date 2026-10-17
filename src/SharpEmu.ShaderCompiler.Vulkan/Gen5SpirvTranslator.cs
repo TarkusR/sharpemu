@@ -199,6 +199,7 @@ public static partial class Gen5SpirvTranslator
         private uint _cullDistanceCount;
         private uint _vertexIndexInput;
         private uint _instanceIndexInput;
+        private uint _baseInstanceInput;
         private uint _fragCoordInput;
         private uint _localInvocationIdInput;
         private uint _localInvocationIndexInput;
@@ -844,6 +845,19 @@ public static partial class Gen5SpirvTranslator
                     (uint)SpirvBuiltIn.InstanceIndex);
                 _interfaces.Add(_instanceIndexInput);
 
+                if (_request.SupportsDrawParameters)
+                {
+                    _baseInstanceInput = _module.AddGlobalVariable(
+                        inputPointer,
+                        SpirvStorageClass.Input);
+                    _module.AddDecoration(
+                        _baseInstanceInput,
+                        SpirvDecoration.BuiltIn,
+                        (uint)SpirvBuiltIn.BaseInstance);
+                    _interfaces.Add(_baseInstanceInput);
+                    _module.AddCapability(SpirvCapability.DrawParameters);
+                }
+
                 var outputPointer =
                     _module.TypePointer(SpirvStorageClass.Output, _vec4Type);
                 _positionOutput = _module.AddGlobalVariable(
@@ -1206,7 +1220,12 @@ public static partial class Gen5SpirvTranslator
             if (_stage == Gen5SpirvStage.Vertex)
             {
                 StoreV(5, Load(_uintType, _vertexIndexInput), guardWithExec: false);
-                StoreV(8, Load(_uintType, _instanceIndexInput), guardWithExec: false);
+                var instanceIndex = Load(_uintType, _instanceIndexInput);
+                StoreV(8, _baseInstanceInput != 0 ? ISubU(instanceIndex, Load(_uintType, _baseInstanceInput)) : instanceIndex, guardWithExec: false);
+                if (_baseInstanceInput != 0 && _request.StartInstanceUserData >= 0)
+                {
+                    StoreS(_request.UserDataBase + (uint)_request.StartInstanceUserData, Load(_uintType, _baseInstanceInput));
+                }
 
                 // Give every declared param output a defined starting value.
                 // Outputs the program actually exports overwrite this; the

@@ -26,6 +26,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 {
     private const SDL_InitFlags InitFlags = SDL_InitFlags.SDL_INIT_VIDEO | SDL_InitFlags.SDL_INIT_GAMEPAD;
     private static readonly long CursorHideDelayTicks = 2 * Stopwatch.Frequency;
+    private static readonly long InputPollTicks = Stopwatch.Frequency / 250;
     private const uint OutputDurationMs = 5_000;
 
     private readonly HostVideoOptions _options;
@@ -365,6 +366,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         initialize();
         var timer = Stopwatch.StartNew();
         var last = timer.Elapsed.TotalSeconds;
+        var polledAt = Stopwatch.GetTimestamp() - InputPollTicks;
         try
         {
             while (Volatile.Read(ref _closeRequested) == 0)
@@ -372,24 +374,30 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 using var windowScope = _graphicsApi == SdlGraphicsApi.Vulkan
                     ? RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.WindowLoop)
                     : default;
-                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEvents))
+                var pollTimestamp = Stopwatch.GetTimestamp();
+                if (pollTimestamp - polledAt >= InputPollTicks)
                 {
-                    PumpEvents();
-                    RefreshOverlayTitle();
-                }
-                if (Volatile.Read(ref _closeRequested) != 0)
-                {
-                    break;
+                    polledAt = pollTimestamp;
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEvents))
+                    {
+                        PumpEvents();
+                        RefreshOverlayTitle();
+                    }
+                    if (Volatile.Read(ref _closeRequested) != 0)
+                    {
+                        break;
+                    }
+
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CursorUpdate))
+                    {
+                        UpdateCursorAutoHide();
+                    }
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GamepadPoll))
+                    {
+                        SampleGamepad(updateDevices: false);
+                    }
                 }
 
-                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CursorUpdate))
-                {
-                    UpdateCursorAutoHide();
-                }
-                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GamepadPoll))
-                {
-                    SampleGamepad(updateDevices: false);
-                }
                 var now = timer.Elapsed.TotalSeconds;
                 render(now - last);
                 last = now;

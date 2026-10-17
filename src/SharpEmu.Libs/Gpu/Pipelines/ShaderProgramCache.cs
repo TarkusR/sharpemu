@@ -156,7 +156,7 @@ internal sealed class ShaderProgramCache
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
     private readonly Dictionary<(ProgramKey Key, string Library), ProgramSourceEntry> _linkedPrograms = new();
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), Gen5ShaderProgram> _decoded = new();
-    private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
@@ -165,6 +165,9 @@ internal sealed class ShaderProgramCache
     private ulong _nextProgramId;
 
     public ResourceMaterializationCache? Materializations => _materializations;
+
+    public bool Revalidate(in ShaderStageResources stage) =>
+        stage.Program is not null && _materializations is not null && _materializations.Revalidate(stage.Resources, _readResidentGuestBytes);
 
     // Read once: the draw path asked the environment on every draw and dispatch
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
@@ -196,20 +199,33 @@ internal sealed class ShaderProgramCache
     public Gen5ShaderProgram Decode(ShaderSource source)
     {
         var key = (source.Hash, source.CodeSize, source.ContinuationAddressOffset);
-        if (_decoded.TryGetValue(key, out var program))
+        lock (_decoded)
         {
-            return program;
+            if (_decoded.TryGetValue(key, out var decoded))
+            {
+                return decoded;
+            }
         }
 
+        var program = DecodeCore(source, key);
+        lock (_decoded)
+        {
+            _decoded.TryAdd(key, program);
+        }
+
+        return program;
+    }
+
+    private Gen5ShaderProgram DecodeCore(ShaderSource source, (ulong Hash, uint CodeSize, ulong ContinuationAddressOffset) key)
+    {
         using var decodeScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramDecode);
         var recording = _host.ShaderPrewarm is not null ? new RecordingCpuMemory(_context.Memory) : null;
         var context = recording is null ? _context : new CpuContext(recording, _context.TargetGeneration);
-        if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out program, out var error))
+        if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out var program, out var error))
         {
             throw SubmissionScheduler.Fatal($"The shader program cannot be decoded: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
         }
 
-        _decoded.Add(key, program);
         if (recording is not null)
         {
             _codeCaptures[key] = new ShaderCodeCapture
@@ -489,7 +505,8 @@ internal sealed class ShaderProgramCache
                     ShaderStage.Mesh => options.MeshInfo!.Geometry.WaveSize,
                     ShaderStage.Compute => options.ComputeInfo?.WaveSize ?? 64u,
                     _ => 32u,
-                });
+                },
+                dynamicUserData: options.VertexInfo?.StartInstanceUserData ?? -1);
         }
         catch (ResourcePlanException exception)
         {
@@ -814,6 +831,8 @@ internal sealed class ShaderProgramCache
                     VertexInputs = entry.VertexInputs,
                     PositionExportControl = info.PositionExportControl,
                     SupportsClipDistance = _host.ClipDistanceEnabled,
+                    SupportsDrawParameters = _host.ShaderDrawParametersSupported,
+                    StartInstanceUserData = info.StartInstanceUserData,
                     ClipSpace = new ShaderClipSpaceTransform(
                         info.ClipSpace.Enabled,
                         info.ClipSpace.ScaleX,

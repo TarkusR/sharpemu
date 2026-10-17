@@ -108,6 +108,12 @@ public sealed class RegisterBanks
         return snapshot;
     }
 
+    public ContextRegisters ShareContext()
+    {
+        _contextShared = true;
+        return Context;
+    }
+
     // Called by the register writers before they store into a part.
     public void PrepareContextWrite()
     {

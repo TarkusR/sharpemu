@@ -645,4 +645,29 @@ public sealed class ResourceMaterializationCacheTests
         Assert.Same(stored, reused);
         Assert.Equal((1, 4, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
     }
+
+    [Fact]
+    public void AStoredSnapshotRevalidatesUntilItsBytesChange()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var snapshot, out _));
+        Assert.True(cache.Revalidate(snapshot, heap.ReadResident));
+        Assert.True(cache.Revalidate(snapshot, heap.ReadResident));
+        heap.Words[HeapBase + 0x100 + 5 * 32] = 0x3000;
+        Assert.False(cache.Revalidate(snapshot, heap.ReadResident));
+    }
+
+    [Fact]
+    public void AnUnrecordedSnapshotDoesNotRevalidate()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var snapshot, out _));
+        Assert.False(cache.Revalidate(snapshot, heap.ReadResident));
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var stored, out _));
+        Assert.True(cache.Revalidate(stored, heap.ReadResident));
+    }
 }

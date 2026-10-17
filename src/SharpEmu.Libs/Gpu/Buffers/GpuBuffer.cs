@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using System.Numerics;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -276,7 +277,10 @@ public unsafe class GpuBuffer : IDisposable
             native, GetAccessStage(sourceBefore | destinationBefore), PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
             0, null, 2, before, 0, null);
         var copy = new BufferCopy(sourceOffset, destinationOffset, size);
-        vk.CmdCopyBuffer(native, source.Handle, Handle, 1, &copy);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdCopyBuffer(native, source.Handle, Handle, 1, &copy);
+        }
         var after = stackalloc BufferMemoryBarrier2[2];
         after[0] = source.CreateBarrier(sourceOffset, size, AccessFlags.TransferReadBit, sourceAfter);
         after[1] = CreateBarrier(destinationOffset, size, AccessFlags.TransferWriteBit, destinationAfter);
@@ -301,7 +305,10 @@ public unsafe class GpuBuffer : IDisposable
         VulkanSynchronization.PipelineBarrier(vk,
             native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
             0, null, 1, &before, 0, null);
-        vk.CmdFillBuffer(native, Handle, offset, size, value);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdFillBuffer(native, Handle, offset, size, value);
+        }
         var after = CreateBarrier(offset, size, AccessFlags.TransferWriteBit, MemoryAccess);
         VulkanSynchronization.PipelineBarrier(vk,
             native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,

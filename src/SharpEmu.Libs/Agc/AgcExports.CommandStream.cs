@@ -24,7 +24,10 @@ public static partial class AgcExports
     internal sealed record RetainedTargetlessDraw(RegisterBanks Banks, TargetlessDrawArguments Arguments);
 
     // A draw or dispatch the translation deferred, with the banks it was issued under.
-    internal abstract record DeferredWork;
+    internal abstract record DeferredWork
+    {
+        public virtual bool IsDispatch => false;
+    }
 
     // Takes the deferred work of a command stream interpreted on its own thread.
     internal interface IDeferredWorkSink
@@ -32,10 +35,13 @@ public static partial class AgcExports
         // True on the thread that interprets the stream; elsewhere the translation runs work itself.
         bool IsProducerThread { get; }
 
-        // The non-draw items handed over so far; a draw's resolution waits until they ran.
-        long Gate { get; }
+        long NextSequence { get; }
 
         void EnqueueDeferred(DeferredWork work, bool isDraw);
+
+        void WaitPending(long sequence);
+
+        void NoteKnownWrite(KnownGpuWrite known, long sequence);
     }
 
     // The snapshots the submit-time prepass captured for one submission.
@@ -165,6 +171,7 @@ public static partial class AgcExports
         private int _currentQueueId;
         private readonly ShaderPipelineCache? _pipelines;
         private readonly RenderExecutor? _executor;
+        private readonly RenderRecorder? _recorder;
 
         internal CommandStreamTranslation(ICpuMemory memory, ICommandStreamHost host)
         {
@@ -174,18 +181,13 @@ public static partial class AgcExports
             if (host is IRenderHost renderHost && host is IShaderPipelineHost pipelineHost)
             {
                 _pipelines = new ShaderPipelineCache(_context, pipelineHost, GuestGpu.Current, CreateShaderHeaderRegistry(_context));
-                _executor = new RenderExecutor(renderHost, _pipelines);
-                if (host is IConcurrentResolveHost concurrentHost)
-                {
-                    _parallel = new ParallelProgramPrefetch(_executor, renderHost, concurrentHost);
-                    _executor.Prefetch = _parallel;
-                }
+                var pool = new RecordPool();
+                _executor = new RenderExecutor(renderHost, _pipelines, new ExecutorSink(this), pool: pool);
+                _recorder = new RenderRecorder(renderHost, _pipelines, RenderExecutor.DefaultStrictDrawResources, _executor.PendingWrites, pool);
             }
         }
 
-        // Resolves the programs of deferred draws ahead of them, for a host that answers reads from
-        // another thread; draws are deferred whenever it exists.
-        private readonly ParallelProgramPrefetch? _parallel;
+        internal PendingGpuWrites? PendingWrites => _executor?.PendingWrites;
 
         // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
         internal ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
@@ -220,150 +222,67 @@ public static partial class AgcExports
             }
         }
 
-        private sealed record PendingDraw(
-            ulong SubmitId,
-            SubmittedDcbState State,
-            RegisterBanks Banks,
-            bool Indexed,
-            DrawIndexedArguments IndexedArguments,
-            DrawAutoArguments AutoArguments,
-            SubmittedVertexSnapshot? VertexSnapshot,
-            SubmittedIndexSnapshot? IndexSnapshot,
-            ParallelProgramPrefetch.Job? Job) : DeferredWork;
+        private sealed record ResolvedDrawWork(ResolvedDraw Record) : DeferredWork;
 
-        private sealed record PendingDispatch(
-            ulong SubmitId,
-            SubmittedDcbState State,
-            RegisterBanks Banks,
-            uint GroupsX,
-            uint GroupsY,
-            uint GroupsZ,
-            uint DispatchInitiator,
-            ulong IndirectArgumentsAddress) : DeferredWork;
+        private sealed record ResolvedDispatchWork(ResolvedDispatch Record) : DeferredWork
+        {
+            public override bool IsDispatch => true;
+        }
 
-        // With the command stream on its own thread, its draws and dispatches reach the render
-        // thread through the sink, which runs them with RunDeferred in stream order.
+        // With the command stream on its own thread, its resolved draws and dispatches reach the
+        // render thread through the sink, which records them with RunDeferred in stream order.
         internal IDeferredWorkSink? Sink { get; set; }
 
         private bool Producing => Sink is { IsProducerThread: true };
 
-        // The queue state of the work the render thread runs now; _current belongs to the thread
-        // interpreting the stream.
-        private SubmittedDcbState? _executing;
+        private sealed class ExecutorSink(CommandStreamTranslation owner) : IResolvedCommandSink
+        {
+            public long NextSequence() => owner.Producing ? owner.Sink!.NextSequence : 0;
+
+            public void Record(ResolvedDraw record)
+            {
+                if (owner.Producing)
+                {
+                    owner.Sink!.EnqueueDeferred(new ResolvedDrawWork(record), isDraw: true);
+                }
+                else
+                {
+                    owner._recorder!.Record(record);
+                }
+            }
+
+            public void Record(ResolvedDispatch record)
+            {
+                if (!owner.Producing)
+                {
+                    owner._recorder!.Record(record);
+                    return;
+                }
+
+                var sink = owner.Sink!;
+                if (!record.Skipped && record.IndirectArgumentsAddress == 0 && record.GroupsX != 0 && record.GroupsY != 0 && record.GroupsZ != 0 &&
+                    record.Program.KnownWrite is { } known)
+                {
+                    sink.NoteKnownWrite(known, record.Sequence);
+                }
+
+                sink.EnqueueDeferred(new ResolvedDispatchWork(record), isDraw: false);
+            }
+        }
 
         public void RunDeferred(DeferredWork work)
         {
             switch (work)
             {
-                case PendingDraw draw:
-                {
-                    using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DeferredDrawTranslation);
-                    var executing = _executing;
-                    _executing = draw.State;
-                    RecordKnownColorTargets(draw.State, draw.Banks);
-                    if (_parallel is not null)
-                    {
-                        _parallel.Current = draw.Job;
-                    }
-
-                    try
-                    {
-                        RunExecutorDraw(draw.SubmitId, draw.State, draw.Banks, draw.Indexed, draw.IndexedArguments, draw.AutoArguments,
-                            clearSnapshots: false);
-                    }
-                    finally
-                    {
-                        _executing = executing;
-                        if (_parallel is not null)
-                        {
-                            _parallel.Current = null;
-                        }
-                    }
-
+                case ResolvedDrawWork draw:
+                    _recorder!.Record(draw.Record);
                     break;
-                }
-                case PendingDispatch dispatch:
-                {
-                    using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DeferredDispatchTranslation);
-                    var executing = _executing;
-                    _executing = dispatch.State;
-                    try
-                    {
-                        ExecuteDispatch(_executor!, dispatch.SubmitId, dispatch.Banks, dispatch.GroupsX, dispatch.GroupsY, dispatch.GroupsZ,
-                            dispatch.DispatchInitiator, dispatch.IndirectArgumentsAddress);
-                    }
-                    finally
-                    {
-                        _executing = executing;
-                    }
-
+                case ResolvedDispatchWork dispatch:
+                    _recorder!.Record(dispatch.Record);
                     break;
-                }
                 default:
                     throw _host.Fatal($"The deferred work is unknown: {work.GetType().Name}.");
             }
-        }
-
-        // The resolution worker, so the render thread can order it with the stream's other work.
-        internal ParallelProgramPrefetch? Prefetch => _parallel;
-
-        private readonly Queue<PendingDraw> _pendingDraws = new();
-
-        public bool HasPendingDraws => _pendingDraws.Count != 0;
-
-        private bool _draining;
-
-        // Runs every deferred draw in issue order with the banks and snapshots it was issued with.
-        // A draw calls back into the host, whose entry points drain too: those calls run inside
-        // the draw and must not start the next one.
-        public void DrainPendingDraws()
-        {
-            if (_draining)
-            {
-                return;
-            }
-
-            _draining = true;
-            try
-            {
-                DrainPendingDrawsCore();
-            }
-            finally
-            {
-                _draining = false;
-            }
-        }
-
-        private void DrainPendingDrawsCore()
-        {
-            while (_pendingDraws.TryDequeue(out var pending))
-            {
-                var current = _current;
-                var state = pending.State;
-                _current = state;
-                state.CurrentVertexSnapshot = pending.VertexSnapshot;
-                state.CurrentIndexSnapshot = pending.IndexSnapshot;
-                if (_parallel is not null)
-                {
-                    _parallel.Current = pending.Job;
-                }
-
-                try
-                {
-                    RunExecutorDraw(pending.SubmitId, state, pending.Banks, pending.Indexed, pending.IndexedArguments, pending.AutoArguments);
-                }
-                finally
-                {
-                    _current = current;
-                    if (_parallel is not null)
-                    {
-                        _parallel.Current = null;
-                    }
-                }
-            }
-
-            // What follows a drain may change guest memory and cache state the worker reads.
-            _parallel?.WaitIdle();
         }
 
         private bool TryRunExecutorDraw(ulong submitId, SubmittedDcbState state, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
@@ -374,40 +293,14 @@ public static partial class AgcExports
             }
 
             var banks = RequireTypedRegisters(state);
-            var producing = Producing;
-            if (!producing)
-            {
-                // A draw run by the render thread records its targets there.
-                RecordKnownColorTargets(state, banks);
-            }
-
+            RecordKnownColorTargets(state, banks);
             state.FrameDrawCount++;
             state.SawIndexedDraw |= indexed;
-            if (_parallel is not null || producing)
-            {
-                var snapshot = banks.Snapshot();
-                var pending = new PendingDraw(submitId, state, snapshot, indexed, indexedArguments, autoArguments,
-                    state.CurrentVertexSnapshot, state.CurrentIndexSnapshot, _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed));
-                if (producing)
-                {
-                    Sink!.EnqueueDeferred(pending, isDraw: true);
-                }
-                else
-                {
-                    _pendingDraws.Enqueue(pending);
-                }
-
-                state.CurrentIndexSnapshot = null;
-                state.CurrentVertexSnapshot = null;
-                return true;
-            }
-
-            RunExecutorDraw(submitId, state, banks, indexed, indexedArguments, autoArguments);
+            RunExecutorDraw(submitId, state, banks, indexed, in indexedArguments, in autoArguments);
             return true;
         }
 
-        private void RunExecutorDraw(ulong submitId, SubmittedDcbState state, RegisterBanks banks, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments,
-            bool clearSnapshots = true)
+        private void RunExecutorDraw(ulong submitId, SubmittedDcbState state, RegisterBanks banks, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
         {
             var executor = _executor!;
             var drawStarted = DcbParseProfile.Begin();
@@ -425,19 +318,15 @@ public static partial class AgcExports
             finally
             {
                 DcbParseProfile.RecordDraw(drawStarted);
-                // The snapshot fields belong to the interpreting thread when it is another one.
-                if (clearSnapshots)
-                {
-                    state.CurrentIndexSnapshot = null;
-                    state.CurrentVertexSnapshot = null;
-                }
+                state.CurrentIndexSnapshot = null;
+                state.CurrentVertexSnapshot = null;
             }
         }
 
         // Keeps the banks the draw was issued under; the flip replays it into the display buffer.
         internal void RetainTargetlessDraw(RegisterBanks banks, in TargetlessDrawArguments arguments)
         {
-            var state = _executing ?? RequireCurrent();
+            var state = RequireCurrent();
             if (RenderTrace.Enabled)
             {
                 RenderTrace.Write($"TargetlessRetention submit={arguments.SubmitId} replaced={state.RetainedTargetlessDraw is not null} previousSubmit={state.RetainedTargetlessDraw?.Arguments.SubmitId} export=0x{banks.Shader.Vertex.ExportAddress:X16} pixel=0x{banks.Shader.Pixel.Address:X16}");
@@ -566,17 +455,8 @@ public static partial class AgcExports
             var state = RequireCurrent();
             if (_executor is { } executor)
             {
-                var banks = RequireTypedRegisters(state);
                 state.FrameDispatchCount++;
-                if (Producing)
-                {
-                    var snapshot = banks.Snapshot();
-                    Sink!.EnqueueDeferred(new PendingDispatch(submitId, state, snapshot, endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress),
-                        isDraw: false);
-                    return;
-                }
-
-                ExecuteDispatch(executor, submitId, banks, endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress);
+                ExecuteDispatch(executor, submitId, RequireTypedRegisters(state), endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress);
                 return;
             }
 

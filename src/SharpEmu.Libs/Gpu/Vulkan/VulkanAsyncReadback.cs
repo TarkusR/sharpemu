@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
@@ -239,7 +240,10 @@ internal sealed unsafe class VulkanAsyncReadback : IDisposable
             var piece = pieces[index];
             offset = AlignUp(offset, Alignment);
             var region = new BufferCopy(piece.SourceOffset, offset, piece.Size);
-            vk.CmdCopyBuffer(command, piece.Source.Handle, staging.Handle, 1, &region);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                vk.CmdCopyBuffer(command, piece.Source.Handle, staging.Handle, 1, &region);
+            }
             offsets[index] = offset;
             sizes[index] = piece.Size;
             offset += piece.Size;
@@ -260,7 +264,10 @@ internal sealed unsafe class VulkanAsyncReadback : IDisposable
             MemoryBarrierCount = 1,
             PMemoryBarriers = &toHost,
         };
-        vk.CmdPipelineBarrier2(command, &dependency);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdPipelineBarrier2(command, &dependency);
+        }
         Require(vk.EndCommandBuffer(command), "vkEndCommandBuffer(readback)");
 
         var signalValue = ++_signaled;

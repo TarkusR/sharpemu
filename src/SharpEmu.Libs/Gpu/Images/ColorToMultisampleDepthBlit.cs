@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -300,16 +301,37 @@ public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
             ClearValueCount = 1,
             PClearValues = &clear,
         };
-        vk.CmdBeginRenderPass(command, &begin, SubpassContents.Inline);
-        vk.CmdBindDescriptorSets(command, PipelineBindPoint.Graphics, _pipelineLayout, 0, 1, &set, 0, null);
-        vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, cached.Pipeline);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdBeginRenderPass(command, &begin, SubpassContents.Inline);
+        }
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdBindDescriptorSets(command, PipelineBindPoint.Graphics, _pipelineLayout, 0, 1, &set, 0, null);
+        }
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, cached.Pipeline);
+        }
         Vulkan.GraphicsDynamicStateEpoch.Advance();
         Vulkan.NativeBindingEpoch.Advance();
         var viewport = new Viewport(0.0f, 0.0f, extent.Width, extent.Height, 0.0f, 1.0f);
         var scissor = new Rect2D(new Offset2D(0, 0), extent);
-        vk.CmdSetViewport(command, 0, 1, &viewport);
-        vk.CmdSetScissor(command, 0, 1, &scissor);
-        vk.CmdDraw(command, 3, 1, 0, 0);
-        vk.CmdEndRenderPass(command);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdSetViewport(command, 0, 1, &viewport);
+        }
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdSetScissor(command, 0, 1, &scissor);
+        }
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdDraw(command, 3, 1, 0, 0);
+        }
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdEndRenderPass(command);
+        }
     }
 }

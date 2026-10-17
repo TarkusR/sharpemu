@@ -23,8 +23,6 @@ internal sealed class DrawResolution
 
     public DynamicStateKey DynamicKey;
     public DynamicDrawState Dynamic;
-
-    public readonly KeptPipeline Pipeline = new();
 }
 
 internal readonly record struct DynamicStateKey(

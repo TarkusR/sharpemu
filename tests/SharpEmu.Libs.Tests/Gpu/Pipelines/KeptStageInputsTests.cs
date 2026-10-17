@@ -190,7 +190,7 @@ public sealed class KeptStageInputsTests : IDisposable
     public void UserData_IsKeptUntilARegisterHoldsAnotherWord()
     {
         Lookup();
-        var kept = (KeptUserData)typeof(ShaderPipelineCache).GetField("_vertexUserData", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(_cache)!;
+        var kept = (KeptUserData)typeof(ShaderPipelineCache).GetField("_vertexUserData", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
         var first = kept.Words;
         Lookup();
         Assert.Same(first, kept.Words);
@@ -218,5 +218,47 @@ public sealed class KeptStageInputsTests : IDisposable
         Assert.Same(first, _guest.Registry.Require(VertexAddress, "vertex"));
         ShaderHeaderRegistry.NoteRegistration();
         Assert.Equal(8u, _guest.Registry.Require(VertexAddress, "vertex").CodeSizeBytes);
+    }
+
+    private GraphicsPrograms Programs(bool pixelActive) =>
+        _cache.GetGraphicsPrograms(_banks, [], pixelActive, depthBound: false);
+
+    [Fact]
+    public void GraphicsPrograms_AreKeptOnceTheirResourcesAreCachedAndNothingIsWritten()
+    {
+        _ = Programs(pixelActive: true);
+        var cached = Programs(pixelActive: true);
+        Assert.Same(cached, Programs(pixelActive: true));
+        Assert.Same(cached, Programs(pixelActive: true));
+        _banks.MarkWritten(1u << (int)RegisterStamp.PixelUserData);
+        var resolved = Programs(pixelActive: true);
+        Assert.NotSame(cached, resolved);
+        Assert.Same(resolved, Programs(pixelActive: true));
+    }
+
+    [Fact]
+    public void GraphicsPrograms_ResolveAgainWhenTheTargetsOrTheRegistryChange()
+    {
+        _ = Programs(pixelActive: false);
+        var cached = Programs(pixelActive: false);
+        Assert.Same(cached, Programs(pixelActive: false));
+        Assert.NotSame(cached, Programs(pixelActive: true));
+        _ = Programs(pixelActive: false);
+        var again = Programs(pixelActive: false);
+        Assert.Same(again, Programs(pixelActive: false));
+        ShaderHeaderRegistry.NoteRegistration();
+        Assert.NotSame(again, Programs(pixelActive: false));
+    }
+
+    [Fact]
+    public void GraphicsPrograms_ResolveAgainWhenTheVertexTableWordsChange()
+    {
+        _ = Programs(pixelActive: false);
+        var cached = Programs(pixelActive: false);
+        Assert.Same(cached, Programs(pixelActive: false));
+        WriteTables(AttributeTable, BufferTable, stride: 32);
+        var changed = Programs(pixelActive: false);
+        Assert.NotSame(cached, changed);
+        Assert.Equal(32u, changed.VertexInput.Buffers[0].Stride);
     }
 }

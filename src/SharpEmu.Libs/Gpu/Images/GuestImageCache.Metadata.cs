@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -248,8 +249,14 @@ public sealed partial class GuestImageCache
                 ColorAttachmentCount = 1,
                 PColorAttachments = &attachment,
             };
-            _device.Vk.CmdBeginRendering(command, &rendering);
-            _device.Vk.CmdEndRendering(command);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _device.Vk.CmdBeginRendering(command, &rendering);
+            }
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _device.Vk.CmdEndRendering(command);
+            }
         }
         else
         {
@@ -261,13 +268,16 @@ public sealed partial class GuestImageCache
                 description.IsVolume ? 0u : range.BaseLayer,
                 description.IsVolume ? 1u : range.LayerCount);
             var nativeClear = clear;
-            _device.Vk.CmdClearColorImage(
-                command,
-                image.Backing.Handle,
-                ImageLayout.TransferDstOptimal,
-                &nativeClear,
-                1,
-                &nativeRange);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _device.Vk.CmdClearColorImage(
+                    command,
+                    image.Backing.Handle,
+                    ImageLayout.TransferDstOptimal,
+                    &nativeClear,
+                    1,
+                    &nativeRange);
+            }
         }
 
         TakeGpuOwnership(image);

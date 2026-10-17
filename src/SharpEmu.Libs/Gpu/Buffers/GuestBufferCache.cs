@@ -50,6 +50,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly GpuBuffer _bdaPageTable;
     private readonly GuestBufferRegistry<GpuBuffer> _registry = new(CachingPageSize, PageOwnerTable.AddressSpaceSize);
     private readonly AvlSpanSet _gpuModifiedRanges = new();
+    private readonly object _gpuModifiedGate = new();
+    private const int ObtainMemoSlots = 4096;
+    private readonly ObtainMemo[] _obtainMemos = new ObtainMemo[ObtainMemoSlots];
+
+    private readonly record struct ObtainMemo(ulong Address, ulong Size, ResourceSlotIdentifier Identifier, ulong Offset, GpuBuffer? Buffer);
     private long _gpuModifiedVersion;
     private readonly GuestPageTracker _tracker;
     private readonly GpuRingBuffer _staging;
@@ -235,6 +240,21 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal("A buffer request requires a command buffer that is recording.");
         }
 
+        var memoSlot = -1;
+        if (!isWritten)
+        {
+            memoSlot = (int)(((guestAddress >> 4) ^ (guestAddress >> 17) ^ (size * 0x9E3779B1UL)) & (ObtainMemoSlots - 1));
+            ref var memo = ref _obtainMemos[memoSlot];
+            if (memo.Buffer is { } kept && memo.Address == guestAddress && memo.Size == size &&
+                ReferenceEquals(_registry.TryGetRegisteredBuffer(memo.Identifier), kept) && kept.IsInBounds(guestAddress, size) &&
+                !_tracker.MayHaveCpuDirtyPages(guestAddress, size) &&
+                (!isTexelBuffer || !RequireImageCache().MayHaveImageBytes(guestAddress, size)))
+            {
+                TouchBuffer(memo.Identifier);
+                return (kept, memo.Offset);
+            }
+        }
+
         if (!isWritten &&
             _tracker.HasCpuDirtyPages(guestAddress, size) &&
             !(_tracker.MayHaveGpuDirtyPages(guestAddress, size) && _tracker.HasGpuDirtyPages(guestAddress, size)) &&
@@ -279,13 +299,22 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
             if (!_gpuModifiedRanges.Contains(guestAddress, size))
             {
-                _gpuModifiedRanges.Add(guestAddress, size);
+                lock (_gpuModifiedGate)
+                {
+                    _gpuModifiedRanges.Add(guestAddress, size);
+                }
+
                 Interlocked.Increment(ref _gpuModifiedVersion);
             }
 
             NoteHotWindowWrite(guestAddress, size);
         }
         else OverlayGuestPublications?.Invoke(buffer, buffer.Offset(guestAddress), guestAddress, size);
+
+        if (memoSlot >= 0)
+        {
+            _obtainMemos[memoSlot] = new ObtainMemo(guestAddress, size, bufferIdentifier, buffer.Offset(guestAddress), buffer);
+        }
 
         return (buffer, buffer.Offset(guestAddress));
     }
@@ -379,7 +408,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal("The host DMA write range is invalid.");
         }
 
-        GpuWritebackEpoch.Advance();
         if (!_backing.TryWriteBacking(guestAddress, data))
         {
             throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{guestAddress:X16} size=0x{data.Length:X16}");
@@ -475,7 +503,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         if ((publishFill || images.OverlapsDccMetadata(guestAddress, size)) && TryWriteFillToBacking(guestAddress, size, value))
         {
-            _gpuModifiedRanges.Remove(guestAddress, size);
+            lock (_gpuModifiedGate)
+            {
+                _gpuModifiedRanges.Remove(guestAddress, size);
+            }
+
             Interlocked.Increment(ref _gpuModifiedVersion);
             ClearGpuDirtyPagesOfRemovedRange(guestAddress, size);
         }
@@ -561,7 +593,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             for (ulong offset = 0; offset < size;)
             {
                 var chunk = (int)Math.Min(size - offset, (ulong)bytes.Length);
-                GpuWritebackEpoch.Advance();
                 if (!_backing.TryWriteBacking(guestAddress + offset, bytes[..chunk]))
                 {
                     return false;
@@ -731,9 +762,17 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public bool HasGpuDirtyPages(ulong guestAddress, ulong size) => _tracker.HasGpuDirtyPages(guestAddress, size);
 
-    public bool HasGpuDirtyBytes(ulong guestAddress, ulong size) => _gpuModifiedRanges.Overlaps(guestAddress, size);
+    public bool HasGpuDirtyBytes(ulong guestAddress, ulong size)
+    {
+        lock (_gpuModifiedGate)
+        {
+            return _gpuModifiedRanges.Overlaps(guestAddress, size);
+        }
+    }
 
     public long GpuModifiedVersion => Volatile.Read(ref _gpuModifiedVersion);
+
+    public long RegistrationSerial => _registry.RegistrationSerial;
 
     public bool HasCpuDirtyPages(ulong guestAddress, ulong size) => _tracker.HasCpuDirtyPages(guestAddress, size);
 
@@ -1714,7 +1753,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                     return;
                 }
 
-                GpuWritebackEpoch.Advance();
                 if (!_backing.TryWriteBacking(copies[index].Address, bytes))
                 {
                     throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copies[index].Address:X16} size=0x{(ulong)bytes.Length:X16}");
@@ -1724,7 +1762,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             {
                 if (current[index])
                 {
-                    _gpuModifiedRanges.Remove(copies[index].Address, copies[index].Size);
+                    lock (_gpuModifiedGate)
+                    {
+                        _gpuModifiedRanges.Remove(copies[index].Address, copies[index].Size);
+                    }
+
                     Interlocked.Increment(ref _gpuModifiedVersion);
                 }
             }
@@ -1980,7 +2022,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         {
             foreach (var copy in copies)
             {
-                _gpuModifiedRanges.Remove(copy.Address, copy.Size);
+                lock (_gpuModifiedGate)
+                {
+                    _gpuModifiedRanges.Remove(copy.Address, copy.Size);
+                }
+
                 Interlocked.Increment(ref _gpuModifiedVersion);
             }
 
@@ -2018,7 +2064,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         foreach (var copy in copies)
         {
-            _gpuModifiedRanges.Remove(copy.Address, copy.Size);
+            lock (_gpuModifiedGate)
+            {
+                _gpuModifiedRanges.Remove(copy.Address, copy.Size);
+            }
+
             Interlocked.Increment(ref _gpuModifiedVersion);
         }
     }
@@ -2044,7 +2094,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             return;
         }
 
-        _gpuModifiedRanges.Remove(address, size);
+        lock (_gpuModifiedGate)
+        {
+            _gpuModifiedRanges.Remove(address, size);
+        }
+
         var firstPage = address & ~(TrackerLayout.PageBytes - 1);
         for (var page = firstPage; page < address + size; page += TrackerLayout.PageBytes)
         {
@@ -2151,7 +2205,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         readback.Read(pieces, waitTick, (index, bytes) =>
         {
-            GpuWritebackEpoch.Advance();
             if (!_backing.TryWriteBacking(copies[index].Address, bytes))
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copies[index].Address:X16} size=0x{(ulong)bytes.Length:X16}");
@@ -2184,7 +2237,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var placement = copy.Placement;
             var offset = baseOffset + placement.DataOffset;
             _download.Invalidate(offset, placement.DataSize);
-            GpuWritebackEpoch.Advance();
             if (GpuCommands.VisibilityResultTrace.Enabled)
                 GpuCommands.VisibilityResultTrace.Download(copy.Address,
                     _download.Mapped.Slice((int)offset, (int)placement.DataSize), _backing.TryReadBacking);
@@ -2381,6 +2433,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             RecordUpload(buffer, source, CollectionsMarshal.AsSpan(copies), guestAddress, size, totalSize);
         }
 
+        if (source != null)
+        {
+            BufferUploadProfile.NoteUpload(copies.Count, totalSize, size);
+        }
+
         if (BufferUploadProfile.Enabled)
         {
             var elapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - startedAt;
@@ -2432,7 +2489,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         fixed (BufferCopy* pointer = regions)
         {
-            vk.CmdCopyBuffer(native, source.Handle, buffer.Handle, (uint)regions.Length, pointer);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                vk.CmdCopyBuffer(native, source.Handle, buffer.Handle, (uint)regions.Length, pointer);
+            }
         }
 
         if (!sweep)

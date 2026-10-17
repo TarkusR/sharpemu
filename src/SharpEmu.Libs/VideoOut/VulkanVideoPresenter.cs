@@ -253,6 +253,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             public string DebugName = "SharpEmu translated";
             public TextureResource[] Textures = [];
+            public int TextureCount;
             // Draw-local feedback copies stay alive until the GPU has consumed
             // the descriptors that reference them.
             public CachedImage[] FeedbackSnapshots = [];

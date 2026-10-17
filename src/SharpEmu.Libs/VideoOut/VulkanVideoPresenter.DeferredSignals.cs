@@ -120,7 +120,6 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             try
             {
-                DrainDraws();
                 var tick = _scheduler.QueueMemoryPublication(() => PublishGuestEntry(entry, () =>
                 {
                     if (!_guestMemory.TryWrite(entry.Address, payload))
@@ -214,7 +213,6 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             try
             {
-                DrainDraws();
                 using var completionScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandEndOfPipe);
                 var hasSignal = write.Kind is EndOfPipeWriteKind.InterruptOnly or EndOfPipeWriteKind.Interrupt32 or
                     EndOfPipeWriteKind.Interrupt64 or EndOfPipeWriteKind.InterruptWriteBack32 or

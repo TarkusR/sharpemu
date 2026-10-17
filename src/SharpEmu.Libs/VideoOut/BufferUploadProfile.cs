@@ -106,6 +106,23 @@ internal static class BufferUploadProfile
     [ThreadStatic] private static Source _source;
     internal static bool Enabled => RenderPhaseProfile.FrameTraceEnabled;
 
+    private static long _totalUploads;
+    private static long _totalCopies;
+    private static long _totalBytes;
+    private static long _totalRangeBytes;
+
+    internal static void NoteUpload(int copies, ulong bytes, ulong rangeBytes)
+    {
+        if (!RenderPhaseProfile.Enabled) return;
+        Interlocked.Increment(ref _totalUploads);
+        Interlocked.Add(ref _totalCopies, copies);
+        Interlocked.Add(ref _totalBytes, (long)bytes);
+        Interlocked.Add(ref _totalRangeBytes, (long)rangeBytes);
+    }
+
+    internal static string TakeTotalsReport() =>
+        FormattableString.Invariant($"[PERF][BUFFER_SYNC_TOTAL] uploads={Interlocked.Exchange(ref _totalUploads, 0)} copies={Interlocked.Exchange(ref _totalCopies, 0)} bytes={Interlocked.Exchange(ref _totalBytes, 0)} range_bytes={Interlocked.Exchange(ref _totalRangeBytes, 0)}");
+
     internal readonly struct Scope : IDisposable
     {
         private readonly Source _previousSource;

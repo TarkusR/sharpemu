@@ -445,6 +445,27 @@ public sealed partial class ResourceMaterializationCache
         // The rebased words; replaced, never mutated, so a caller can compare references.
         public ulong[] Active { get; private set; } = [];
 
+        public bool IsLearnable(int index) => IsUsed(_candidateMask, index) && !IsUsed(_rejected, index) && !IsUsed(Active, index);
+
+        private enum LearnOutcome { NoPrevious, Shape, NonCandidateWord, Identical, RejectedWord, Unpredicted, BasesDisagree, PredictionRejected, PredictionConfirmed, Rejected, Confirmed, Activated, Count }
+
+        private static readonly long[] _learnOutcomes = new long[(int)LearnOutcome.Count];
+
+        private static void Note(LearnOutcome outcome) => Interlocked.Increment(ref _learnOutcomes[(int)outcome]);
+
+        public static string TakeLearnReport()
+        {
+            var parts = new List<string>();
+            for (var index = 0; index < (int)LearnOutcome.Count; index++)
+            {
+                var count = Interlocked.Exchange(ref _learnOutcomes[index], 0);
+                if (count != 0)
+                    parts.Add(FormattableString.Invariant($"{(LearnOutcome)index}:{count}"));
+            }
+
+            return " learn=" + string.Join(",", parts);
+        }
+
         // Every rebased base dword of the entry equals the word it came from.
         public bool AppliesTo(Entry entry)
         {
@@ -486,6 +507,7 @@ public sealed partial class ResourceMaterializationCache
                     FlattenedResourceTable = snapshot.FlattenedResourceTable,
                     UserData = snapshot.UserData,
                     DeviceAddressRanges = snapshot.DeviceAddressRanges,
+                    Origin = snapshot.Origin,
                 };
         }
 
@@ -505,7 +527,10 @@ public sealed partial class ResourceMaterializationCache
             _recent[structure] = built;
             if (previous is null || previous.UserData.Length != built.UserData.Length ||
                 !previous.UsedUserData.AsSpan().SequenceEqual(built.UsedUserData))
+            {
+                Note(previous is null ? LearnOutcome.NoPrevious : LearnOutcome.Shape);
                 return;
+            }
 
             var differing = new List<int>();
             for (var index = 0; index < built.UserData.Length; index++)
@@ -513,14 +538,21 @@ public sealed partial class ResourceMaterializationCache
                 if (!IsUsed(built.UsedUserData, index) || previous.UserData[index] == built.UserData[index])
                     continue;
                 if (!IsUsed(_candidateMask, index))
+                {
+                    Note(LearnOutcome.NonCandidateWord);
                     return;
+                }
+
                 differing.Add(index);
             }
 
             // A word already rejected explains any mismatch; blaming the others with it would reject
             // sound bases that merely change together with it.
             if (differing.Count == 0 || differing.Any(index => IsUsed(_rejected, index)))
+            {
+                Note(differing.Count == 0 ? LearnOutcome.Identical : LearnOutcome.RejectedWord);
                 return;
+            }
 
             // Reads must land where the previous draw's did, moved with a rebased buffer when they
             // fall inside its window. Guest bytes that changed between the two draws make the
@@ -532,7 +564,10 @@ public sealed partial class ResourceMaterializationCache
                 // previous one as a hit with the words rebased would, moved memory-loaded bases
                 // included, and judge the words by the prediction instead.
                 if (predict?.Invoke(previous, Or(Active, MaskOf(differing))) is not { } prediction)
+                {
+                    Note(LearnOutcome.Unpredicted);
                     return;
+                }
 
                 var agrees = Difference(prediction.Snapshot, previous.Specialization, built.Snapshot, built.Specialization) is null;
                 if (prediction.Patches is { } patches)
@@ -540,16 +575,21 @@ public sealed partial class ResourceMaterializationCache
                     // A wrong prediction that moved bases blames those bases, not the words.
                     ConfirmMemoryBases(patches, agrees);
                     if (!agrees)
+                    {
+                        Note(LearnOutcome.BasesDisagree);
                         return;
+                    }
                 }
                 else if (!agrees)
                 {
                     _rejected = Or(_rejected, MaskOf(differing));
                     if (Overlaps(Active, _rejected))
                         Active = AndNot(Active, _rejected);
+                    Note(LearnOutcome.PredictionRejected);
                     return;
                 }
 
+                Note(LearnOutcome.PredictionConfirmed);
                 Confirm(differing);
                 return;
             }
@@ -560,9 +600,11 @@ public sealed partial class ResourceMaterializationCache
                 _rejected = Or(_rejected, MaskOf(differing));
                 if (Overlaps(Active, _rejected))
                     Active = AndNot(Active, _rejected);
+                Note(LearnOutcome.Rejected);
                 return;
             }
 
+            Note(LearnOutcome.Confirmed);
             Confirm(differing);
         }
 
@@ -578,7 +620,10 @@ public sealed partial class ResourceMaterializationCache
             }
 
             if (activated.Count != 0)
+            {
+                Note(LearnOutcome.Activated);
                 Active = Or(Active, MaskOf(activated));
+            }
         }
 
         // Runs a prediction as though the words in probe were rebased already.
@@ -826,6 +871,58 @@ public sealed partial class ResourceMaterializationCache
     }
     private static long _totalFirstSightings;
     private static long _totalVolatile;
+    private static long _totalChurnLearnable;
+    private static long _totalChurnUnlearnable;
+    private static long _totalChurnMulti;
+    private const int DrawHistoryCapacity = 65536;
+    private readonly Dictionary<ulong, uint[]> _drawHistories = new();
+
+    private void NoteChurn(ulong drawKey, IReadOnlyList<uint> userData, ulong[]? learned, AddressRebase rebase)
+    {
+        if (!_drawHistories.TryGetValue(drawKey, out var previous) || previous.Length != userData.Count)
+        {
+            if (_drawHistories.Count >= DrawHistoryCapacity)
+                _drawHistories.Clear();
+            var copy = new uint[userData.Count];
+            for (var index = 0; index < copy.Length; index++)
+                copy[index] = userData[index];
+            _drawHistories[drawKey] = copy;
+            return;
+        }
+
+        var differing = 0;
+        var changed = -1;
+        for (var index = 0; index < previous.Length; index++)
+        {
+            if (previous[index] == userData[index])
+                continue;
+            previous[index] = userData[index];
+            if (learned is not null && !IsUsed(learned, index))
+                continue;
+            differing++;
+            changed = index;
+        }
+
+        if (differing != 1)
+        {
+            if (differing > 1)
+                Interlocked.Increment(ref _totalChurnMulti);
+            return;
+        }
+
+        if (rebase.IsLearnable(changed))
+            Interlocked.Increment(ref _totalChurnLearnable);
+        else
+            Interlocked.Increment(ref _totalChurnUnlearnable);
+    }
+
+    private static string TakeChurnReport() =>
+        FormattableString.Invariant($" churn_learnable={Interlocked.Exchange(ref _totalChurnLearnable, 0)} churn_unlearnable={Interlocked.Exchange(ref _totalChurnUnlearnable, 0)} churn_multi={Interlocked.Exchange(ref _totalChurnMulti, 0)}") +
+        AddressRebase.TakeLearnReport();
+
+    private static long _totalRevalidated;
+    private static long _totalRevalidateStale;
+    private static long _totalRevalidateUnlinked;
 
 
     [ThreadStatic]
@@ -863,6 +960,8 @@ public sealed partial class ResourceMaterializationCache
             : string.Empty;
         return FormattableString.Invariant(
             $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}{diagnostics}") +
+            FormattableString.Invariant($" revalidated={Interlocked.Exchange(ref _totalRevalidated, 0)} revalidate_stale={Interlocked.Exchange(ref _totalRevalidateStale, 0)} revalidate_unlinked={Interlocked.Exchange(ref _totalRevalidateUnlinked, 0)}") +
+            TakeChurnReport() +
             TakeStaleDifferenceReport() + TakeMissReport() + TakeDetailReport();
     }
 
@@ -962,15 +1061,23 @@ public sealed partial class ResourceMaterializationCache
     public enum MaterializeOutcome { Failed, Hit, RebaseHit, TableRefresh, Volatile, BecameVolatile, FirstSighting, Miss, Uncacheable, Count }
 
     private static readonly bool OutcomeTimingEnabled = Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE") == "1";
-    private static readonly long[] _outcomeCounts = new long[(int)MaterializeOutcome.Count];
-    private static readonly long[] _outcomeTicks = new long[(int)MaterializeOutcome.Count];
-    private static long _outcomeLookupTicks;
-    private static long _outcomeValidateTicks;
-    private static long _outcomeValidatedVariants;
+    private const int OutcomeSides = 2;
+    private static readonly long[] _outcomeCounts = new long[OutcomeSides * (int)MaterializeOutcome.Count];
+    private static readonly long[] _outcomeTicks = new long[OutcomeSides * (int)MaterializeOutcome.Count];
+    private static readonly long[] _outcomeLookupTicks = new long[OutcomeSides];
+    private static readonly long[] _outcomeValidatedVariants = new long[OutcomeSides];
+    [ThreadStatic]
+    private static int _outcomeSide;
     private MaterializeOutcome _outcome;
     private long _lookupTicks;
-    private long _validateTicks;
     private long _validatedVariants;
+
+    private static int OutcomeSide()
+    {
+        if (_outcomeSide == 0)
+            _outcomeSide = Thread.CurrentThread.Name == "SharpEmu command stream" ? 2 : 1;
+        return _outcomeSide - 1;
+    }
 
     public bool Materialize(
         ShaderResourcePlan plan,
@@ -989,16 +1096,17 @@ public sealed partial class ResourceMaterializationCache
             }
 
             _outcome = MaterializeOutcome.Failed;
-            _validateTicks = 0;
             _validatedVariants = 0;
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var result = MaterializeCore(plan, inputs, residentReader, ref snapshot, ref specialization, out failure, ref timing);
+            var ended = System.Diagnostics.Stopwatch.GetTimestamp();
             var outcome = result ? _outcome : MaterializeOutcome.Failed;
-            Interlocked.Increment(ref _outcomeCounts[(int)outcome]);
-            Interlocked.Add(ref _outcomeTicks[(int)outcome], System.Diagnostics.Stopwatch.GetTimestamp() - started);
-            Interlocked.Add(ref _outcomeLookupTicks, _lookupTicks - started);
-            Interlocked.Add(ref _outcomeValidateTicks, _validateTicks);
-            Interlocked.Add(ref _outcomeValidatedVariants, _validatedVariants);
+            var side = OutcomeSide();
+            var slot = side * (int)MaterializeOutcome.Count + (int)outcome;
+            Interlocked.Increment(ref _outcomeCounts[slot]);
+            Interlocked.Add(ref _outcomeTicks[slot], ended - started);
+            Interlocked.Add(ref _outcomeLookupTicks[side], _lookupTicks - started);
+            Interlocked.Add(ref _outcomeValidatedVariants[side], _validatedVariants);
             return result;
         }
         finally
@@ -1010,18 +1118,25 @@ public sealed partial class ResourceMaterializationCache
     public static string TakeOutcomeReport()
     {
         static string Ms(long ticks) => FormattableString.Invariant($"{ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
-        var parts = new List<string>();
-        for (var index = 0; index < (int)MaterializeOutcome.Count; index++)
+        var lines = new List<string>();
+        for (var side = 0; side < OutcomeSides; side++)
         {
-            var count = Interlocked.Exchange(ref _outcomeCounts[index], 0);
-            var ticks = Interlocked.Exchange(ref _outcomeTicks[index], 0);
-            if (count != 0)
-                parts.Add(FormattableString.Invariant($"{(MaterializeOutcome)index}={count}/{Ms(ticks)}ms"));
+            var parts = new List<string>();
+            for (var index = 0; index < (int)MaterializeOutcome.Count; index++)
+            {
+                var count = Interlocked.Exchange(ref _outcomeCounts[side * (int)MaterializeOutcome.Count + index], 0);
+                var ticks = Interlocked.Exchange(ref _outcomeTicks[side * (int)MaterializeOutcome.Count + index], 0);
+                if (count != 0)
+                    parts.Add(FormattableString.Invariant($"{(MaterializeOutcome)index}={count}/{Ms(ticks)}ms"));
+            }
+
+            lines.Add(FormattableString.Invariant($"[PERF][RESOURCE_OUTCOMES] thread={(side == 0 ? "render" : "resolve")} ") +
+                FormattableString.Invariant($"lookup_ms={Ms(Interlocked.Exchange(ref _outcomeLookupTicks[side], 0))} ") +
+                FormattableString.Invariant($"validated_variants={Interlocked.Exchange(ref _outcomeValidatedVariants[side], 0)} ") +
+                string.Join(" ", parts));
         }
 
-        return FormattableString.Invariant($"[PERF][RESOURCE_OUTCOMES] lookup_ms={Ms(Interlocked.Exchange(ref _outcomeLookupTicks, 0))} ") +
-            FormattableString.Invariant($"validate_ms={Ms(Interlocked.Exchange(ref _outcomeValidateTicks, 0))} validated_variants={Interlocked.Exchange(ref _outcomeValidatedVariants, 0)} ") +
-            string.Join(" ", parts);
+        return string.Join(Environment.NewLine, lines);
     }
 
     private bool MaterializeCore(
@@ -1068,14 +1183,9 @@ public sealed partial class ResourceMaterializationCache
                     CountDiagnostic(Diagnostic.RefreshDescriptorSkipped);
                     continue;
                 }
-                var validateStarted = OutcomeTimingEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 var validated = Validate(variant, residentReader, rebase, inputs.UserData,
                     out var variantUnreadable, out var descriptorChanged, out rejection);
-                if (validateStarted != 0)
-                {
-                    _validateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - validateStarted;
-                    _validatedVariants++;
-                }
+                _validatedVariants++;
 
                 if (validated)
                 {
@@ -1200,6 +1310,7 @@ public sealed partial class ResourceMaterializationCache
         else if (_sightings is { } sightings)
         {
             ref var sighting = ref sightings[key & (SightingSlots - 1)];
+            NoteChurn(drawKey, inputs.UserData, learned, rebase);
             if (sighting != key)
             {
                 _outcome = MaterializeOutcome.FirstSighting;
@@ -1493,14 +1604,36 @@ public sealed partial class ResourceMaterializationCache
         return true;
     }
 
-    private static ulong DrawKeyOf(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    private static ulong DrawKeyOf(ShaderResourcePlan plan, ResourceRuntimeInputs inputs) =>
+        DrawKeyOf(plan, inputs.ShaderBase, inputs.ComputeState, inputs.UserData.Count);
+
+    private static ulong DrawKeyOf(ShaderResourcePlan plan, ulong shaderBase, ComputeSelectorState? computeState, int userDataCount)
     {
         var hash = new HashCode();
         hash.Add(RuntimeHelpers.GetHashCode(plan));
-        hash.Add(inputs.ShaderBase);
-        hash.Add(inputs.ComputeState);
-        hash.Add(inputs.UserData.Count);
+        hash.Add(shaderBase);
+        hash.Add(computeState);
+        hash.Add(userDataCount);
         return (ulong)(uint)hash.ToHashCode() | ((ulong)(uint)RuntimeHelpers.GetHashCode(plan) << 32);
+    }
+
+    public bool Revalidate(ResourceSnapshot snapshot, ResidentGuestBytesReader residentReader)
+    {
+        if (snapshot.Origin is not Entry entry || entry.VolatileLookups > 0)
+        {
+            Interlocked.Increment(ref _totalRevalidateUnlinked);
+            return false;
+        }
+
+        var rebase = RebaseOf(DrawKeyOf(entry.Plan, entry.ShaderBase, entry.ComputeState, entry.UserData.Length), entry.Plan);
+        if (!Validate(entry, residentReader, rebase, snapshot.UserData, out _))
+        {
+            Interlocked.Increment(ref _totalRevalidateStale);
+            return false;
+        }
+
+        Interlocked.Increment(ref _totalRevalidated);
+        return true;
     }
 
     // Only the words the draw's shader has been seen to read take part, less the rebased ones: the
@@ -1564,6 +1697,7 @@ public sealed partial class ResourceMaterializationCache
             FlattenedResourceTable = cached.FlattenedResourceTable,
             UserData = current,
             DeviceAddressRanges = cached.DeviceAddressRanges,
+            Origin = cached.Origin,
         };
     }
 
@@ -1593,6 +1727,7 @@ public sealed partial class ResourceMaterializationCache
 
     private void Store(ulong key, Entry entry)
     {
+        entry.Snapshot.Origin = entry;
         if (_young.Count >= _generationCapacity && !_young.ContainsKey(key))
         {
             CountDiagnostic(Diagnostic.GenerationRotation);
@@ -2117,6 +2252,8 @@ public sealed partial class ResourceMaterializationCache
     private sealed class ReadRecorder
     {
         private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
+        private ulong[] _sortKeys = [];
+        private int[] _sortOrder = [];
         private bool _inTable;
         private GuestWordReader? _reader;
         private GuestWordReader? _cleanReader;
@@ -2144,6 +2281,11 @@ public sealed partial class ResourceMaterializationCache
             // tables alive for the lifetime of the renderer.
             if (_reads.Capacity > 16384)
                 _reads.Capacity = 0;
+            if (_sortKeys.Length > 16384)
+            {
+                _sortKeys = [];
+                _sortOrder = [];
+            }
             _reader = null;
             _cleanReader = null;
             _residentReader = null;
@@ -2225,11 +2367,27 @@ public sealed partial class ResourceMaterializationCache
             ResourceSpecialization specialization, IReadOnlyList<int> memoryBases)
         {
             // Reads mostly arrive in address order; sorting a sorted list was ~5% of a draw-heavy render thread.
+            var reads = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_reads);
             var ordered = true;
-            for (var index = 1; ordered && index < _reads.Count; index++)
-                ordered = _reads[index - 1].Address <= _reads[index].Address;
+            for (var index = 1; ordered && index < reads.Length; index++)
+                ordered = reads[index - 1].Address <= reads[index].Address;
             if (!ordered)
-                _reads.Sort((left, right) => left.Address.CompareTo(right.Address));
+            {
+                if (_sortKeys.Length < reads.Length)
+                {
+                    _sortKeys = new ulong[Math.Max(reads.Length, _sortKeys.Length * 2)];
+                    _sortOrder = new int[_sortKeys.Length];
+                }
+
+                var keys = _sortKeys.AsSpan(0, reads.Length);
+                for (var index = 0; index < reads.Length; index++)
+                {
+                    keys[index] = reads[index].Address;
+                    _sortOrder[index] = index;
+                }
+
+                keys.Sort(_sortOrder.AsSpan(0, reads.Length));
+            }
             // Count unique words and contiguous ranges first, then fill the
             // retained arrays directly. Temporary lists previously duplicated
             // every recorded byte and range on each cache miss.
@@ -2237,13 +2395,14 @@ public sealed partial class ResourceMaterializationCache
             var wordCount = 0;
             ulong end = 0;
             var previous = ulong.MaxValue;
-            foreach (var read in _reads)
+            for (var index = 0; index < reads.Length; index++)
             {
-                if (read.Address == previous) continue;
-                if (wordCount == 0 || read.Address != end) rangeCount++;
+                var address = reads[ordered ? index : _sortOrder[index]].Address;
+                if (address == previous) continue;
+                if (wordCount == 0 || address != end) rangeCount++;
                 wordCount++;
-                previous = read.Address;
-                end = read.Address + sizeof(uint);
+                previous = address;
+                end = address + sizeof(uint);
             }
 
             var addresses = new ulong[rangeCount];
@@ -2256,8 +2415,9 @@ public sealed partial class ResourceMaterializationCache
             var wordIndex = -1;
             end = 0;
             previous = ulong.MaxValue;
-            foreach (var (address, word, wordClean, table) in _reads)
+            for (var index = 0; index < reads.Length; index++)
             {
+                var (address, word, wordClean, table) = reads[ordered ? index : _sortOrder[index]];
                 if (address == previous)
                 {
                     clean[rangeIndex] |= wordClean;

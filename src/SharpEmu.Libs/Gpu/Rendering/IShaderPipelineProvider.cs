@@ -46,18 +46,38 @@ public sealed class GraphicsPrograms
 
 public sealed class KnownGpuWrite(ulong address, uint[] buffer, int count, bool pooled = false)
 {
+    private readonly object _gate = new();
     private bool _released;
 
     public ulong Address { get; } = address;
 
+    public int ByteCount => count * sizeof(uint);
+
     public ReadOnlySpan<uint> Words => buffer.AsSpan(0, count);
+
+    public bool TryCopyWords(int offsetBytes, Span<byte> destination)
+    {
+        lock (_gate)
+        {
+            if (_released)
+            {
+                return false;
+            }
+
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(buffer.AsSpan(0, count)).Slice(offsetBytes, destination.Length).CopyTo(destination);
+            return true;
+        }
+    }
 
     public void Release()
     {
-        if (pooled && !_released)
+        lock (_gate)
         {
-            _released = true;
-            System.Buffers.ArrayPool<uint>.Shared.Return(buffer);
+            if (pooled && !_released)
+            {
+                _released = true;
+                System.Buffers.ArrayPool<uint>.Shared.Return(buffer);
+            }
         }
     }
 }
@@ -95,6 +115,13 @@ public interface IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound) => new() { Available = false };
+    GraphicsPrograms GetGraphicsPrograms(
+        RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        int startInstanceUserData) =>
+        GetGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound);
 
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,
@@ -117,6 +144,9 @@ public interface IShaderPipelineProvider
         uint dimensionX,
         uint dimensionY,
         uint dimensionZ);
+
+    ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
+        GetComputeProgram(banks.Shader.Compute, banks.Context.ShaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 

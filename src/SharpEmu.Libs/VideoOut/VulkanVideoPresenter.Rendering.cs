@@ -126,6 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsDepthClipControl;
         private bool _supportsDepthClipEnable;
         private bool _supportsDepthBounds;
+        private bool _supportsShaderDrawParameters;
         private bool _supportsFillRectangle;
         private bool _supportsRectangleGeometry;
         private RenderHostLimits _renderHostLimits;
@@ -202,7 +203,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public void RunPendingOperations()
         {
             RunPendingCommands();
-            if (_batchOpen && _preparation is null && _bufferCache?.HotWritePending == true)
+            if (_batchOpen && _preparation is null && _bufferCache?.HotWritePending == true && _batchDrawCount >= MinimumFlushDraws)
             {
                 EndRendering();
                 FlushBatchedGuestCommands();
@@ -422,7 +423,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 offsets[index] = bindings[index].Offset;
             }
 
-            _vk.CmdBindVertexBuffers(command, 0, (uint)bindings.Length, buffers, offsets);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdBindVertexBuffers(command, 0, (uint)bindings.Length, buffers, offsets);
+            }
         }
 
         public void BindIndexBuffer(BufferBinding binding, IndexType type)
@@ -430,7 +434,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var command = BeginBatchedGuestCommands();
             if (!IndexBufferAlreadyBound(command, new VkBuffer(binding.Handle), binding.Offset, type))
             {
-                _vk.CmdBindIndexBuffer(command, new VkBuffer(binding.Handle), binding.Offset, type);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBindIndexBuffer(command, new VkBuffer(binding.Handle), binding.Offset, type);
+                }
             }
         }
 
@@ -496,6 +503,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 var storage = AcquireStencilStorage(binding, image, writeBack: false);
+                binding.Preparation?.Invalidate();
                 binding.CachedImage = storage;
                 binding.Image = storage.Backing.Handle;
                 binding.View = storage.GetOrCreateView(binding.Request.View with { Aspect = ImageAspectFlags.ColorBit });
@@ -655,7 +663,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     var range = new SubresourceRange(0, 1, layer, 1);
                     image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, range, command);
                     var vkRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, layer, 1);
-                    _vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                    {
+                        _vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                    }
+
                     if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("sampled-clear-recorded", binding.Request, image,
                         $"layer={layer} tracked={tracked} rgbaBits={clearValue.Uint32_0:X8},{clearValue.Uint32_1:X8},{clearValue.Uint32_2:X8},{clearValue.Uint32_3:X8} scope=whole-mip-for-volume");
                     if (!tracked)
@@ -699,7 +711,10 @@ internal static unsafe partial class VulkanVideoPresenter
             image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, range, command);
             var vkRange = new ImageSubresourceRange(aspects, view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
             var value = new ClearDepthStencilValue(_boundDepthLoadState.DepthClearValue, _boundDepthLoadState.StencilClearValue);
-            _vk.CmdClearDepthStencilImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &value, 1, &vkRange);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdClearDepthStencilImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &value, 1, &vkRange);
+            }
         }
 
         // The dynamic state the last guest draw set, and where it holds: the command buffer and its
@@ -730,7 +745,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 state.ViewportMinDepth != last.ViewportMinDepth || state.ViewportMaxDepth != last.ViewportMaxDepth)
             {
                 var viewport = new Viewport(state.ViewportX, state.ViewportY, state.ViewportWidth, state.ViewportHeight, state.ViewportMinDepth, state.ViewportMaxDepth);
-                _vk.CmdSetViewport(command, 0, 1, &viewport);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetViewport(command, 0, 1, &viewport);
+                }
             }
 
             if (!known || state.Scissor != last.Scissor)
@@ -738,39 +756,60 @@ internal static unsafe partial class VulkanVideoPresenter
                 var scissor = new Rect2D(
                     new Offset2D(state.Scissor.Left, state.Scissor.Top),
                     new Extent2D((uint)(state.Scissor.Right - state.Scissor.Left), (uint)(state.Scissor.Bottom - state.Scissor.Top)));
-                _vk.CmdSetScissor(command, 0, 1, &scissor);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetScissor(command, 0, 1, &scissor);
+                }
             }
 
             if (!known || state.LineWidth != last.LineWidth)
             {
-                _vk.CmdSetLineWidth(command, state.LineWidth);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetLineWidth(command, state.LineWidth);
+                }
             }
 
             if (!known || state.BlendRed != last.BlendRed || state.BlendGreen != last.BlendGreen ||
                 state.BlendBlue != last.BlendBlue || state.BlendAlpha != last.BlendAlpha)
             {
                 var blendConstants = stackalloc float[4] { state.BlendRed, state.BlendGreen, state.BlendBlue, state.BlendAlpha };
-                _vk.CmdSetBlendConstants(command, blendConstants);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetBlendConstants(command, blendConstants);
+                }
             }
 
             if (!known || state.DepthTestEnabled != last.DepthTestEnabled)
             {
-                _vk.CmdSetDepthTestEnable(command, state.DepthTestEnabled);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetDepthTestEnable(command, state.DepthTestEnabled);
+                }
             }
 
             if (!known || state.DepthWriteEnabled != last.DepthWriteEnabled)
             {
-                _vk.CmdSetDepthWriteEnable(command, state.DepthWriteEnabled);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetDepthWriteEnable(command, state.DepthWriteEnabled);
+                }
             }
 
             if (!known || state.DepthCompare != last.DepthCompare)
             {
-                _vk.CmdSetDepthCompareOp(command, state.DepthCompare);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetDepthCompareOp(command, state.DepthCompare);
+                }
             }
 
             if (!known || state.DepthBiasEnabled != last.DepthBiasEnabled)
             {
-                _vk.CmdSetDepthBiasEnable(command, state.DepthBiasEnabled);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetDepthBiasEnable(command, state.DepthBiasEnabled);
+                }
             }
 
             // The factors only matter while the bias is on; they are set when it turns on or changes.
@@ -778,18 +817,39 @@ internal static unsafe partial class VulkanVideoPresenter
                 state.DepthBiasConstantFactor != last.DepthBiasConstantFactor || state.DepthBiasClamp != last.DepthBiasClamp ||
                 state.DepthBiasSlopeFactor != last.DepthBiasSlopeFactor))
             {
-                _vk.CmdSetDepthBias(command, state.DepthBiasConstantFactor, _supportsDepthBiasClamp ? state.DepthBiasClamp : 0f, state.DepthBiasSlopeFactor);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetDepthBias(command, state.DepthBiasConstantFactor, _supportsDepthBiasClamp ? state.DepthBiasClamp : 0f, state.DepthBiasSlopeFactor);
+                }
             }
 
             if (state.StencilTestEnabled && (!known || !last.StencilTestEnabled ||
                 state.FrontStencil != last.FrontStencil || state.BackStencil != last.BackStencil))
             {
-                _vk.CmdSetStencilCompareMask(command, StencilFaceFlags.FaceFrontBit, state.FrontStencil.CompareMask);
-                _vk.CmdSetStencilCompareMask(command, StencilFaceFlags.FaceBackBit, state.BackStencil.CompareMask);
-                _vk.CmdSetStencilWriteMask(command, StencilFaceFlags.FaceFrontBit, state.FrontStencil.WriteMask);
-                _vk.CmdSetStencilWriteMask(command, StencilFaceFlags.FaceBackBit, state.BackStencil.WriteMask);
-                _vk.CmdSetStencilReference(command, StencilFaceFlags.FaceFrontBit, state.FrontStencil.Reference);
-                _vk.CmdSetStencilReference(command, StencilFaceFlags.FaceBackBit, state.BackStencil.Reference);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilCompareMask(command, StencilFaceFlags.FaceFrontBit, state.FrontStencil.CompareMask);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilCompareMask(command, StencilFaceFlags.FaceBackBit, state.BackStencil.CompareMask);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilWriteMask(command, StencilFaceFlags.FaceFrontBit, state.FrontStencil.WriteMask);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilWriteMask(command, StencilFaceFlags.FaceBackBit, state.BackStencil.WriteMask);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilReference(command, StencilFaceFlags.FaceFrontBit, state.FrontStencil.Reference);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilReference(command, StencilFaceFlags.FaceBackBit, state.BackStencil.Reference);
+                }
             }
 
             if (_colorWriteEnableApi is { } colorWriteEnable && state.ColorWriteCount != 0)
@@ -800,7 +860,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     enables[index] = ((state.ColorWriteEnableMask >> index) & 1) != 0;
                 }
 
-                colorWriteEnable.CmdSetColorWriteEnable(command, state.ColorWriteCount, enables);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    colorWriteEnable.CmdSetColorWriteEnable(command, state.ColorWriteCount, enables);
+                }
             }
 
             _lastDynamicState = state;
@@ -988,9 +1051,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 PStencilAttachment = depthStencil.HasStencil ? &stencil : null,
             };
             if (_occlusionCounting)
-                _occlusionQueries?.Begin(command, _occlusionQueueId,
-                    _commandStream.GetInterpreter(_occlusionQueueId).TypedRegisters.Context.DepthCountControl);
-            _vk.CmdBeginRendering(command, &rendering);
+                _occlusionQueries?.Begin(command, _occlusionQueueId, Gpu.GpuCommands.VisibilityResultTrace.Enabled
+                    ? _commandStream.GetInterpreter(_occlusionQueueId).TypedRegisters.Context.DepthCountControl : 0);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdBeginRendering(command, &rendering);
+            }
             _renderingScopesBegun++;
             if (GpuSyncProfile.Enabled)
             {
@@ -1011,7 +1077,10 @@ internal static unsafe partial class VulkanVideoPresenter
             _renderingActive = false;
             _renderingState = default;
             var command = new CommandBuffer(_scheduler.Current.Handle);
-            _vk.CmdEndRendering(command);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdEndRendering(command);
+            }
             _occlusionQueries?.End(command);
             foreach (var (sourceStages, destinationStages, barriers) in _barriersAfterRendering)
             {
@@ -1069,7 +1138,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 preparation.CommandsRecorded = true;
             Interlocked.Increment(ref _perfDrawCount);
             PerfOverlay.RecordDraw();
-            _batchDrawCount++;
+            if (_batchDrawCount++ == 0)
+            {
+                _batchOpenedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
         }
 
         // Existing strip compatibility path when native rectangle fill cannot be used.
@@ -1124,7 +1196,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
-            _vk.CmdDraw(command, count, instanceCount, firstVertex, firstInstance);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdDraw(command, count, instanceCount, firstVertex, firstInstance);
+            }
             _occlusionQueries?.TraceDraw();
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw,
                 _boundGraphicsPipeline?.Id ?? 0, count, instanceCount);
@@ -1154,7 +1229,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
-            _vk.CmdDrawIndexed(command, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdDrawIndexed(command, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+            }
             _occlusionQueries?.TraceDraw(indexCount);
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.DrawIndexed,
                 _boundGraphicsPipeline?.Id ?? 0, indexCount, instanceCount);
@@ -1178,7 +1256,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
-            _vk.CmdDrawIndexedIndirect(command, new VkBuffer(arguments.Handle), arguments.Offset, 1, 20);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdDrawIndexedIndirect(command, new VkBuffer(arguments.Handle), arguments.Offset, 1, 20);
+            }
             _occlusionQueries?.TraceDraw();
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.DrawIndexed,
                 _boundGraphicsPipeline?.Id ?? 0, 0, 0);
@@ -1209,7 +1290,10 @@ internal static unsafe partial class VulkanVideoPresenter
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
             var command = BeginBatchedGuestCommands();
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
-            _vk.CmdDispatch(command, groupsX, groupsY, groupsZ);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdDispatch(command, groupsX, groupsY, groupsZ);
+            }
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Dispatch,
                 _profileComputePipeline, groupsX, groupsY, groupsZ);
             CountDraw();
@@ -1232,7 +1316,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 Size = 3u * sizeof(uint),
             };
             VulkanSynchronization.PipelineBarrier(_vk,command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.DrawIndirectBit, 0, 0, null, 1, &barrier, 0, null);
-            _vk.CmdDispatchIndirect(command, buffer.Handle, offset);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdDispatchIndirect(command, buffer.Handle, offset);
+            }
             CountDraw();
             return true;
         }
@@ -1312,7 +1399,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 var range = new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
                 attachment.Image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, range, command);
                 var vkRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
-                _vk.CmdClearColorImage(command, attachment.Image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdClearColorImage(command, attachment.Image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                }
             }
 
             CountDraw();

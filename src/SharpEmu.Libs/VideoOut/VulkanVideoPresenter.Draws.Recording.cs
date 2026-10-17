@@ -270,7 +270,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private void RecycleSubmissionUploads(SubmissionUploadResources resources)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceDestroy);
-            foreach (var texture in resources.Textures)
+            var textures = resources.Textures.AsSpan(0, resources.TextureCount);
+            foreach (var texture in textures)
             {
                 if (texture is { StagingBuffer.Handle: not 0 })
                 {
@@ -280,7 +281,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 ReturnTextureResource(texture);
             }
 
+            if (resources.Textures.Length != 0)
+            {
+                textures.Clear();
+                System.Buffers.ArrayPool<TextureResource>.Shared.Return(resources.Textures);
+            }
+
             resources.Textures = [];
+            resources.TextureCount = 0;
 
             foreach (var snapshot in resources.FeedbackSnapshots)
             {

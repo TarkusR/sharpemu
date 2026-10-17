@@ -64,6 +64,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _maxPushDescriptors;
         private SampleCountFlags _noAttachmentSampleCounts;
         private DescriptorHeap _descriptorHeap = null!;
+        private SharpEmu.Libs.Gpu.Buffers.ContentUploadArena _contentUploads = null!;
 
         uint IShaderPipelineHost.MaxPushDescriptors => _maxPushDescriptors;
 
@@ -125,6 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         MeshShaderLimits IShaderPipelineHost.MeshLimits => _meshShaderLimits;
         uint IShaderPipelineHost.MeshSubgroupSize => checked((uint)Volatile.Read(ref _nativeSubgroupSize));
+        bool IShaderPipelineHost.ShaderDrawParametersSupported => _supportsShaderDrawParameters;
 
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
@@ -133,9 +135,9 @@ internal static unsafe partial class VulkanVideoPresenter
         // A range the GPU wrote is downloaded first, so the word is what the guest CPU would read.
         public bool TryReadGuestWord(ulong address, out uint word)
         {
-            if (_concurrentAssumptions is { } assumptions)
+            if (OnCommandThread)
             {
-                return TryReadGuestWordConcurrent(address, out word, assumptions);
+                return ReadWordOnCommandThread(address, out word);
             }
 
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead);
@@ -204,8 +206,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private void CompletePendingPublicationsForResourceRead(ulong address, ulong size)
         {
             if (!HasPendingMemoryPublication(address, size)) return;
-            if (_concurrentAssumptions is not null)
-                throw new SubmissionScheduler.AbandonedWorkException($"The resolution reads memory a pending publication writes: address=0x{address:X16}.");
             CompleteOverlappingPublications(address, size);
         }
 
@@ -220,15 +220,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
-            var owned = IsGpuOwnedForCleanRead(address, sizeof(uint));
-            _concurrentAssumptions?.Record(ConcurrentQuery.CleanWord, address, sizeof(uint), owned);
-            if (owned)
+            if (IsGpuOwnedForCleanRead(address, sizeof(uint)) || (OnCommandThread && IsPendingOnCommandThread(address, sizeof(uint))))
             {
                 return false;
             }
 
             Span<byte> bytes = stackalloc byte[sizeof(uint)];
-            if (!_guestMemory.TryRead(address, bytes))
+            if (!(OnCommandThread ? _commandThread!.ReadOverlay(address, bytes) : _guestMemory.TryRead(address, bytes)))
             {
                 return false;
             }
@@ -241,15 +239,73 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool CpuWriteNeedsGpuData(ulong address, ulong size) =>
             address != 0 && size != 0 && new SharpEmu.HLE.GpuMemory.GuestSpan(address, size).IsValid &&
-            ((_bufferCache.MayHaveGpuDirtyPages(address, size) && _bufferCache.HasGpuDirtyPages(address, size)) ||
+            ((OnCommandThread && IsPendingOnCommandThread(address, size)) ||
+             (_bufferCache.MayHaveGpuDirtyPages(address, size) && _bufferCache.HasGpuDirtyPages(address, size)) ||
              _imageCache.HasGpuModifiedImageBytes(address, size));
+
+        private bool IsGpuOwnedForCleanRead(ulong address, ulong size) =>
+            (_bufferCache.MayHaveGpuDirtyPages(address, size) && _bufferCache.HasGpuDirtyPages(address, size)) ||
+            _bufferCache.HasGpuDirtyBytes(address, size) ||
+            _imageCache.HasGpuModifiedImageBytes(address, size);
+
+        private bool IsGpuOwnedForResidentRead(ulong address, ulong size, bool clean) =>
+            _bufferCache.HasGpuDirtyBytes(address, size) ||
+            (clean && (_bufferCache.HasGpuDirtyPages(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size)));
+
+        private bool ReadWordOnCommandThread(ulong address, out uint word)
+        {
+            Span<byte> bytes = stackalloc byte[sizeof(uint)];
+            if (!ReadOnCommandThread(address, bytes))
+            {
+                word = 0;
+                return false;
+            }
+
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
+
+        private bool ReadResidentBytesOnCommandThread(ulong address, Span<byte> destination, bool clean)
+        {
+            var size = (ulong)destination.Length;
+            CompletePendingPublicationsForResourceRead(address, size);
+            if (!clean && IsCleanReadPage(address, size) && TryReadAliasBytes(address, destination))
+            {
+                return true;
+            }
+
+            if (!_guestMemory.CanRead(address, size))
+            {
+                return false;
+            }
+
+            var thread = _commandThread!;
+            thread.WaitForPendingRange(address, size);
+            if (!clean && thread.TryReadShadow(address, destination, out var shadowSequence) && !NewerPendingWrite(address, size, shadowSequence))
+            {
+                Diagnostics.CommandThreadTally.NoteShadowRead();
+                return true;
+            }
+
+            if (IsPendingOnCommandThread(address, size) || IsGpuOwnedForResidentRead(address, size, clean) || !thread.ReadOverlay(address, destination))
+            {
+                return false;
+            }
+
+            if (!clean)
+            {
+                NoteCleanReadPage(address, size);
+            }
+
+            return true;
+        }
 
         // The same ownership rules as the two word readers, checked once for a whole range.
         public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
         {
-            if (_concurrentAssumptions is { } assumptions)
+            if (OnCommandThread)
             {
-                return TryReadResidentGuestBytesConcurrent(address, destination, clean, assumptions);
+                return ReadResidentBytesOnCommandThread(address, destination, clean);
             }
 
             var size = (ulong)destination.Length;
@@ -275,8 +331,11 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private const ulong CleanReadPageBytes = 0x1000;
-        private const int CleanReadPageSlots = 64;
-        private CleanReadPages? _cleanReadPages;
+        private const int CleanReadPageSlots = 16384;
+        private CleanReadPages? _renderReads;
+        private CleanReadPages? _commandReads;
+
+        private CleanReadPages? Reads => OnCommandThread ? _commandReads : _renderReads;
 
         private sealed class CleanReadPages
         {
@@ -305,7 +364,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool TryGetAliasPointer(ulong address, ulong size, out byte* pointer)
         {
             pointer = null;
-            if (_cleanReadPages is not { } pages ||
+            if (Reads is not { } pages ||
                 !TryGetCleanReadPage(address, size, out var page, out var slot) || pages.Tags[slot] != page + 1 ||
                 _guestBacking.BackingAliasSnapshot is not { } snapshot)
             {
@@ -334,11 +393,26 @@ internal static unsafe partial class VulkanVideoPresenter
             return size != 0 && address + size > address && ((address + size - 1) & ~(CleanReadPageBytes - 1)) == page;
         }
 
-        private bool IsCleanReadPage(ulong address, ulong size) =>
-            _cleanReadPages is { } pages &&
-            TryGetCleanReadPage(address, size, out var page, out var slot) &&
-            pages.Tags[slot] == page + 1 &&
-            pages.Versions[slot] == _bufferCache.GpuModifiedVersion;
+        private bool IsCleanReadPage(ulong address, ulong size)
+        {
+            if (Reads is not { } pages ||
+                !TryGetCleanReadPage(address, size, out var page, out var slot) ||
+                pages.Tags[slot] != page + 1 ||
+                pages.Versions[slot] != _bufferCache.GpuModifiedVersion)
+            {
+                return false;
+            }
+
+            if (!OnCommandThread)
+            {
+                return true;
+            }
+
+            var thread = _commandThread!;
+            return !thread.HasPendingStores &&
+                (_translation.PendingWrites is not { } pending || !pending.MayHavePending(page, CleanReadPageBytes)) &&
+                !thread.HasShadow(page, CleanReadPageBytes);
+        }
 
         private void NoteCleanReadPage(ulong address, ulong size)
         {
@@ -348,12 +422,14 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var version = _bufferCache.GpuModifiedVersion;
-            if (!_guestMemory.CanRead(page, CleanReadPageBytes) || _bufferCache.HasGpuDirtyBytes(page, CleanReadPageBytes))
+            var command = OnCommandThread;
+            if (!_guestMemory.CanRead(page, CleanReadPageBytes) || _bufferCache.HasGpuDirtyBytes(page, CleanReadPageBytes) ||
+                (command && IsPendingOnCommandThread(page, CleanReadPageBytes)))
             {
                 return;
             }
 
-            var pages = _cleanReadPages ??= new CleanReadPages();
+            var pages = command ? _commandReads ??= new CleanReadPages() : _renderReads ??= new CleanReadPages();
             if (pages.Tags[slot] != page + 1)
             {
                 pages.Tags[slot] = page + 1;
@@ -1229,11 +1305,6 @@ internal static unsafe partial class VulkanVideoPresenter
             var key = description.Program.Id;
             if (_pendingComputePipelines.TryGetValue(key, out var pending))
             {
-                if (!pending.Compile.IsCompleted)
-                {
-                    return false;
-                }
-
                 var compiled = pending.Compile.GetAwaiter().GetResult();
                 ComputeCompileProfile.Record(ComputeCompileProfile.Part.ConsumeDelay, pending.CompletedTimestamp);
                 ReportPipelineCreation(

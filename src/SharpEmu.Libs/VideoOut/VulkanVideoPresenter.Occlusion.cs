@@ -75,7 +75,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
-            DrainDraws();
             EndRendering();
             var queries = OcclusionQueries();
             if (queries.HasGpuResults) _ = BeginBatchedGuestCommands();
@@ -114,7 +113,6 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             try
             {
-                DrainDraws();
                 EndRendering();
                 var queries = OcclusionQueries();
                 _ = CurrentRecording();

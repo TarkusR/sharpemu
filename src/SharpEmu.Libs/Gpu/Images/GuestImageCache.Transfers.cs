@@ -660,8 +660,15 @@ public sealed unsafe partial class GuestImageCache
     }
 
     // Copies image data into the buffer without transferring GPU ownership to the buffer.
+    public bool MayHaveImageBytes(ulong address, ulong size) => _pageOwners.MayHaveOwners(address, size);
+
     public bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size)
     {
+        if (!_pageOwners.MayHaveOwners(address, size))
+        {
+            return false;
+        }
+
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDownload);
         using var held = _lock.Hold();
         var matches = new List<ResourceSlotIdentifier>();
@@ -891,7 +898,6 @@ public sealed unsafe partial class GuestImageCache
         _scheduler.QueuePriorityCompletionAction(() =>
         {
             download.Invalidate(offset, range.Size);
-            GpuWritebackEpoch.Advance();
             var published = download.Mapped.Slice((int)offset, (int)range.Size);
             // A range that lost resident pages since it was queued cannot be compared page by page; its resident pages
             // take the readback whole, as before the landing.
@@ -1000,12 +1006,18 @@ public sealed unsafe partial class GuestImageCache
         var range = new ImageSubresourceRange(aspect, 0, Vk.RemainingMipLevels, 0, image.Backing.Layers);
         if (aspect == ImageAspectFlags.ColorBit)
         {
-            _device.Vk.CmdClearColorImage(native, image.Backing.Handle, ImageLayout.TransferDstOptimal, &colorClear, 1, &range);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _device.Vk.CmdClearColorImage(native, image.Backing.Handle, ImageLayout.TransferDstOptimal, &colorClear, 1, &range);
+            }
         }
         else
         {
             var clear = new ClearDepthStencilValue(depthClear, stencilClear);
-            _device.Vk.CmdClearDepthStencilImage(native, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _device.Vk.CmdClearDepthStencilImage(native, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            }
         }
 
         TakeGpuOwnership(image);

@@ -1,13 +1,15 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
 public sealed partial class GuestImageCache
 {
-    private const int LookupSlots = 256;
+    private const int LookupSlots = 4096;
 
     private static readonly bool LookupMemoEnabled = Environment.GetEnvironmentVariable("SHARPEMU_IMAGE_LOOKUP_MEMO") != "0";
 
@@ -17,8 +19,18 @@ public sealed partial class GuestImageCache
         public ImageViewDescription View;
         public ResourceSlotIdentifier Result;
         public ulong Generation;
+        public ulong Begin;
+        public ulong End;
         public bool ExactFormat;
     }
+
+    private const int LookupEventSlots = 64;
+
+    private readonly record struct LookupEvent(ulong Generation, ulong Begin, ulong End);
+
+    private readonly LookupEvent[] _lookupEvents = new LookupEvent[LookupEventSlots];
+    private int _lookupEventCursor;
+    private static long _totalLookupRevalidations;
 
     private LookupMemo[]? _lookups;
     private ulong _lookupGeneration = 1;
@@ -26,13 +38,27 @@ public sealed partial class GuestImageCache
     private long _lookupMisses;
     private static long _totalLookupHits;
     private static long _totalLookupMisses;
+    private static long _totalGenerationBumps;
+    private static long _totalBindingHits;
+    private static long _totalBindingMisses;
+
+    public static void CountBindingMemo(bool hit) => Interlocked.Increment(ref hit ? ref _totalBindingHits : ref _totalBindingMisses);
 
     public (long Hits, long Misses) LookupMemoCounters => (_lookupHits, _lookupMisses);
 
-    public static string TakeLookupReport() => FormattableString.Invariant(
-        $"[PERF][IMAGE_LOOKUP] memo_hits={Interlocked.Exchange(ref _totalLookupHits, 0)} memo_misses={Interlocked.Exchange(ref _totalLookupMisses, 0)}");
+    public static string TakeLookupReport() =>
+        FormattableString.Invariant($"[PERF][IMAGE_LOOKUP] memo_hits={Interlocked.Exchange(ref _totalLookupHits, 0)} memo_misses={Interlocked.Exchange(ref _totalLookupMisses, 0)} ") +
+        FormattableString.Invariant($"generation_bumps={Interlocked.Exchange(ref _totalGenerationBumps, 0)} revalidated={Interlocked.Exchange(ref _totalLookupRevalidations, 0)} ") +
+        FormattableString.Invariant($"binding_hits={Interlocked.Exchange(ref _totalBindingHits, 0)} binding_misses={Interlocked.Exchange(ref _totalBindingMisses, 0)}");
 
-    private void InvalidateLookups() => _lookupGeneration++;
+    private void InvalidateLookups() => InvalidateLookups(0, ulong.MaxValue);
+
+    private void InvalidateLookups(ulong begin, ulong end)
+    {
+        _lookupGeneration++;
+        _lookupEvents[_lookupEventCursor++ & (LookupEventSlots - 1)] = new LookupEvent(_lookupGeneration, begin, end);
+        Interlocked.Increment(ref _totalGenerationBumps);
+    }
 
     // Changes whenever an image a lookup could find is created, removed or replaced, so a caller
     // that remembers a lookup's result can tell when it may have changed.
@@ -40,16 +66,92 @@ public sealed partial class GuestImageCache
 
     // What a remembered lookup still does on reuse: the image counts as used now. False when the
     // image is gone.
-    public bool TryTouchRemembered(ResourceSlotIdentifier imageIdentifier)
+    public bool TryReuseAcquired(ResourceSlotIdentifier imageIdentifier, ulong backing)
     {
         using var held = _lock.Hold();
-        if (_slots.TryGet(imageIdentifier) is not { Registered: true } image)
+        if (_slots.TryGet(imageIdentifier) is not { Registered: true, Parked: false } image || image.DepthOwner.IsValid ||
+            image.Binding.NeedsRebind || image.IsCpuDirty || image.IsBufferModified || image.Backing.Handle.Handle != backing)
         {
             return false;
         }
 
         image.LastAccessTick = _scheduler.CurrentTick;
         TouchImage(image);
+        if (!ImageDescription.IsEmptyRange(image.Description.Data))
+        {
+            MergeMipTailBlock(image);
+        }
+
+        return true;
+    }
+
+    public bool TryTouchRemembered(ResourceSlotIdentifier imageIdentifier)
+    {
+        using var held = _lock.Hold();
+        if (_slots.TryGet(imageIdentifier) is not { Registered: true, Parked: false } image)
+        {
+            return false;
+        }
+
+        image.LastAccessTick = _scheduler.CurrentTick;
+        TouchImage(image);
+        return true;
+    }
+
+    public bool TryTouchRemembered(ResourceSlotIdentifier imageIdentifier, ref ulong generation, ulong begin, ulong end)
+    {
+        using var held = _lock.Hold();
+        if (!LookupUnchangedSince(generation, begin, end) || _slots.TryGet(imageIdentifier) is not { Registered: true, Parked: false } image)
+        {
+            return false;
+        }
+
+        generation = _lookupGeneration;
+        image.LastAccessTick = _scheduler.CurrentTick;
+        TouchImage(image);
+        return true;
+    }
+
+    public GuestSpan RememberedRange(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    {
+        using var held = _lock.Hold();
+        return UnionRange(request.Description.Data, _slots.TryGet(imageIdentifier)?.Description.Data ?? request.Description.Data);
+    }
+
+    private static GuestSpan UnionRange(GuestSpan left, GuestSpan right)
+    {
+        var begin = Math.Min(left.Address, right.Address);
+        var end = Math.Max(left.End, right.End);
+        return new GuestSpan(begin, end - begin);
+    }
+
+    private bool LookupUnchangedSince(ulong generation, ulong begin, ulong end)
+    {
+        if (generation == _lookupGeneration)
+        {
+            return true;
+        }
+
+        if (_lookupGeneration - generation > LookupEventSlots)
+        {
+            return false;
+        }
+
+        for (var index = _lookupEventCursor - 1; index >= 0 && index > _lookupEventCursor - 1 - LookupEventSlots; index--)
+        {
+            ref readonly var lookupEvent = ref _lookupEvents[index & (LookupEventSlots - 1)];
+            if (lookupEvent.Generation <= generation)
+            {
+                break;
+            }
+
+            if (lookupEvent.Begin < end && begin < lookupEvent.End)
+            {
+                return false;
+            }
+        }
+
+        Interlocked.Increment(ref _totalLookupRevalidations);
         return true;
     }
 
@@ -117,14 +219,15 @@ public sealed partial class GuestImageCache
         }
 
         ref var memo = ref lookups[LookupSlot(request, exactFormat)];
-        if (memo.Generation != _lookupGeneration || memo.ExactFormat != exactFormat || !SameRequest(memo.Request, request) ||
-            _slots.TryGet(memo.Result) is not { Registered: true } image)
+        if (memo.ExactFormat != exactFormat || !SameRequest(memo.Request, request) || !LookupUnchangedSince(memo.Generation, memo.Begin, memo.End) ||
+            _slots.TryGet(memo.Result) is not { Registered: true, Parked: false } image)
         {
             _lookupMisses++;
             Interlocked.Increment(ref _totalLookupMisses);
             return false;
         }
 
+        memo.Generation = _lookupGeneration;
         _lookupHits++;
         Interlocked.Increment(ref _totalLookupHits);
         request.View = memo.View;
@@ -148,5 +251,8 @@ public sealed partial class GuestImageCache
         memo.Result = result;
         memo.ExactFormat = exactFormat;
         memo.Generation = _lookupGeneration;
+        var range = UnionRange(original.Description.Data, _slots[result].Description.Data);
+        memo.Begin = range.Address;
+        memo.End = range.End;
     }
 }

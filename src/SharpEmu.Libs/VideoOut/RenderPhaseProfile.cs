@@ -139,23 +139,16 @@ internal static class RenderPhaseProfile
         SubmissionCapacity,
         CompletedSubmissionCleanup,
         MovieFramePolling,
-        ProgramPrefetchWait,
-        ProgramPrefetchValidation,
-        ProgramPrefetchOrderWait,
-        ProgramPrefetchDrainWait,
-        ProgramPrefetchPauseWait,
-        ProgramSynchronousResolution,
-        GraphicsResolveLockWait,
-        ComputeResolveLockWait,
         ProgramSharedGateWait,
         PipelineSharedGateWait,
-        DeferredDrawTranslation,
-        DeferredDispatchTranslation,
         ComputePipelineWait,
         ProgramDecode,
         ProgramPlanning,
         ProgramLayoutRequest,
         ProgramTranslation,
+        VulkanCommands,
+        DispatchConsume,
+        DispatchPipeline,
         Count,
     }
 
@@ -548,11 +541,16 @@ internal static class RenderPhaseProfile
         SharpEmu.Libs.Diagnostics.SubmitSiteTally.Report();
         ReportImageUploads();
         BufferUploadProfile.Report();
+        Console.Error.WriteLine(BufferUploadProfile.TakeTotalsReport());
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeOutcomeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeAsyncReadbackReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Vulkan.GpuSyncProfile.TakeReport());
-        Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.ProgramPrefetchTally.TakeReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Rendering.PendingGpuWrites.TakeReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.CommandThreadTally.TakeReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeKeptProgramsReport());
+        Console.Error.WriteLine(VulkanVideoPresenter.TakeStagePreparationReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.ContentUploadArena.TakeReport());
         ReportResolveWorker(seconds, frames);
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeLookupReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeDccReport());

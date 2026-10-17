@@ -31,7 +31,7 @@ public sealed partial class GuestImageCache
         }
 
         image.Registered = true;
-        InvalidateLookups();
+        InvalidateLookups(image.Description.Data.Address, image.Description.Data.End);
         image.RecencyEntryIndex = _recencyQueue.Insert(imageIdentifier, _collectionTick);
         _totalUsedMemory += image.AccountedSize;
     }
@@ -68,7 +68,6 @@ public sealed partial class GuestImageCache
 
         _totalUsedMemory -= accounted;
         image.Registered = false;
-        InvalidateLookups();
     }
 
     // Removes the image and its stencil associations; the slot is freed after the current tick.
@@ -162,7 +161,6 @@ public sealed partial class GuestImageCache
         image.Parked = true;
         image.ParkedTick = _collectionTick;
         _parked.Add(imageIdentifier);
-        InvalidateLookups();
     }
 
     private bool TryUnparkImage(in ImageDescription requested, out ResourceSlotIdentifier result)
@@ -193,7 +191,7 @@ public sealed partial class GuestImageCache
             image.Parked = false;
             image.LastAccessTick = _scheduler.CurrentTick;
             TouchImage(image);
-            InvalidateLookups();
+            InvalidateLookups(image.Description.Data.Address, image.Description.Data.End);
             result = imageIdentifier;
             return true;
         }
@@ -804,7 +802,7 @@ public sealed partial class GuestImageCache
     public bool HasGpuModifiedImageBytes(ulong address, ulong size)
     {
         GpuMemoryAccessProfile.CountImageQuery(gpuDirtyOnly: true);
-        if (!IsValidRange(address, size)) return false;
+        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size) || !MayOwnPages(address, size)) return false;
 
         using var held = _lock.Hold();
         if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive)) return false;

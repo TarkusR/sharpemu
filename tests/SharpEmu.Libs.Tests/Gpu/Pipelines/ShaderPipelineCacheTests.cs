@@ -109,6 +109,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             Assert.Equal(1u, outputs[1].Index);
             Assert.Equal(1u, outputs[1].ExportTarget);
             banks.Context.BlendControls[0].Enable = false;
+            banks.MarkWritten(RegisterStamps.ContextBits);
             Assert.True(Prepare().Available);
             Assert.Single(guest.Compiler.Requests.Last(request => request.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel).PixelOutputs);
         }
@@ -141,6 +142,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(Gen5PixelExportFormat.Unorm16, LastOutput().ExportFormat);
         var compiled = guest.Compiler.Requests.Count;
         banks.Context.ShaderInterface.TargetOutputModes[0] = (byte)Gen5PixelExportFormat.Float16;
+        banks.MarkWritten(RegisterStamps.ContextBits);
         Assert.True(Prepare().Available);
         Assert.True(guest.Compiler.Requests.Count > compiled);
         Assert.Equal(Gen5PixelExportFormat.Float16, LastOutput().ExportFormat);

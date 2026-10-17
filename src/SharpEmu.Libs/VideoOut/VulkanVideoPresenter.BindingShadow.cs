@@ -94,7 +94,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 bound = pipeline;
             }
 
-            _vk.CmdBindPipeline(command, bindPoint, pipeline);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdBindPipeline(command, bindPoint, pipeline);
+            }
         }
 
         private void PushConstantsShadowed(CommandBuffer command, PipelineLayout layout, ShaderStageFlags stages, uint* data)
@@ -115,7 +118,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 values.CopyTo(shadowData);
             }
 
-            _vk.CmdPushConstants(command, layout, stages, 0, PushData.ByteSize, data);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdPushConstants(command, layout, stages, 0, PushData.ByteSize, data);
+            }
         }
 
         private bool DescriptorsAlreadyBound(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout, ReadOnlySpan<WriteDescriptorSet> writes)

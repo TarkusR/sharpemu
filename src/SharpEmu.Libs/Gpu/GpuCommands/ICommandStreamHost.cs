@@ -28,7 +28,8 @@ public readonly record struct DrawIndexedArguments(
     ulong IndirectArgumentsAddress = 0,
     // The guest set no index buffer size: IndexCount is only the range seen so far and
     // must not clamp the count read from the arguments.
-    bool UnboundedIndexBuffer = false);
+    bool UnboundedIndexBuffer = false,
+    int StartInstanceUserData = -1);
 
 // Arguments of a non-indexed draw as the packet stream describes them.
 public readonly record struct DrawAutoArguments(
@@ -38,7 +39,8 @@ public readonly record struct DrawAutoArguments(
     uint InstanceCount,
     uint FirstVertex,
     uint FirstInstance,
-    DrawOffsetSource OffsetSource);
+    DrawOffsetSource OffsetSource,
+    int StartInstanceUserData = -1);
 
 public enum EndOfPipeWriteKind
 {

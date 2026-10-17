@@ -448,32 +448,6 @@ internal sealed class RecordingRenderHost : IRenderHost
     public Exception Fatal(string message) => new RenderExecutorFatalException(message);
 }
 
-// Check register-derived inputs while preserving the draw mode supplied by the packet.
-internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetch
-{
-    public List<string> Mismatches { get; } = new();
-
-    public int Checks { get; private set; }
-
-    public bool TryTakeGraphics(RegisterBanks banks, in GraphicsProgramInputs inputs, out GraphicsPrograms programs)
-    {
-        Checks++;
-        var expected = RenderExecutor.ProgramInputsOf(banks, host.FormatSupport, host.Fatal, inputs.Indexed);
-        if (!expected.Equals(inputs))
-        {
-            Mismatches.Add(
-                $"draw pixelActive={inputs.PixelActive}/{expected.PixelActive} depthBound={inputs.DepthBound}/{expected.DepthBound} " +
-                $"mapping=[{Describe(inputs.Mapping)}]/[{Describe(expected.Mapping)}]");
-        }
-
-        programs = null!;
-        return false;
-    }
-
-    private static string Describe(ReadOnlySpan<ColorComponentMap> mapping) =>
-        string.Join(",", mapping.ToArray().Select(map => map.Packed));
-}
-
 // Hands back the configured programs and records every pipeline request.
 internal sealed class FakePipelineProvider : IShaderPipelineProvider
 {

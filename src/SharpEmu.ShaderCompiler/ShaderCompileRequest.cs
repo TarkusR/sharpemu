@@ -238,6 +238,8 @@ public sealed class ShaderCompileRequest
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];
     public uint PositionExportControl { get; init; }
     public bool SupportsClipDistance { get; init; } = true;
+    public bool SupportsDrawParameters { get; init; }
+    public int StartInstanceUserData { get; init; } = -1;
     public ShaderClipSpaceTransform ClipSpace { get; init; }
     public MeshShaderConfiguration? Mesh { get; init; }
 

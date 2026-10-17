@@ -29,14 +29,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
     private readonly object _gate = new();
-    // The pipeline maps: a lookup takes this lock or _gate, an addition both; a cached draw so does
-    // not wait for the program preparation a resolving thread holds _gate for.
+    // The pipeline maps take this lock, so a draw never waits for the program preparation the
+    // command thread holds _gate for.
     private readonly object _pipelineGate = new();
     private readonly bool _strictShaders = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0";
     private readonly bool _skipRayTracing = Environment.GetEnvironmentVariable("SHARPEMU_SKIP_RT") == "1";
     private readonly HashSet<(ShaderStage Stage, ulong Hash, uint CodeSize)> _reportedShaderSkips = [];
     private readonly HashSet<(uint Stages, uint PrimitiveType, uint MaxOutput, uint MaxVerticesOut)> _reportedMeshSkips = [];
-    private readonly uint[] _vertexTableScratch = new uint[VertexTableWords.MaxWords];
+    [ThreadStatic]
+    private static uint[]? _vertexTableScratch;
 
     public ShaderPipelineCache(CpuContext context, IShaderPipelineHost host, IGuestGpuBackend compiler, ShaderHeaderRegistry registry)
     {
@@ -125,17 +126,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return words.Length == 0 || _context.Memory.TryRead(shader.InputSemanticsAddress, MemoryMarshal.AsBytes(words.AsSpan())) ? words : null;
     }
 
-    // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
-    // the program, decode and materialization caches it updates are used under this lock only.
-    // A pipeline lookup takes _pipelineGate instead, so it does not wait for a resolution.
-    private readonly object _resolveGate = new();
+    public GraphicsPrograms GetGraphicsPrograms(
+        RegisterBanks banks,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound) =>
+        GetGraphicsProgramsCore(banks, targetExportMapping, pixelActive, depthBound, -1);
 
     public GraphicsPrograms GetGraphicsPrograms(
         RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
-        bool depthBound)
-        => GetGraphicsProgramsCore(banks, targetExportMapping, pixelActive, depthBound, null);
+        bool depthBound,
+        int startInstanceUserData) =>
+        GetGraphicsProgramsCore(banks, targetExportMapping, pixelActive, depthBound, startInstanceUserData);
 
     public GraphicsPrograms GetMeshGraphicsPrograms(
         RegisterBanks banks,
@@ -173,34 +177,113 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
             return new GraphicsPrograms { Available = false };
         }
-        return GetGraphicsProgramsCore(banks, targetExportMapping, pixelActive, depthBound, mesh);
+
+        return ResolveGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound, -1,
+            banks.Stamp(RegisterStamp.ShaderPrograms), banks.Stamp(RegisterStamp.VertexUserData), banks.Stamp(RegisterStamp.PixelUserData),
+            banks.Stamp(RegisterStamp.Context), null, mesh);
     }
 
-    private readonly KeptUserData _vertexUserData = new();
-    private readonly KeptUserData _pixelUserData = new();
-    private readonly KeptVertexInput _vertexInput = new();
-    private readonly KeptPixelInput _pixelInput = new();
+    [ThreadStatic]
+    private static KeptUserData? _vertexUserData;
+    [ThreadStatic]
+    private static KeptUserData? _pixelUserData;
+    [ThreadStatic]
+    private static KeptVertexInput? _vertexInput;
+    [ThreadStatic]
+    private static KeptPixelInput? _pixelInput;
+    [ThreadStatic]
+    private static KeptGraphicsPrograms? _keptGraphics;
+    [ThreadStatic]
+    private static KeptComputeProgram? _keptCompute;
+
+    private static long _graphicsKept;
+    private static long _graphicsResolved;
+    private static long _computeKept;
+    private static long _computeResolved;
+
+    public static string TakeKeptProgramsReport() =>
+        FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={Interlocked.Exchange(ref _graphicsKept, 0)} graphics_resolved={Interlocked.Exchange(ref _graphicsResolved, 0)} ") +
+        FormattableString.Invariant($"compute_kept={Interlocked.Exchange(ref _computeKept, 0)} compute_resolved={Interlocked.Exchange(ref _computeResolved, 0)}");
+
+
+    private bool TryKeepGraphicsPrograms(KeptGraphicsPrograms kept, ulong programsStamp, ulong vertexUserDataStamp, ulong pixelUserDataStamp, ulong contextStamp,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound, int startInstanceUserData, out GraphicsPrograms programs)
+    {
+        programs = null!;
+        if (kept.Programs is not { } previous || kept.ProgramsStamp != programsStamp || kept.VertexUserDataStamp != vertexUserDataStamp ||
+            kept.PixelUserDataStamp != pixelUserDataStamp || kept.ContextStamp != contextStamp || kept.PixelActive != pixelActive ||
+            kept.DepthBound != depthBound || kept.StartInstanceUserData != startInstanceUserData ||
+            kept.Registrations != ShaderHeaderRegistry.Registrations || kept.ExportMappingCount != targetExportMapping.Length ||
+            !targetExportMapping.SequenceEqual(kept.ExportMapping.AsSpan(0, kept.ExportMappingCount)))
+        {
+            return false;
+        }
+
+        var keptInput = _vertexInput;
+        if (keptInput?.Header?.VertexTables is { } tables && _vertexUserData?.Words is { } words && !SameVertexTables(keptInput, tables, words))
+        {
+            return false;
+        }
+
+        if (!_programs.Revalidate(previous.VertexInput.Stage) || (pixelActive && !_programs.Revalidate(previous.PixelInput.Stage)))
+        {
+            return false;
+        }
+
+        programs = previous;
+        return true;
+    }
+
+    private static void KeepGraphicsPrograms(KeptGraphicsPrograms kept, GraphicsPrograms programs, ulong programsStamp, ulong vertexUserDataStamp,
+        ulong pixelUserDataStamp, ulong contextStamp, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound, int startInstanceUserData,
+        long registrations)
+    {
+        kept.Programs = programs.Available ? programs : null;
+        kept.StartInstanceUserData = startInstanceUserData;
+        kept.ProgramsStamp = programsStamp;
+        kept.VertexUserDataStamp = vertexUserDataStamp;
+        kept.PixelUserDataStamp = pixelUserDataStamp;
+        kept.ContextStamp = contextStamp;
+        kept.PixelActive = pixelActive;
+        kept.DepthBound = depthBound;
+        kept.Registrations = registrations;
+        kept.ExportMappingCount = targetExportMapping.Length;
+        targetExportMapping.CopyTo(kept.ExportMapping);
+    }
 
     private GraphicsPrograms GetGraphicsProgramsCore(
         RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
-        MeshDrawConfiguration? mesh)
+        int startInstanceUserData)
     {
-        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        lock (_resolveGate)
+        var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
+        var vertexUserDataStamp = banks.Stamp(RegisterStamp.VertexUserData);
+        var pixelUserDataStamp = banks.Stamp(RegisterStamp.PixelUserData);
+        var contextStamp = banks.Stamp(RegisterStamp.Context);
+        var keptGraphics = _keptGraphics ??= new KeptGraphicsPrograms();
+        if (TryKeepGraphicsPrograms(keptGraphics, programsStamp, vertexUserDataStamp, pixelUserDataStamp, contextStamp, targetExportMapping, pixelActive, depthBound, startInstanceUserData, out var keptPrograms))
         {
-            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return ResolveGraphicsProgramsCore(banks, targetExportMapping, pixelActive, depthBound, mesh);
+            Interlocked.Increment(ref _graphicsKept);
+            return keptPrograms;
         }
+
+        return ResolveGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound, startInstanceUserData,
+            programsStamp, vertexUserDataStamp, pixelUserDataStamp, contextStamp, keptGraphics, null);
     }
 
-    private GraphicsPrograms ResolveGraphicsProgramsCore(
+    private GraphicsPrograms ResolveGraphicsPrograms(
         RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
+        int startInstanceUserData,
+        ulong programsStamp,
+        ulong vertexUserDataStamp,
+        ulong pixelUserDataStamp,
+        ulong contextStamp,
+        KeptGraphicsPrograms? keptGraphics,
         MeshDrawConfiguration? mesh)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
@@ -208,13 +291,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var pixel = banks.Shader.Pixel;
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
-        var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
+        Interlocked.Increment(ref _graphicsResolved);
+        if (keptGraphics is not null)
+        {
+            keptGraphics.Programs = null;
+        }
+
         var vertexLabel = mesh is null ? "vertex" : "mesh";
-        var vertexUserData = KeptUserData(_vertexUserData, banks.Stamp(RegisterStamp.VertexUserData), programsStamp,
+        var vertexUserData = KeptUserData(_vertexUserData ??= new KeptUserData(), vertexUserDataStamp, programsStamp,
             vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount, vertex.ExportAddress, vertexLabel);
         var vertexSource = PrepareSource(vertex.ExportAddress, mesh is null ? ShaderStage.Vertex : ShaderStage.Mesh, vertexLabel, vertexUserData,
             VertexUserDataBase, out var vertexHeader, vertex.GeometryUserDataAddress);
-        var vertexInfo = mesh is null ? PrepareVertexInput(vertexSource, vertexHeader, shaderInterface, context, _vertexInput) : new VertexInputInfo();
+        var vertexInfo = mesh is null
+            ? PrepareVertexInput(vertexSource, vertexHeader, shaderInterface, context, _vertexInput ??= new KeptVertexInput(), startInstanceUserData)
+            : new VertexInputInfo();
         vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
@@ -223,14 +313,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var attributeCount = 0u;
         if (pixelActive)
         {
-            var pixelUserData = KeptUserData(_pixelUserData, banks.Stamp(RegisterStamp.PixelUserData), programsStamp,
+            var pixelUserData = KeptUserData(_pixelUserData ??= new KeptUserData(), pixelUserDataStamp, programsStamp,
                 pixel.UserScalars, pixel.Resource2.UserScalarCount, pixel.Address, "pixel");
             pixelSource = PrepareSource(pixel.Address, ShaderStage.Pixel, "pixel", pixelUserData, userDataBase: 0, out var pixelHeader);
             if (RenderTrace.Enabled)
                 RenderTrace.Write($"PixelDrawState shader=0x{pixelSource.Address:X16} hash=0x{pixelSource.Hash:X16} " +
                     $"user_data=[{string.Join(",", pixelSource.UserData.Select(word => $"{word:X8}"))}]");
             using var pixelProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PixelInputResolution);
-            pixelInfo = PreparePixelInput(banks, pixelSource, pixelHeader, targetExportMapping, depthBound, _pixelInput,
+            pixelInfo = PreparePixelInput(banks, pixelSource, pixelHeader, targetExportMapping, depthBound, _pixelInput ??= new KeptPixelInput(),
                 out pixelOutputs, out attributeCount, out dropUnwritten);
             pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
         }
@@ -299,7 +389,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
         }
 
-        return new GraphicsPrograms
+        var programs = new GraphicsPrograms
         {
             Vertex = vertexProgram,
             Pixel = pixelProgramHandle,
@@ -311,6 +401,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = mesh is null ? FindPositionStream(vertexInfo) : null,
         };
+        if (keptGraphics is not null)
+        {
+            KeepGraphicsPrograms(keptGraphics, programs, programsStamp, vertexUserDataStamp, pixelUserDataStamp, contextStamp, targetExportMapping, pixelActive,
+                depthBound, startInstanceUserData, ShaderHeaderRegistry.Registrations);
+        }
+
+        return programs;
     }
 
     private MeshDrawConfiguration? PrepareMeshInput(VertexStageRegisters vertex,
@@ -413,7 +510,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     private VertexInputInfo PrepareVertexInput(ShaderSource source, ShaderHeaderEntry header, ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context, KeptVertexInput kept)
+        ContextRegisters context, KeptVertexInput kept, int startInstanceUserData)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexInputResolution);
         var clipSpace = ResolveClipSpace(context);
@@ -422,10 +519,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (ReferenceEquals(kept.Header, header) && kept.Info is { } info && kept.PositionExportControl == control &&
             SameBits(kept.ClipSpace, clipSpace) && SameVertexTables(kept, tables, source.UserData))
         {
-            return info.WithoutStage();
+            var copy = info.WithoutStage();
+            copy.StartInstanceUserData = startInstanceUserData;
+            return copy;
         }
 
         var resolved = VertexInputResolver.ResolveVertexInputs(_context, header.Shader, tables, source.UserData, control, clipSpace, out var words);
+        resolved.StartInstanceUserData = startInstanceUserData;
         kept.Header = header;
         kept.Words = words;
         kept.PositionExportControl = control;
@@ -457,7 +557,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var attributeTable = VertexInputResolver.ReadTablePointer(userData, tables.VertexAttributeRegister);
         var bufferTable = VertexInputResolver.ReadTablePointer(userData, tables.VertexBufferRegister);
         return attributeTable != 0 && bufferTable != 0 &&
-            VertexInputResolver.SameTableWords(_context, words, attributeTable, bufferTable, _vertexTableScratch);
+            VertexInputResolver.SameTableWords(_context, words, attributeTable, bufferTable, _vertexTableScratch ??= new uint[VertexTableWords.MaxWords]);
     }
 
     private static bool SameBits(in ClipSpaceTransform left, in ClipSpaceTransform right) =>
@@ -754,23 +854,40 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return null;
     }
 
-    public ComputeProgram GetComputeProgram(
-        ComputeStageRegisters compute,
-        ShaderInterfaceRegisters shaderInterface,
-        uint dispatchInitiator,
-        uint dimensionX,
-        uint dimensionY,
-        uint dimensionZ)
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ)
     {
-        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
+        var userDataStamp = banks.Stamp(RegisterStamp.ComputeUserData);
+        var contextStamp = banks.Stamp(RegisterStamp.Context);
+        var kept = _keptCompute ??= new KeptComputeProgram();
+        if (kept.Program is { } previous && kept.ProgramsStamp == programsStamp && kept.UserDataStamp == userDataStamp && kept.ContextStamp == contextStamp &&
+            kept.DispatchInitiator == dispatchInitiator && kept.DimensionX == dimensionX && kept.DimensionY == dimensionY && kept.DimensionZ == dimensionZ &&
+            kept.Registrations == ShaderHeaderRegistry.Registrations && _programs.Revalidate(previous.Input.Stage))
         {
-            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+            Interlocked.Increment(ref _computeKept);
+            return previous;
         }
+
+        Interlocked.Increment(ref _computeResolved);
+        kept.Program = null;
+        var program = GetComputeProgram(banks.Shader.Compute, banks.Context.ShaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+        if (program.Available && !program.Consumed && program.KnownWrite is null)
+        {
+            kept.Program = program;
+            kept.ProgramsStamp = programsStamp;
+            kept.UserDataStamp = userDataStamp;
+            kept.ContextStamp = contextStamp;
+            kept.DispatchInitiator = dispatchInitiator;
+            kept.DimensionX = dimensionX;
+            kept.DimensionY = dimensionY;
+            kept.DimensionZ = dimensionZ;
+            kept.Registrations = ShaderHeaderRegistry.Registrations;
+        }
+
+        return program;
     }
 
-    private ComputeProgram GetComputeProgramCore(
+    public ComputeProgram GetComputeProgram(
         ComputeStageRegisters compute,
         ShaderInterfaceRegisters shaderInterface,
         uint dispatchInitiator,
@@ -922,7 +1039,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
         var key = KeyOf(description);
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
-        lock (_gate)
+        lock (_pipelineGate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
             if (_graphicsPipelines.TryGetValue(key, out var cached))
@@ -1174,7 +1291,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
-        lock (_gate)
+        lock (_pipelineGate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
             if (_computePipelines.TryGetValue(key, out var cached))
@@ -1219,7 +1336,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
-        lock (_gate)
+        lock (_pipelineGate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
             if (_computePipelines.TryGetValue(key, out var cached))
@@ -1253,6 +1370,34 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return _host.GetComputePipelineCompletion(program);
         }
     }
+}
+
+internal sealed class KeptGraphicsPrograms
+{
+    public GraphicsPrograms? Programs;
+    public ulong ProgramsStamp;
+    public ulong VertexUserDataStamp;
+    public ulong PixelUserDataStamp;
+    public ulong ContextStamp;
+    public long Registrations;
+    public bool PixelActive;
+    public bool DepthBound;
+    public int StartInstanceUserData;
+    public int ExportMappingCount;
+    public readonly ColorComponentMap[] ExportMapping = new ColorComponentMap[RenderingState.ColorAttachmentCapacity];
+}
+
+internal sealed class KeptComputeProgram
+{
+    public ComputeProgram? Program;
+    public ulong ProgramsStamp;
+    public ulong UserDataStamp;
+    public ulong ContextStamp;
+    public long Registrations;
+    public uint DispatchInitiator;
+    public uint DimensionX;
+    public uint DimensionY;
+    public uint DimensionZ;
 }
 
 internal sealed class KeptUserData

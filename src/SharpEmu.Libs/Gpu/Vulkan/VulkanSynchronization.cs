@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Vulkan;
@@ -56,6 +57,9 @@ internal static unsafe class VulkanSynchronization
             ImageMemoryBarrierCount = imageMemoryBarrierCount,
             PImageMemoryBarriers = imageMemoryBarriers,
         };
-        vk.CmdPipelineBarrier2(command, &dependencyInfo);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdPipelineBarrier2(command, &dependencyInfo);
+        }
     }
 }

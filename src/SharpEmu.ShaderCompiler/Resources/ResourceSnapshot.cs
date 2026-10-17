@@ -13,6 +13,7 @@ public sealed class ResourceSnapshot
     public uint[] FlattenedResourceTable { get; init; } = [];
     public uint[] UserData { get; init; } = [];
     public DeviceAddressRange[] DeviceAddressRanges { get; init; } = [];
+    public object? Origin { get; set; }
 }
 
 // One device-address handle's evaluated base and bounded extent for this draw.
