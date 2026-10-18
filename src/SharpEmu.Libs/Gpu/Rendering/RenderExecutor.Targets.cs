@@ -12,6 +12,7 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 public sealed partial class RenderExecutor
 {
     private const uint DrawLayerOffset = 0;
+    private static int _targetVersions;
 
     private bool TryResolveDrawTargets(RegisterBanks banks, in DrawCall draw, ref DrawState state, ResolvedDraw record)
     {
@@ -68,6 +69,12 @@ public sealed partial class RenderExecutor
         return true;
     }
 
+    internal bool DrawHasTargets(RegisterBanks banks)
+    {
+        var layout = ResolveTargetLayout(banks);
+        return layout.ColorCount != 0 || layout.Depth is not null;
+    }
+
     private DrawResolution ResolveTargetLayout(RegisterBanks banks)
     {
         var resolution = _drawResolution;
@@ -100,7 +107,7 @@ public sealed partial class RenderExecutor
         resolution.PixelActive = HasActivePixelShader(banks);
         resolution.TargetContextStamp = contextStamp;
         resolution.TargetProgramsStamp = programsStamp;
-        resolution.TargetVersion++;
+        resolution.TargetVersion = (uint)Interlocked.Increment(ref _targetVersions);
         return resolution;
     }
 
