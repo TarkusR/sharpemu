@@ -28,9 +28,6 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
-    private readonly object _gate = new();
-    // The pipeline maps take this lock, so a draw never waits for the program preparation the
-    // command thread holds _gate for.
     private readonly object _pipelineGate = new();
     private readonly bool _strictShaders = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0";
     private readonly bool _skipRayTracing = Environment.GetEnvironmentVariable("SHARPEMU_SKIP_RT") == "1";
@@ -184,7 +181,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             var key = (context.ShaderStages, userConfig.PrimitiveType,
                 shaderInterface.MaxOutputPerSubgroup, shaderInterface.GeometryMaxVerticesOut);
-            lock (_gate)
+            lock (_reportedMeshSkips)
             {
                 if (_reportedMeshSkips.Add(key))
                 {
@@ -352,42 +349,38 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram pixelProgramHandle = default;
         ShaderStageResources vertexStage;
         ShaderStageResources pixelStage = default;
-        profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
-        lock (_gate)
+        profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
+        var pushDataCursor = 0u;
+        if (pixelSource is not null)
         {
-            profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
-            var pushDataCursor = 0u;
-            if (pixelSource is not null)
-            {
-                if (!TryPrepareProgram(
-                    pixelSource,
-                    new StageCompileOptions
-                    {
-                        PixelInfo = pixelInfo,
-                        PixelOutputs = pixelOutputs,
-                        PixelInputEnable = shaderInterface.PixelInputEnable,
-                        PixelInputAddress = shaderInterface.PixelInputAddress,
-                    },
-                    ref pushDataCursor,
-                    out pixelProgramHandle,
-                    out pixelStage))
-                    return new GraphicsPrograms { Available = false };
-            }
-
             if (!TryPrepareProgram(
-                vertexSource,
-                mesh is null
-                    ? new StageCompileOptions { VertexInfo = vertexInfo, RequiredVertexOutputCount = (int)attributeCount }
-                    : new StageCompileOptions
-                    {
-                        MeshInfo = mesh, RequiredVertexOutputCount = (int)attributeCount,
-                        MeshOutputLocationMask = pixelSource is null ? 0u : pixelStage.Program?.InputLocationMask,
-                    },
+                pixelSource,
+                new StageCompileOptions
+                {
+                    PixelInfo = pixelInfo,
+                    PixelOutputs = pixelOutputs,
+                    PixelInputEnable = shaderInterface.PixelInputEnable,
+                    PixelInputAddress = shaderInterface.PixelInputAddress,
+                },
                 ref pushDataCursor,
-                out vertexProgram,
-                out vertexStage))
+                out pixelProgramHandle,
+                out pixelStage))
                 return new GraphicsPrograms { Available = false };
         }
+
+        if (!TryPrepareProgram(
+            vertexSource,
+            mesh is null
+                ? new StageCompileOptions { VertexInfo = vertexInfo, RequiredVertexOutputCount = (int)attributeCount }
+                : new StageCompileOptions
+                {
+                    MeshInfo = mesh, RequiredVertexOutputCount = (int)attributeCount,
+                    MeshOutputLocationMask = pixelSource is null ? 0u : pixelStage.Program?.InputLocationMask,
+                },
+            ref pushDataCursor,
+            out vertexProgram,
+            out vertexStage))
+            return new GraphicsPrograms { Available = false };
 
         vertexInfo.Stage = vertexStage;
         if (pixelInfo is not null)
@@ -924,10 +917,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var program = _programs.Decode(source);
         if (_skipRayTracing)
         {
-            profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
-            lock (_gate)
+            lock (_rayTracingComputePrograms)
             {
-                profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
                 if (!_rayTracingComputePrograms.TryGetValue(program, out var usesRayTracing))
                 {
                     usesRayTracing = program.Instructions.Any(instruction =>
@@ -953,22 +944,16 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return new ComputeProgram { Consumed = true };
         }
 
-        ShaderProgram handle;
-        ShaderStageResources stage;
-        profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
-        lock (_gate)
+        profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
+        var pushDataCursor = 0u;
+        if (!TryPrepareProgram(
+            source,
+            new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters },
+            ref pushDataCursor,
+            out var handle,
+            out var stage))
         {
-            profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
-            var pushDataCursor = 0u;
-            if (!TryPrepareProgram(
-                source,
-                new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters },
-                ref pushDataCursor,
-                out handle,
-                out stage))
-            {
-                return new ComputeProgram { Available = false };
-            }
+            return new ComputeProgram { Available = false };
         }
 
         input.Stage = stage;
@@ -981,7 +966,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (_programs.TryGetProgram(source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
             return true;
 
-        if (_reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize)))
+        bool reported;
+        lock (_reportedShaderSkips)
+        {
+            reported = _reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize));
+        }
+
+        if (reported)
         {
             var tag = source.Stage == ShaderStage.Compute ? "COMPUTE_SKIPPED" : "DRAW_SKIPPED";
             Console.Error.WriteLine($"[GPU][WARN][{tag}] {rejection} " +
@@ -1388,7 +1379,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     public Task? GetComputePipelineCompletion(ShaderProgram program)
     {
-        lock (_gate)
+        lock (_pipelineGate)
         {
             return _host.GetComputePipelineCompletion(program);
         }
