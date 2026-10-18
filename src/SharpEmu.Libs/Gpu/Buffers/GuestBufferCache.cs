@@ -803,6 +803,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
     }
 
+    public bool EverGpuWritten(ulong guestAddress, ulong size) => _tracker.MayHaveGpuWrittenPages(guestAddress, size);
+
     public long GpuModifiedVersion => Volatile.Read(ref _gpuModifiedVersion);
 
     public long RegistrationSerial => _registry.RegistrationSerial;

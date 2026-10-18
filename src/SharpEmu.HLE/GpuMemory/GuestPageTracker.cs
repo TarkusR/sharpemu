@@ -109,6 +109,29 @@ public sealed class GuestPageTracker
         return false;
     }
 
+    // Lock-free: whether the GPU ever wrote a page of the range, downloaded since or not.
+    public bool MayHaveGpuWrittenPages(ulong vaddr, ulong size)
+    {
+        ValidateRange(vaddr, size);
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is { } region && region.WasGpuWritten(offset, bytes))
+            {
+                return true;
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return false;
+    }
+
     public bool IsGpuOwned(ulong vaddr, ulong size)
     {
         ValidateRange(vaddr, size);

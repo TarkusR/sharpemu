@@ -12,6 +12,7 @@ public sealed class TrackedRegion
     private readonly PageGuard _pages;
     private PageMask _cpuDirty;
     private PageMask _gpuDirty;
+    private PageMask _gpuEver;
     private PageMask _writable;
     private PageMask _readable;
     private PageMask _recentCpuUploads;
@@ -49,6 +50,12 @@ public sealed class TrackedRegion
     {
         var (start, end) = GetPageRange(BaseAddress + offset, size);
         return GetDirtyMask(side).AnyInRange(start, end);
+    }
+
+    public bool WasGpuWritten(ulong offset, ulong size)
+    {
+        var (start, end) = GetPageRange(BaseAddress + offset, size);
+        return _gpuEver.AnyInRange(start, end);
     }
 
     public bool IsCpuDirtyThroughout(ulong offset, ulong size)
@@ -146,6 +153,7 @@ public sealed class TrackedRegion
         if (enable && side == WriteOrigin.Gpu)
         {
             bits.SetRangeAndClear(start, end, ref _recentCpuUploads, ref _repeatedCpuWrites, ref _hotCpuWrites);
+            _gpuEver.SetRange(start, end);
         }
         else if (enable)
         {
