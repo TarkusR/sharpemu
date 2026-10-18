@@ -17,11 +17,10 @@ internal static partial class VulkanVideoPresenter
     // queued; a callback that returns a result waits for the render thread to run everything before it.
     private sealed class CommandThread : AgcExports.IDeferredWorkSink
     {
-        // The thread runs this far ahead of the render thread at most: enough to keep it busy, and
-        // no more, since a GPU round trip (a readback, a label wait) waits for everything queued.
-        // Measured in Astro Bot: 4096 items halved the frame rate of a crowd scene, 16 starved the
-        // render thread, 32 to 64 kept it busy.
-        private const int MaxOutstanding = 128;
+        // The thread runs this far ahead of the render thread at most. Operand reads only drain the
+        // queue when a queued write targets them, so the depth mostly costs memory; too shallow and the
+        // two threads take turns waiting on each other (128 did, with draws resolving on the pool).
+        private const int MaxOutstanding = 512;
         private const int ShadowSweepCount = 64;
 
         private enum Kind : byte

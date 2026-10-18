@@ -568,7 +568,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (OnCommandThread)
             {
-                return ReadOnRenderThread(address, destination, operand: true);
+                return ReadOnCommandThread(address, destination);
             }
             return TryReadGuest(address, destination);
         }
@@ -793,12 +793,21 @@ internal static unsafe partial class VulkanVideoPresenter
             EndOfPipe.ReadGdsWords(_bufferCache.GdsBuffer.Mapped, destination, wordOffset, wordCount);
         }
 
+        private static ulong EndOfPipeWriteBytes(EndOfPipeWriteKind kind) => kind switch
+        {
+            EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.WriteBack32 or EndOfPipeWriteKind.Interrupt32 or
+                EndOfPipeWriteKind.InterruptWriteBack32 or EndOfPipeWriteKind.FlipWithWrite32 or EndOfPipeWriteKind.FlipWithInterruptWriteBack32 => sizeof(uint),
+            EndOfPipeWriteKind.Write64 or EndOfPipeWriteKind.WriteBack64 or EndOfPipeWriteKind.Interrupt64 or
+                EndOfPipeWriteKind.InterruptWriteBack64 or EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack => sizeof(ulong),
+            _ => 0,
+        };
+
         public void RecordEndOfPipe(in EndOfPipeWrite write)
         {
             if (OnCommandThread)
             {
                 var queued = write;
-                _commandThread!.Post(() => RecordEndOfPipe(in queued));
+                _commandThread!.PostRange(() => RecordEndOfPipe(in queued), write.Destination, EndOfPipeWriteBytes(write.Kind));
                 return;
             }
             using var completionScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandEndOfPipe);

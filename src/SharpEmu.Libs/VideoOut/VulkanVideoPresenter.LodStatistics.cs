@@ -57,7 +57,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (OnCommandThread)
             {
-                _commandThread!.Post(() => RecordLodStatistics(destination, size));
+                _commandThread!.PostRange(() => RecordLodStatistics(destination, size), destination, size);
                 return true;
             }
 
