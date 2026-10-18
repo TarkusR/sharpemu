@@ -207,6 +207,164 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private bool OnCommandThread => _commandThread is { IsProducerThread: true };
 
+        private static readonly int ResolveWorkerCount =
+            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_WORKERS"), out var resolveWorkers) && resolveWorkers >= 0
+                ? resolveWorkers
+                : Math.Clamp(Environment.ProcessorCount / 4, 1, 6);
+
+        private sealed class ResolveWorkerState
+        {
+            public Presenter? Owner;
+            public long Sequence;
+            public ResolveReadLog Reads = null!;
+            public CleanReadPages? CleanReads;
+        }
+
+        [ThreadStatic]
+        private static ResolveWorkerState? _resolveWorker;
+
+        private bool OnResolveWorker => _resolveWorker is { Sequence: not 0 } worker && ReferenceEquals(worker.Owner, this);
+
+        int ICommandStreamHost.ResolveWorkerCount => ResolveWorkerCount;
+
+        void ICommandStreamHost.BeginWorkerResolve(long sequence, ResolveReadLog reads)
+        {
+            var worker = _resolveWorker ??= new ResolveWorkerState();
+            if (!ReferenceEquals(worker.Owner, this))
+            {
+                worker.Owner = this;
+                worker.CleanReads = null;
+            }
+
+            worker.Sequence = sequence;
+            worker.Reads = reads;
+            reads.Version = _bufferCache.GpuModifiedVersion;
+            reads.Publications = _guestPublications.Ordinal;
+        }
+
+        void ICommandStreamHost.EndWorkerResolve()
+        {
+            var worker = _resolveWorker!;
+            worker.Sequence = 0;
+            worker.Reads = null!;
+        }
+
+        bool ICommandStreamHost.ValidateWorkerReads(ResolveReadLog reads)
+        {
+            var published = reads.Publications != _guestPublications.Ordinal;
+            if (!published && reads.Version == _bufferCache.GpuModifiedVersion)
+            {
+                return true;
+            }
+
+            Span<byte> current = stackalloc byte[256];
+            for (var index = 0; index < reads.Count; index++)
+            {
+                var bytes = reads.Bytes(index, out var address);
+                var size = (ulong)bytes.Length;
+                if (published && HasPendingMemoryPublication(address, size))
+                {
+                    return false;
+                }
+
+                if (!published && !_bufferCache.EverGpuWritten(address, size))
+                {
+                    continue;
+                }
+
+                if (_bufferCache.HasGpuDirtyBytes(address, size))
+                {
+                    return false;
+                }
+
+                var now = bytes.Length <= current.Length ? current[..bytes.Length] : new byte[bytes.Length];
+                if (!_guestMemory.TryRead(address, now) || !now.SequenceEqual(bytes))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // A read for a draw resolving ahead of the stream: a range earlier GPU work may still write
+        // sends the draw to the stream thread; everything else reads with the stores before it applied.
+        private bool ReadOnResolveWorker(ulong address, Span<byte> destination)
+        {
+            var size = (ulong)destination.Length;
+            if (!_guestMemory.CanRead(address, size))
+            {
+                return false;
+            }
+
+            if (HasPendingMemoryPublication(address, size))
+            {
+                throw new SerialResolveRequiredException("pending publication read");
+            }
+
+            var worker = _resolveWorker!;
+            if (IsCleanReadPage(address, size) && TryReadAliasBytes(address, destination))
+            {
+                worker.Reads.Add(address, destination);
+                return true;
+            }
+
+            if (TryReadShadowForWorker(address, destination))
+            {
+                return true;
+            }
+
+            if (IsGpuOwnedForWorkerRead(address, size))
+            {
+                throw new SerialResolveRequiredException("gpu owned read");
+            }
+
+            if (IsPendingForWorker(address, size))
+            {
+                throw new SerialResolveRequiredException("pending write read");
+            }
+
+            if (!_commandThread!.ReadOverlayBefore(address, destination, worker.Sequence))
+            {
+                return false;
+            }
+
+            worker.Reads.Add(address, destination);
+            NoteCleanReadPage(address, size);
+            return true;
+        }
+
+        // A known GPU write before the draw serves the read as it does on the stream thread; a write
+        // marked between the two makes the known bytes stale, so the draw resolves in order instead.
+        private bool TryReadShadowForWorker(ulong address, Span<byte> destination)
+        {
+            var sequence = _resolveWorker!.Sequence;
+            if (!_commandThread!.TryReadShadowBefore(address, destination, sequence, out var shadowSequence))
+            {
+                return false;
+            }
+
+            if (_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, (ulong)destination.Length, shadowSequence, sequence))
+            {
+                throw new SerialResolveRequiredException("shadowed pending write read");
+            }
+
+            AgcExports.NoteWorkerShadowRead();
+            return true;
+        }
+
+        private bool IsGpuOwnedForWorkerRead(ulong address, ulong size) => _bufferCache.HasGpuDirtyBytes(address, size);
+
+        private bool IsGpuOwnedForWorkerCleanRead(ulong address, ulong size) =>
+            (_bufferCache.MayHaveGpuDirtyPages(address, size) && _bufferCache.HasGpuDirtyPages(address, size)) || _bufferCache.HasGpuDirtyBytes(address, size);
+
+        private bool IsPendingForWorker(ulong address, ulong size)
+        {
+            var sequence = _resolveWorker!.Sequence;
+            return (_translation.PendingWrites is { } pending && pending.TryGetPending(address, size, out var writer) && writer < sequence) ||
+                _commandThread!.HasShadowBefore(address, size, sequence);
+        }
+
         // Items run in batches; completions are collected between them so blocked waits retry.
         private const int CommandItemBatch = 256;
 
@@ -280,6 +438,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
             public bool TryRead(ulong virtualAddress, Span<byte> destination)
             {
+                if (presenter.OnResolveWorker)
+                    return presenter.ReadOnResolveWorker(virtualAddress, destination);
                 if (presenter.HasPendingMemoryPublication(virtualAddress, (ulong)destination.Length))
                     presenter.CompleteOverlappingPublications(virtualAddress, (ulong)destination.Length);
                 return presenter.OnCommandThread
@@ -401,6 +561,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool TryReadGuestOperand(ulong address, Span<byte> destination)
         {
+            if (OnResolveWorker)
+            {
+                return ReadOnResolveWorker(address, destination);
+            }
+
             if (OnCommandThread)
             {
                 return ReadOnRenderThread(address, destination, operand: true);
@@ -410,6 +575,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool TryReadGuest(ulong address, Span<byte> destination)
         {
+            if (OnResolveWorker)
+            {
+                return ReadOnResolveWorker(address, destination);
+            }
+
             if (OnCommandThread)
             {
                 return ReadOnCommandThread(address, destination);

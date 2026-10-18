@@ -96,6 +96,22 @@ public interface ICommandStreamHost
     // that runs work behind the stream need not complete it first.
     bool TryReadGuestWaitOperand(ulong address, Span<byte> destination) => TryReadGuestOperand(address, destination);
 
+    // Draws resolve ahead of the stream on this many worker threads; zero resolves them on the stream thread.
+    int ResolveWorkerCount => 0;
+
+    // Reads on this thread now serve a draw at this stream position: a range earlier work may still
+    // write refuses with SerialResolveRequiredException, every other read lands in the log.
+    void BeginWorkerResolve(long sequence, ResolveReadLog reads)
+    {
+    }
+
+    void EndWorkerResolve()
+    {
+    }
+
+    // At the stream position of the draw: whether the bytes a worker read are what it would read now.
+    bool ValidateWorkerReads(ResolveReadLog reads) => true;
+
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();
 

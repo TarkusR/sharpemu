@@ -549,6 +549,7 @@ internal static class RenderPhaseProfile
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Vulkan.GpuSyncProfile.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Rendering.PendingGpuWrites.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.CommandThreadTally.TakeReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Agc.AgcExports.TakeResolvePoolReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeKeptProgramsReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeFastPathReport());
         Console.Error.WriteLine(VulkanVideoPresenter.TakeStagePreparationReport());

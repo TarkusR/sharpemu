@@ -37,6 +37,8 @@ internal sealed class PendingGuestPublications
     private readonly Dictionary<int, long> _queueNewest = new();
     private long _nextOrdinal;
 
+    internal long Ordinal => Interlocked.Read(ref _nextOrdinal);
+
     private void Track(Entry entry)
     {
         entry.Ordinal = ++_nextOrdinal;

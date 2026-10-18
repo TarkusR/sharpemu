@@ -56,8 +56,8 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
-        private readonly Dictionary<ulong, int> _shaderModuleSpirvBytes = new();
-        private readonly Dictionary<ulong, byte[]> _rectangleStageCode = new();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, int> _shaderModuleSpirvBytes = new();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte[]> _rectangleStageCode = new();
         private readonly Dictionary<ulong, string> _shaderModuleCacheIdentities = new();
         private long _pipelineCreationMilliseconds;
         private KhrPushDescriptor _pushDescriptorApi = null!;
@@ -135,6 +135,11 @@ internal static unsafe partial class VulkanVideoPresenter
         // A range the GPU wrote is downloaded first, so the word is what the guest CPU would read.
         public bool TryReadGuestWord(ulong address, out uint word)
         {
+            if (OnResolveWorker)
+            {
+                return ReadWordOnResolveWorker(address, out word);
+            }
+
             if (OnCommandThread)
             {
                 return ReadWordOnCommandThread(address, out word);
@@ -206,6 +211,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private void CompletePendingPublicationsForResourceRead(ulong address, ulong size)
         {
             if (!HasPendingMemoryPublication(address, size)) return;
+            if (OnResolveWorker)
+                throw new Gpu.GpuCommands.SerialResolveRequiredException("pending publication read");
             CompleteOverlappingPublications(address, size);
         }
 
@@ -218,6 +225,24 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!_guestMemory.CanRead(address, sizeof(uint)))
             {
                 return false;
+            }
+
+            if (OnResolveWorker)
+            {
+                if (IsGpuOwnedForWorkerCleanRead(address, sizeof(uint)) || IsPendingForWorker(address, sizeof(uint)))
+                {
+                    return false;
+                }
+
+                Span<byte> cleanBytes = stackalloc byte[sizeof(uint)];
+                if (!_commandThread!.ReadOverlayBefore(address, cleanBytes, _resolveWorker!.Sequence))
+                {
+                    return false;
+                }
+
+                _resolveWorker.Reads.Add(address, cleanBytes);
+                word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(cleanBytes);
+                return true;
             }
 
             if (IsGpuOwnedForCleanRead(address, sizeof(uint)) || (OnCommandThread && IsPendingOnCommandThread(address, sizeof(uint))))
@@ -251,6 +276,70 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool IsGpuOwnedForResidentRead(ulong address, ulong size, bool clean) =>
             _bufferCache.HasGpuDirtyBytes(address, size) ||
             (clean && (_bufferCache.HasGpuDirtyPages(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size)));
+
+        private bool ReadWordOnResolveWorker(ulong address, out uint word)
+        {
+            Span<byte> bytes = stackalloc byte[sizeof(uint)];
+            if (!ReadOnResolveWorker(address, bytes))
+            {
+                word = 0;
+                return false;
+            }
+
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
+
+        private bool ReadResidentBytesOnResolveWorker(ulong address, Span<byte> destination, bool clean)
+        {
+            var size = (ulong)destination.Length;
+            CompletePendingPublicationsForResourceRead(address, size);
+            if (!_guestMemory.CanRead(address, size))
+            {
+                return false;
+            }
+
+            if (!clean && _commandThread!.TryReadShadowBefore(address, destination, _resolveWorker!.Sequence, out var shadowSequence))
+            {
+                if (_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, shadowSequence, _resolveWorker.Sequence))
+                {
+                    return false;
+                }
+
+                SharpEmu.Libs.Agc.AgcExports.NoteWorkerShadowRead();
+                return true;
+            }
+
+            if ((clean ? IsGpuOwnedForWorkerCleanRead(address, size) : IsGpuOwnedForWorkerRead(address, size)) || IsPendingForWorker(address, size))
+            {
+                return false;
+            }
+
+            var worker = _resolveWorker!;
+            if (!clean && IsCleanReadPage(address, size) && TryReadAliasBytes(address, destination))
+            {
+                worker.Reads.Add(address, destination);
+                return true;
+            }
+
+            if (!clean && TryReadShadowForWorker(address, destination))
+            {
+                return true;
+            }
+
+            if (!_commandThread!.ReadOverlayBefore(address, destination, worker.Sequence))
+            {
+                return false;
+            }
+
+            worker.Reads.Add(address, destination);
+            if (!clean)
+            {
+                NoteCleanReadPage(address, size);
+            }
+
+            return true;
+        }
 
         private bool ReadWordOnCommandThread(ulong address, out uint word)
         {
@@ -303,6 +392,11 @@ internal static unsafe partial class VulkanVideoPresenter
         // The same ownership rules as the two word readers, checked once for a whole range.
         public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
         {
+            if (OnResolveWorker)
+            {
+                return ReadResidentBytesOnResolveWorker(address, destination, clean);
+            }
+
             if (OnCommandThread)
             {
                 return ReadResidentBytesOnCommandThread(address, destination, clean);
@@ -335,7 +429,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private CleanReadPages? _renderReads;
         private CleanReadPages? _commandReads;
 
-        private CleanReadPages? Reads => OnCommandThread ? _commandReads : _renderReads;
+        private CleanReadPages? Reads => OnResolveWorker ? _resolveWorker!.CleanReads ??= new CleanReadPages() : OnCommandThread ? _commandReads : _renderReads;
 
         private sealed class CleanReadPages
         {
@@ -403,7 +497,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
-            if (!OnCommandThread)
+            if (!OnCommandThread && !OnResolveWorker)
             {
                 return true;
             }
@@ -423,13 +517,16 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var version = _bufferCache.GpuModifiedVersion;
             var command = OnCommandThread;
+            var worker = OnResolveWorker;
             if (!_guestMemory.CanRead(page, CleanReadPageBytes) || _bufferCache.HasGpuDirtyBytes(page, CleanReadPageBytes) ||
-                (command && IsPendingOnCommandThread(page, CleanReadPageBytes)))
+                (command && IsPendingOnCommandThread(page, CleanReadPageBytes)) || (worker && IsPendingForWorker(page, CleanReadPageBytes)))
             {
                 return;
             }
 
-            var pages = command ? _commandReads ??= new CleanReadPages() : _renderReads ??= new CleanReadPages();
+            var pages = worker
+                ? _resolveWorker!.CleanReads ??= new CleanReadPages()
+                : command ? _commandReads ??= new CleanReadPages() : _renderReads ??= new CleanReadPages();
             if (pages.Tags[slot] != page + 1)
             {
                 pages.Tags[slot] = page + 1;

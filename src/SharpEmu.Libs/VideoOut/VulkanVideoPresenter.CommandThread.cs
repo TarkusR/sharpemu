@@ -87,7 +87,7 @@ internal static partial class VulkanVideoPresenter
         private volatile int _pendingRangeCount;
 
         private readonly List<Shadow> _shadows = new();
-        private readonly Stack<Shadow> _spareShadows = new();
+        private volatile Shadow[] _shadowSnapshot = [];
         private long _shadowGeneration;
 
         private static readonly long RetryTicks = CommandStreamQueue.AllBlockedRetryMilliseconds * Stopwatch.Frequency / 1000L;
@@ -125,8 +125,12 @@ internal static partial class VulkanVideoPresenter
 
         // The producer side, on the command stream thread.
 
-        public void EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw) =>
-            Enqueue(new Item { Kind = Kind.Deferred, Work = work, IsDraw = isDraw });
+        public long EnqueueDeferred(AgcExports.DeferredWork work, bool isDraw)
+        {
+            var item = new Item { Kind = Kind.Deferred, Work = work, IsDraw = isDraw };
+            Enqueue(item);
+            return item.Sequence;
+        }
 
         public void Post(Action action) => Enqueue(new Item { Kind = Kind.Call, Action = action });
 
@@ -199,17 +203,17 @@ internal static partial class VulkanVideoPresenter
 
         public void NoteKnownWrite(KnownGpuWrite known, long sequence)
         {
-            if (_shadows.Count >= ShadowSweepCount)
+            lock (_writeLock)
             {
-                SweepShadows();
+                if (_shadows.Count >= ShadowSweepCount)
+                {
+                    SweepShadows();
+                }
+
+                _shadows.Add(new Shadow { Address = known.Address, Length = known.ByteCount, Sequence = sequence, Known = known });
+                _shadowSnapshot = _shadows.ToArray();
             }
 
-            var shadow = _spareShadows.TryPop(out var spare) ? spare : new Shadow();
-            shadow.Address = known.Address;
-            shadow.Length = known.ByteCount;
-            shadow.Sequence = sequence;
-            shadow.Known = known;
-            _shadows.Add(shadow);
             Interlocked.Increment(ref _shadowGeneration);
         }
 
@@ -222,8 +226,6 @@ internal static partial class VulkanVideoPresenter
                 var shadow = _shadows[index];
                 if (shadow.Sequence <= executed)
                 {
-                    shadow.Known = null!;
-                    _spareShadows.Push(shadow);
                     continue;
                 }
 
@@ -231,15 +233,19 @@ internal static partial class VulkanVideoPresenter
             }
 
             _shadows.RemoveRange(kept, _shadows.Count - kept);
+            _shadowSnapshot = _shadows.ToArray();
         }
 
-        public bool HasShadow(ulong address, ulong size)
+        public bool HasShadow(ulong address, ulong size) => HasShadowBefore(address, size, long.MaxValue);
+
+        // A known write of a dispatch between the executed position and this stream position.
+        public bool HasShadowBefore(ulong address, ulong size, long sequence)
         {
             var executed = Volatile.Read(ref _executed);
             var end = address + size;
-            foreach (var shadow in _shadows)
+            foreach (var shadow in _shadowSnapshot)
             {
-                if (shadow.Sequence > executed && address < shadow.Address + (ulong)shadow.Length && shadow.Address < end)
+                if (shadow.Sequence > executed && shadow.Sequence < sequence && address < shadow.Address + (ulong)shadow.Length && shadow.Address < end)
                 {
                     return true;
                 }
@@ -248,10 +254,15 @@ internal static partial class VulkanVideoPresenter
             return false;
         }
 
-        public bool TryReadShadow(ulong address, Span<byte> destination, out long sequence)
+        public bool TryReadShadow(ulong address, Span<byte> destination, out long sequence) =>
+            TryReadShadowBefore(address, destination, long.MaxValue, out sequence);
+
+        // The newest known write before the stream position that covers the range, with the stores
+        // between the two applied.
+        public bool TryReadShadowBefore(ulong address, Span<byte> destination, long beforeSequence, out long sequence)
         {
             sequence = 0;
-            if (_shadows.Count == 0)
+            if (!HasShadowBefore(address, (ulong)destination.Length, beforeSequence))
             {
                 return false;
             }
@@ -264,7 +275,7 @@ internal static partial class VulkanVideoPresenter
                 {
                     var shadow = _shadows[index];
                     var shadowEnd = shadow.Address + (ulong)shadow.Length;
-                    if (shadow.Sequence <= executed || address >= shadowEnd || end <= shadow.Address)
+                    if (shadow.Sequence <= executed || shadow.Sequence >= beforeSequence || address >= shadowEnd || end <= shadow.Address)
                     {
                         continue;
                     }
@@ -275,7 +286,7 @@ internal static partial class VulkanVideoPresenter
                     }
 
                     sequence = shadow.Sequence;
-                    ApplyPendingStoresLocked(address, destination, shadow.Sequence);
+                    ApplyPendingStoresLocked(address, destination, shadow.Sequence, beforeSequence);
                     return true;
                 }
             }
@@ -304,13 +315,48 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
-        private void ApplyPendingStoresLocked(ulong address, Span<byte> destination, long afterSequence)
+        // Guest memory as a draw at this stream position sees it: the queued stores before it applied,
+        // none of the later ones. A queued fill or copy before it into the range cannot be read ahead.
+        public bool ReadOverlayBefore(ulong address, Span<byte> destination, long sequence)
+        {
+            if (_pendingRangeCount == 0 && _pendingWriteCount == 0)
+            {
+                return _memory.TryRead(address, destination);
+            }
+
+            var size = (ulong)destination.Length;
+            lock (_writeLock)
+            {
+                foreach (var pending in _pendingRanges)
+                {
+                    if (pending.Sequence != 0 && pending.Sequence < sequence && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                    {
+                        throw new SerialResolveRequiredException("pending range read");
+                    }
+                }
+
+                if (!_memory.TryRead(address, destination))
+                {
+                    return false;
+                }
+
+                if (_pendingWriteCount != 0)
+                {
+                    ApplyPendingStoresLocked(address, destination, 0, sequence);
+                }
+
+                return true;
+            }
+        }
+
+        private void ApplyPendingStoresLocked(ulong address, Span<byte> destination, long afterSequence, long beforeSequence = long.MaxValue)
         {
             var end = address + (ulong)destination.Length;
             foreach (var write in _pendingWrites)
             {
                 var writeEnd = write.Address + (ulong)write.Data!.Length;
-                if (write.Sequence <= afterSequence || write.Address >= end || writeEnd <= address)
+                if (write.Sequence <= afterSequence || write.Address >= end || writeEnd <= address ||
+                    (beforeSequence != long.MaxValue && (write.Sequence == 0 || write.Sequence >= beforeSequence)))
                 {
                     continue;
                 }

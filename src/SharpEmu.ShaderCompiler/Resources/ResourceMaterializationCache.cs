@@ -1075,7 +1075,10 @@ public sealed partial class ResourceMaterializationCache
     private static int OutcomeSide()
     {
         if (_outcomeSide == 0)
-            _outcomeSide = Thread.CurrentThread.Name == "SharpEmu command stream" ? 2 : 1;
+        {
+            var name = Thread.CurrentThread.Name;
+            _outcomeSide = name == "SharpEmu command stream" || (name is not null && name.StartsWith("SharpEmu resolve worker", StringComparison.Ordinal)) ? 2 : 1;
+        }
         return _outcomeSide - 1;
     }
 

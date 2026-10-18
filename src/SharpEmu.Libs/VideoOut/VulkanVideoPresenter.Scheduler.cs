@@ -143,6 +143,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 _commandStream.StopAccepting();
                 // The command stream thread ends after its slice; the rest drains here.
                 _commandThread?.Stop(() => RunCommandStreamSlices(long.MaxValue));
+                if (_translation is not null)
+                {
+                    _translation.Sink = null;
+                }
                 var outcome = _commandStream.DrainForShutdown(cancelBlockedOnNoProgress: true);
                 FlushBatchedGuestCommands();
                 Console.Error.WriteLine(

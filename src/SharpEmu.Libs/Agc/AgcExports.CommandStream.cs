@@ -37,7 +37,7 @@ public static partial class AgcExports
 
         long NextSequence { get; }
 
-        void EnqueueDeferred(DeferredWork work, bool isDraw);
+        long EnqueueDeferred(DeferredWork work, bool isDraw);
 
         void WaitPending(long sequence);
 
@@ -162,7 +162,7 @@ public static partial class AgcExports
         new(memory, host);
 
     // Translates the draws, dispatches, resets and flips of one interpreter host thread.
-    internal sealed class CommandStreamTranslation
+    internal sealed partial class CommandStreamTranslation
     {
         private readonly ICommandStreamHost _host;
         private readonly CpuContext _context;
@@ -172,6 +172,7 @@ public static partial class AgcExports
         private readonly ShaderPipelineCache? _pipelines;
         private readonly RenderExecutor? _executor;
         private readonly RenderRecorder? _recorder;
+        private readonly RecordPool? _pool;
 
         internal CommandStreamTranslation(ICpuMemory memory, ICommandStreamHost host)
         {
@@ -182,6 +183,7 @@ public static partial class AgcExports
             {
                 _pipelines = new ShaderPipelineCache(_context, pipelineHost, GuestGpu.Current, CreateShaderHeaderRegistry(_context));
                 var pool = new RecordPool();
+                _pool = pool;
                 _executor = new RenderExecutor(renderHost, _pipelines, new ExecutorSink(this), pool: pool);
                 _recorder = new RenderRecorder(renderHost, _pipelines, RenderExecutor.DefaultStrictDrawResources, _executor.PendingWrites, pool);
             }
@@ -231,7 +233,20 @@ public static partial class AgcExports
 
         // With the command stream on its own thread, its resolved draws and dispatches reach the
         // render thread through the sink, which records them with RunDeferred in stream order.
-        internal IDeferredWorkSink? Sink { get; set; }
+        private IDeferredWorkSink? _sink;
+
+        internal IDeferredWorkSink? Sink
+        {
+            get => _sink;
+            set
+            {
+                _sink = value;
+                _resolvePool?.Dispose();
+                _resolvePool = value is not null && _executor is not null && _host is IRenderHost renderHost && _host.ResolveWorkerCount > 0
+                    ? new ResolvePool(this, renderHost, _host.ResolveWorkerCount)
+                    : null;
+            }
+        }
 
         private bool Producing => Sink is { IsProducerThread: true };
 
@@ -241,6 +256,7 @@ public static partial class AgcExports
 
             public void Record(ResolvedDraw record)
             {
+                owner.LearnDrawWrites(record);
                 if (owner.Producing)
                 {
                     owner.Sink!.EnqueueDeferred(new ResolvedDrawWork(record), isDraw: true);
@@ -280,6 +296,9 @@ public static partial class AgcExports
                 case ResolvedDispatchWork dispatch:
                     _recorder!.Record(dispatch.Record);
                     break;
+                case DeferredDraw deferred:
+                    JoinDeferredDraw(deferred);
+                    break;
                 default:
                     throw _host.Fatal($"The deferred work is unknown: {work.GetType().Name}.");
             }
@@ -296,6 +315,14 @@ public static partial class AgcExports
             RecordKnownColorTargets(state, banks);
             state.FrameDrawCount++;
             state.SawIndexedDraw |= indexed;
+            if (_resolvePool is { } pool && Producing && _executor.DrawHasTargets(banks) && DrawKnownNotToWrite(banks))
+            {
+                DeferDraw(pool, submitId, banks, indexed, in indexedArguments, in autoArguments);
+                state.CurrentIndexSnapshot = null;
+                state.CurrentVertexSnapshot = null;
+                return true;
+            }
+
             RunExecutorDraw(submitId, state, banks, indexed, in indexedArguments, in autoArguments);
             return true;
         }
@@ -304,6 +331,7 @@ public static partial class AgcExports
         {
             var executor = _executor!;
             var drawStarted = DcbParseProfile.Begin();
+            _learningKey = (banks.Shader.Vertex.ExportAddress, banks.Shader.Pixel.Address);
             try
             {
                 if (indexed)
@@ -317,6 +345,7 @@ public static partial class AgcExports
             }
             finally
             {
+                _learningKey = default;
                 DcbParseProfile.RecordDraw(drawStarted);
                 state.CurrentIndexSnapshot = null;
                 state.CurrentVertexSnapshot = null;
