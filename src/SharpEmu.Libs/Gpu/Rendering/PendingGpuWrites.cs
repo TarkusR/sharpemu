@@ -95,6 +95,35 @@ public sealed class PendingGpuWrites
             return false;
         }
 
+        public bool AnyBetween(ulong address, ulong size, long afterSequence, long beforeSequence)
+        {
+            var first = address >> Shift;
+            var last = (address + size - 1) >> Shift;
+            if (last < first)
+            {
+                last = ulong.MaxValue >> Shift;
+            }
+
+            for (var block = first; block <= last; block++)
+            {
+                if (!ByBlock.TryGetValue(block, out var entries))
+                {
+                    continue;
+                }
+
+                foreach (var entry in entries)
+                {
+                    if (entry.Sequence > afterSequence && entry.Sequence < beforeSequence &&
+                        entry.Address < address + size && address < entry.Address + entry.Size)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         public void Scan(ulong address, ulong size, long released, ref long sequence, ref PendingWriteKind kind)
         {
             var first = address >> Shift;
@@ -145,21 +174,21 @@ public sealed class PendingGpuWrites
             return;
         }
 
-        if (_entries.TryGetValue((address, size), out var remarked))
-        {
-            Volatile.Write(ref remarked.Sequence, sequence);
-            remarked.Kind = kind;
-            for (var block = remarked.FirstBlock; block <= remarked.LastBlock; block++)
-            {
-                remarked.Level.NoteNewest(Bucket(block), sequence);
-            }
-
-            Interlocked.Increment(ref _remarked);
-            return;
-        }
-
         lock (_gate)
         {
+            if (_entries.TryGetValue((address, size), out var remarked))
+            {
+                Volatile.Write(ref remarked.Sequence, sequence);
+                remarked.Kind = kind;
+                for (var block = remarked.FirstBlock; block <= remarked.LastBlock; block++)
+                {
+                    remarked.Level.NoteNewest(Bucket(block), sequence);
+                }
+
+                Interlocked.Increment(ref _remarked);
+                return;
+            }
+
             var fine = ((address + size - 1) >> FineShift) - (address >> FineShift) < MaxFineBlocks;
             var entry = new Entry(address, size, fine ? _fine : _coarse) { Sequence = sequence, Kind = kind };
             _entries.Add((address, size), entry);
@@ -270,6 +299,41 @@ public sealed class PendingGpuWrites
         var wideRead = ((address + size - 1) >> FineShift) - (address >> FineShift) >= MaxFineBlocksPerRead || address + size < address;
         return (wideRead ? Volatile.Read(ref _fineEntries) != 0 : _fine.MayHavePending(address, size, released)) ||
             _coarse.MayHavePending(address, size, released);
+    }
+
+    // A marked write with a sequence strictly between the two, released or not.
+    public bool HasPendingBetween(ulong address, ulong size, long afterSequence, long beforeSequence)
+    {
+        if (size == 0)
+        {
+            return false;
+        }
+
+        var everything = Volatile.Read(ref _everythingSince);
+        if (everything > afterSequence && everything < beforeSequence)
+        {
+            return true;
+        }
+
+        var wideRead = ((address + size - 1) >> FineShift) - (address >> FineShift) >= MaxFineBlocksPerRead || address + size < address;
+        lock (_gate)
+        {
+            if (wideRead)
+            {
+                foreach (var entry in _entries.Values)
+                {
+                    if (entry.Sequence > afterSequence && entry.Sequence < beforeSequence &&
+                        entry.Address < address + size && address < entry.Address + entry.Size)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            return _fine.AnyBetween(address, size, afterSequence, beforeSequence) || _coarse.AnyBetween(address, size, afterSequence, beforeSequence);
+        }
     }
 
     public bool TryGetPending(ulong address, ulong size, out long sequence)
