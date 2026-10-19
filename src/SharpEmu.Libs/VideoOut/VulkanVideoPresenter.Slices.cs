@@ -59,7 +59,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static long _workerAllocated;
 
     internal static string TakeSliceReport() =>
-        FormattableString.Invariant($"[PERF][SLICES] slices={Interlocked.Exchange(ref _slicesRecorded, 0)} segments={Interlocked.Exchange(ref _segmentsRecorded, 0)} empty={Interlocked.Exchange(ref _segmentsEmpty, 0)} uses_shared={Interlocked.Exchange(ref _usesShared, 0)} ") +
+        FormattableString.Invariant($"[PERF][SLICES] slices={Interlocked.Exchange(ref _slicesRecorded, 0)} segments={Interlocked.Exchange(ref _segmentsRecorded, 0)} empty={Interlocked.Exchange(ref _segmentsEmpty, 0)} uses_shared={Interlocked.Exchange(ref _usesShared, 0)} attachments_kept={RecordingHost.TakeAttachmentsKept()} ") +
         FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
         FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
         FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +
@@ -701,6 +701,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _hazards!.Reset();
             _workerBindings.Clear();
             _hasBoundDepth = false;
+            _attachments.Clear();
             _depthClearRecordedSeparately = false;
             _boundGraphicsPipeline = null;
             _sliceDrawCount = 0;
@@ -880,8 +881,44 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // Targets this segment already acquired: the join validates the first use for all of them.
+        private readonly List<(ResourceSlotIdentifier Image, ImageRequest Request, ImageView View, CachedImage Cached)> _attachments = new();
+        private static long _attachmentsKept;
+
+        internal static long TakeAttachmentsKept() => Interlocked.Exchange(ref _attachmentsKept, 0);
+
+        private bool TryKeptAttachment(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ImageView view, out CachedImage image)
+        {
+            foreach (var kept in _attachments)
+            {
+                if (kept.Image == imageIdentifier && SliceRequests.SameRequest(kept.Request, request))
+                {
+                    Interlocked.Increment(ref _attachmentsKept);
+                    view = kept.View;
+                    image = kept.Cached;
+                    return true;
+                }
+            }
+
+            view = default;
+            image = null!;
+            return false;
+        }
+
         private void AcquireColorAttachmentForSlice(ColorAttachment target)
         {
+            if (TryKeptAttachment(target.ImageIdentifier, target.Request, out var keptView, out var keptImage))
+            {
+                target.View = keptView;
+                target.Image = keptImage;
+                var keptRange = target.Request.View;
+                TransitionImage(keptImage, AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit,
+                    new SubresourceRange(keptRange.BaseLevel, keptRange.LevelCount, keptRange.BaseLayer, keptRange.LayerCount), BeginBatchedGuestCommands());
+                target.Clear = false;
+                target.ClearValue = default;
+                return;
+            }
+
             if (_imageCache.IsStaleForSlice(target.ImageIdentifier))
             {
                 throw Serial("stale color target");
@@ -908,25 +945,25 @@ internal static unsafe partial class VulkanVideoPresenter
             target.Clear = false;
             target.ClearValue = default;
             var description = target.Request.Description;
-            if (description.Metadata.Kind != MetadataKind.Dcc || description.Metadata.Range.Size != 0)
+            if (description.Metadata.Kind == MetadataKind.Dcc && description.Metadata.Range.Size == 0)
             {
-                return;
-            }
-
-            var metadataAddress = description.Metadata.Range.Address;
-            for (uint layer = 0; layer < range.LayerCount; layer++)
-            {
-                if (_imageCache.IsMetadataCleared(metadataAddress, range.BaseLayer + layer))
+                var metadataAddress = description.Metadata.Range.Address;
+                for (uint layer = 0; layer < range.LayerCount; layer++)
                 {
-                    throw Serial("pending dcc clear");
-                }
+                    if (_imageCache.IsMetadataCleared(metadataAddress, range.BaseLayer + layer))
+                    {
+                        throw Serial("pending dcc clear");
+                    }
 
-                if (description.DccSliceSize != 0 &&
-                    _imageCache.TryReadGuestDccClear(metadataAddress, description.DccSliceSize, range.BaseLayer + layer, out _, out _))
-                {
-                    throw Serial("guest dcc clear");
+                    if (description.DccSliceSize != 0 &&
+                        _imageCache.TryReadGuestDccClear(metadataAddress, description.DccSliceSize, range.BaseLayer + layer, out _, out _))
+                    {
+                        throw Serial("guest dcc clear");
+                    }
                 }
             }
+
+            _attachments.Add((target.ImageIdentifier, target.Request, view, image));
         }
 
         private DepthAttachmentAcquisition AcquireDepthAttachmentForSlice(in DepthAttachmentState depth)
@@ -943,6 +980,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("depth clear");
             }
 
+            if (TryKeptAttachment(depth.Image, resolution.Request, out var keptView, out var keptImage))
+            {
+                return new DepthAttachmentAcquisition(keptView, keptImage.Backing.Samples, false);
+            }
+
             if (!_imageCache.TryPrepareDepthTargetViewForSlice(depth.Image, resolution.Request, out var view))
             {
                 throw Serial("depth target acquire", resumable: true);
@@ -950,6 +992,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var image = Image(depth.Image);
             Requests.AddImage(new ImageSliceUse(depth.Image, image, resolution.Request));
+            _attachments.Add((depth.Image, resolution.Request, view, image));
             return new DepthAttachmentAcquisition(view, image.Backing.Samples, false);
         }
 
