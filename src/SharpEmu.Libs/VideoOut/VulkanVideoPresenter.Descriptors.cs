@@ -120,6 +120,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _stage = stage;
                 _program = program;
                 Memoized = false;
+                TexturesKept = false;
                 Memo = null;
                 Descriptors.GlobalDataShare = default;
                 Descriptors.FlattenedTable = default;
@@ -139,6 +140,8 @@ internal static unsafe partial class VulkanVideoPresenter
             public TextureResource[] Textures => Descriptors.Images;
 
             public bool Memoized { get; set; }
+
+            public bool TexturesKept { get; set; }
 
             public StagePreparationMemo? Memo { get; set; }
         }
@@ -1097,8 +1100,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.BindImages, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
-                BindImages(stage);
+            if (KeepsTextureSet(stage))
+            {
+                stage.TexturesKept = true;
+                Interlocked.Increment(ref _texturesKept);
+            }
+            else
+            {
+                using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.BindImages, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
+                    BindImages(stage);
+            }
+
             _preparedTextures.Add(stage.Textures);
         }
 
@@ -1580,7 +1592,15 @@ internal static unsafe partial class VulkanVideoPresenter
                         VulkanSynchronization.PipelineBarrier(_vk,command, GlobalDataShareBarrier.SourceStages, DescriptorWriter.PipelineStageFlag(stageFlag), 0, 0, null, 1, &barrier, 0, null);
                     }
 
-                    RecordStageTextureTransitions(stage.Textures);
+                    if (!stage.TexturesKept || !KeepsTextureSet(stage))
+                    {
+                        RecordStageTextureTransitions(stage.Textures);
+                    }
+
+                    if (TextureSetSlot(program) is var textureSlot and >= 0)
+                    {
+                        _committedTextureSets[textureSlot] = stage.Memoized && stage.Memo is { Valid: true } committedMemo ? committedMemo : null;
+                    }
                     foreach (var texture in stage.Textures)
                     {
                         if (texture.IsHostMovie && texture.NeedsUpload)

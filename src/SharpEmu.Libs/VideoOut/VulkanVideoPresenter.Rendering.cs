@@ -419,6 +419,27 @@ internal static unsafe partial class VulkanVideoPresenter
             _boundDepthLoadState = depth.LoadState;
         }
 
+        private readonly StagePreparationMemo?[] _keptTextureSets = new StagePreparationMemo?[2];
+        private readonly StagePreparationMemo?[] _committedTextureSets = new StagePreparationMemo?[2];
+        private DrawScopeToken _keptTextureScope;
+        private static long _texturesKept;
+
+        internal static long TakeTexturesKept() => Interlocked.Exchange(ref _texturesKept, 0);
+
+        private static int TextureSetSlot(ShaderProgramInfo program) => program.Stage switch
+        {
+            ShaderStageKind.Vertex => 0,
+            ShaderStageKind.Pixel => 1,
+            _ => -1,
+        };
+
+        private bool KeepsTextureSet(PreparedStageBindings stage)
+        {
+            var slot = TextureSetSlot(stage.Program);
+            return slot >= 0 && stage.Memoized && stage.Memo is { Valid: true } memo && ReferenceEquals(_keptTextureSets[slot], memo) &&
+                _keptTextureScope.IsActive && DrawScope == _keptTextureScope && _presenter._hostMovieFramePixels is null;
+        }
+
         public void TransitionDepthAttachment(in DepthAttachmentState depth, ImageAspectFlags writeAspects)
         {
             var command = BeginBatchedGuestCommands();
@@ -1042,6 +1063,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _renderingWritesMemory |= _nextDrawWritesMemory;
                 _nextDrawWritesMemory = false;
+                KeepCommittedTextureSets();
                 return;
             }
 
@@ -1131,6 +1153,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.CmdBeginRendering(command, &rendering);
             }
             _renderingScopesBegun++;
+            _keptTextureSets[0] = null;
+            _keptTextureSets[1] = null;
             if (GpuSyncProfile.Enabled)
             {
                 GpuSyncProfile.CountRenderingScope();
@@ -1138,6 +1162,16 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _renderingActive = true;
             _renderingState = state;
+            KeepCommittedTextureSets();
+        }
+
+        private void KeepCommittedTextureSets()
+        {
+            _keptTextureSets[0] = _committedTextureSets[0];
+            _keptTextureSets[1] = _committedTextureSets[1];
+            _committedTextureSets[0] = null;
+            _committedTextureSets[1] = null;
+            _keptTextureScope = DrawScope;
         }
 
         public void EndRendering()
