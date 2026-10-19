@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
@@ -49,7 +50,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly ConcurrentDictionary<string, long[]> _roundTrips = new();
     private static long _streamCopies;
     private static long _streamFallbacks;
-    private static readonly ConcurrentDictionary<string, long> _serialReasons = new();
+    private static readonly ConcurrentDictionary<string, StrongBox<long>> _serialReasons = new();
     private static int _gc0;
     private static int _gc1;
     private static int _gc2;
@@ -125,13 +126,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private static string TakeSerialReasons()
     {
-        var reasons = _serialReasons.ToArray();
-        foreach (var reason in reasons)
-        {
-            _serialReasons.TryRemove(reason.Key, out _);
-        }
-
-        return string.Join(",", reasons.OrderByDescending(reason => reason.Value).Select(reason => reason.Key.Replace(' ', '_') + ":" + reason.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        var reasons = _serialReasons.Select(reason => (reason.Key, Count: Interlocked.Exchange(ref reason.Value.Value, 0))).Where(reason => reason.Count != 0).ToArray();
+        return string.Join(",", reasons.OrderByDescending(reason => reason.Count).Select(reason => reason.Key.Replace(' ', '_') + ":" + reason.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)));
     }
 
     private sealed class SliceRequests
@@ -641,7 +637,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     catch (SerialRequiredException serial)
                     {
                         segment!.SerialReason = serial.Message;
-                        _serialReasons.AddOrUpdate(serial.Message, 1, static (_, count) => count + 1);
+                        Interlocked.Increment(ref _serialReasons.GetOrAdd(serial.Message, static _ => new StrongBox<long>()).Value);
                         EndSegment(slice, segment);
                         segment = null;
                         if (!serial.Resumable || index + 1 == slice.Items.Count)
