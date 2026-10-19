@@ -155,10 +155,12 @@ public sealed partial class GuestImageCache
             !image.DepthOwner.IsValid && image.Description.Samples <= 1;
         if (!park)
         {
+            Interlocked.Increment(ref _parkReleases);
             ReleaseImage(imageIdentifier);
             return;
         }
 
+        Interlocked.Increment(ref _parks);
         image.Parked = true;
         image.ParkedTick = _collectionTick;
         _parked.Add(imageIdentifier);
@@ -189,6 +191,7 @@ public sealed partial class GuestImageCache
             }
 
             _parked.RemoveAt(index);
+            Interlocked.Increment(ref _unparks);
             image.Parked = false;
             image.LastAccessTick = _scheduler.CurrentTick;
             TouchImage(image);
@@ -218,6 +221,7 @@ public sealed partial class GuestImageCache
             }
 
             _parked.RemoveAt(index);
+            Interlocked.Increment(ref _parkExpiries);
             image.Parked = false;
             ReleaseImage(imageIdentifier);
         }

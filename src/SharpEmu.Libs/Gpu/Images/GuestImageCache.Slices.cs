@@ -62,8 +62,14 @@ public sealed partial class GuestImageCache
         return false;
     }
 
+    private static long _parks;
+    private static long _parkReleases;
+    private static long _unparks;
+    private static long _parkExpiries;
+
     public static string TakeSliceLookupReport() =>
-        "lookup_fail=" + TakeCounts(SliceLookupFailures, SliceLookupFailureNames) + " lookup_fail_role=" + TakeCounts(SliceLookupRoleFailures, SliceLookupRoleNames);
+        "lookup_fail=" + TakeCounts(SliceLookupFailures, SliceLookupFailureNames) + " lookup_fail_role=" + TakeCounts(SliceLookupRoleFailures, SliceLookupRoleNames) +
+        FormattableString.Invariant($" parks={Interlocked.Exchange(ref _parks, 0)} park_releases={Interlocked.Exchange(ref _parkReleases, 0)} unparks={Interlocked.Exchange(ref _unparks, 0)} park_expiries={Interlocked.Exchange(ref _parkExpiries, 0)}");
 
     private static string TakeCounts(long[] counters, string[] names)
     {

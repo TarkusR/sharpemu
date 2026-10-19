@@ -44,6 +44,8 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly long[] _stolenByOrigin = new long[3];
     private static readonly long[] _waitByOrigin = new long[3];
     private static readonly long[] _stolenByAge = new long[3];
+    private static readonly long[] _tailByProducer = new long[5];
+    private static readonly ConcurrentDictionary<string, long[]> _roundTrips = new();
     private static long _streamCopies;
     private static long _streamFallbacks;
     private static readonly ConcurrentDictionary<string, long> _serialReasons = new();
@@ -65,7 +67,9 @@ internal static unsafe partial class VulkanVideoPresenter
         FormattableString.Invariant($"stolen_age=lt100us:{Interlocked.Exchange(ref _stolenByAge[0], 0)},lt1ms:{Interlocked.Exchange(ref _stolenByAge[1], 0)},ge1ms:{Interlocked.Exchange(ref _stolenByAge[2], 0)} ") +
         FormattableString.Invariant($"wait_origin_ms=ahead:{Ticks(ref _waitByOrigin[0]):F1},tail:{Ticks(ref _waitByOrigin[1]):F1},rest:{Ticks(ref _waitByOrigin[2]):F1} ") +
         FormattableString.Invariant($"stolen={Interlocked.Exchange(ref _slicesStolen, 0)} stolen_items={Interlocked.Exchange(ref _stolenItems, 0)} rest_chunks={Interlocked.Exchange(ref _restChunks, 0)} rest_items={Interlocked.Exchange(ref _restItems, 0)} ") +
-        "serial_reasons=" + TakeSerialReasons() + " " + GuestImageCache.TakeSliceLookupReport() + " " + TakeGcReport();
+        FormattableString.Invariant($"tail_producer=busy:{Interlocked.Exchange(ref _tailByProducer[0], 0)},idle:{Interlocked.Exchange(ref _tailByProducer[1], 0)},blocked:{Interlocked.Exchange(ref _tailByProducer[2], 0)},space:{Interlocked.Exchange(ref _tailByProducer[3], 0)},run:{Interlocked.Exchange(ref _tailByProducer[4], 0)} ") +
+        "round_trips=" + TakeRoundTrips() + " " + Presenter.TakeCommandReadReport() + " " + SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.TakeProgramReport() + " " + SubmissionScheduler.TakeDeferredReport() + " " +
+        "serial_reasons=" + TakeSerialReasons() + " " + GuestImageCache.TakeSliceLookupReport() + " " + TakeGcReport() + " " + Diagnostics.ItemCostTally.TakeReport() + " posts=" + TakePosts();
 
     private static double Ticks(ref long ticks) => Interlocked.Exchange(ref ticks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
@@ -86,6 +90,35 @@ internal static unsafe partial class VulkanVideoPresenter
         _allocated = allocated;
         _gcPaused = paused;
         return report;
+    }
+
+    private static string TakeRoundTrips()
+    {
+        var parts = new List<string>();
+        foreach (var (caller, totals) in _roundTrips)
+        {
+            var count = Interlocked.Exchange(ref totals[0], 0);
+            var ticks = Interlocked.Exchange(ref totals[1], 0);
+            if (count != 0)
+            {
+                parts.Add(caller + ":" + FormattableString.Invariant($"{count}/{ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms"));
+            }
+        }
+
+        return string.Join(",", parts);
+    }
+
+    private static readonly ConcurrentDictionary<string, long> _posts = new();
+
+    private static string TakePosts()
+    {
+        var posts = _posts.ToArray();
+        foreach (var post in posts)
+        {
+            _posts.TryRemove(post.Key, out _);
+        }
+
+        return string.Join(",", posts.OrderByDescending(post => post.Value).Select(post => post.Key + ":" + post.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
     }
 
     private static string TakeSerialReasons()
@@ -289,6 +322,17 @@ internal static unsafe partial class VulkanVideoPresenter
             Interlocked.Increment(ref _stolenByOrigin[slice.Origin]);
             var age = (System.Diagnostics.Stopwatch.GetTimestamp() - slice.DispatchedAt) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency;
             Interlocked.Increment(ref _stolenByAge[age < 100 ? 0 : age < 1000 ? 1 : 2]);
+        }
+
+        internal static void NoteTail(int producerState) => Interlocked.Increment(ref _tailByProducer[producerState]);
+
+        internal static void NotePost(string caller) => _posts.AddOrUpdate(caller, 1, static (_, count) => count + 1);
+
+        internal static void NoteRoundTrip(string caller, long ticks)
+        {
+            var totals = _roundTrips.GetOrAdd(caller, static _ => new long[2]);
+            Interlocked.Increment(ref totals[0]);
+            Interlocked.Add(ref totals[1], ticks);
         }
 
         internal static void NoteJoin(long started) => Interlocked.Add(ref _joinTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
@@ -529,6 +573,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 for (var index = 0; index < slice.Items.Count; index++)
                 {
+                    var started = System.Diagnostics.Stopwatch.GetTimestamp();
                     try
                     {
                         _itemSequence = slice.Items[index].Sequence;
@@ -548,6 +593,11 @@ internal static unsafe partial class VulkanVideoPresenter
                         }
 
                         segment = BeginSegment(index + 1);
+                    }
+                    finally
+                    {
+                        Diagnostics.ItemCostTally.Note(slice.Items[index].Work!.CostKind, Diagnostics.ItemCostTally.Record,
+                            System.Diagnostics.Stopwatch.GetTimestamp() - started);
                     }
                 }
 

@@ -11,6 +11,9 @@ internal static class PacketHandlerTally
 {
     public static readonly bool Enabled = VideoOut.RenderPhaseProfile.Enabled;
 
+    [ThreadStatic]
+    public static long WaitedTicks;
+
     private static readonly long[] _opcodeTicks = new long[256];
     private static readonly long[] _opcodeCounts = new long[256];
     private static readonly long[] _customTicks = new long[PacketCustomCode.Count];

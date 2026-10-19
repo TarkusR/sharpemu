@@ -373,6 +373,7 @@ public sealed partial class GpuCommandInterpreter
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
             uint consumed;
             var handlerStarted = SharpEmu.Libs.Diagnostics.PacketHandlerTally.Enabled ? Stopwatch.GetTimestamp() : 0;
+            var waitedBefore = SharpEmu.Libs.Diagnostics.PacketHandlerTally.WaitedTicks;
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketHandler))
             {
                 consumed = handler(this, in packet, payload) + 1;
@@ -380,7 +381,8 @@ public sealed partial class GpuCommandInterpreter
 
             if (handlerStarted != 0)
             {
-                SharpEmu.Libs.Diagnostics.PacketHandlerTally.Note(opcode, header, Stopwatch.GetTimestamp() - handlerStarted);
+                SharpEmu.Libs.Diagnostics.PacketHandlerTally.Note(opcode, header,
+                    Stopwatch.GetTimestamp() - handlerStarted - (SharpEmu.Libs.Diagnostics.PacketHandlerTally.WaitedTicks - waitedBefore));
             }
             if (consumed > remaining)
             {

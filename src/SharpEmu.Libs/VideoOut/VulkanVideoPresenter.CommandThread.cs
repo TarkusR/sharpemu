@@ -5,6 +5,7 @@ namespace SharpEmu.Libs.VideoOut;
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
@@ -199,21 +200,39 @@ internal static partial class VulkanVideoPresenter
             return item.Sequence;
         }
 
-        public void Post(Action action) => Enqueue(new Item { Kind = Kind.Call, Action = action });
-
-        public void Run(Action action)
+        public void Post(Action action, [CallerMemberName] string caller = "")
         {
+            Presenter.NotePost(caller);
+            Enqueue(new Item { Kind = Kind.Call, Action = action });
+        }
+
+        public void Run(Action action, [CallerMemberName] string caller = "")
+        {
+            var started = Stopwatch.GetTimestamp();
             var item = new Item { Kind = Kind.Call, Action = action, Sync = true };
             Enqueue(item);
+            var previous = _producerState;
+            _producerState = ProducerRunWait;
             WaitFor(item);
+            _producerState = previous;
+            var elapsed = Stopwatch.GetTimestamp() - started;
+            Diagnostics.PacketHandlerTally.WaitedTicks += elapsed;
+            Presenter.NoteRoundTrip(caller, elapsed);
         }
 
-        public T Run<T>(Func<T> function)
+        public T Run<T>(Func<T> function, [CallerMemberName] string caller = "")
         {
             T result = default!;
-            Run(() => { result = function(); });
+            Run(() => { result = function(); }, caller);
             return result;
         }
+
+        internal const int ProducerBusy = 0;
+        internal const int ProducerIdle = 1;
+        internal const int ProducerBlocked = 2;
+        internal const int ProducerSpaceWait = 3;
+        internal const int ProducerRunWait = 4;
+        private volatile int _producerState;
 
         public void PostWrite(ulong address, ReadOnlySpan<byte> data)
         {
@@ -503,6 +522,22 @@ internal static partial class VulkanVideoPresenter
 
         private void WaitForSpace()
         {
+            var previous = _producerState;
+            _producerState = ProducerSpaceWait;
+            var started = Stopwatch.GetTimestamp();
+            try
+            {
+                WaitForSpaceTimed();
+            }
+            finally
+            {
+                _producerState = previous;
+                Diagnostics.PacketHandlerTally.WaitedTicks += Stopwatch.GetTimestamp() - started;
+            }
+        }
+
+        private void WaitForSpaceTimed()
+        {
             var started = Diagnostics.CommandThreadTally.Enabled ? Stopwatch.GetTimestamp() : 0;
             try
             {
@@ -647,6 +682,7 @@ internal static partial class VulkanVideoPresenter
                     if (FlushCutting())
                     {
                         _units[^1].Slice!.Origin = 1;
+                        Presenter.NoteTail(_producerState);
                     }
 
                     continue;
@@ -660,8 +696,10 @@ internal static partial class VulkanVideoPresenter
                 else
                 {
                     var item = unit.Item!;
+                    var started = Stopwatch.GetTimestamp();
                     Execute(item);
                     CompleteItem(item);
+                    NoteItemCost(item, Diagnostics.ItemCostTally.Inline, started);
                     betweenItems();
                     ran++;
                 }
@@ -800,6 +838,7 @@ internal static partial class VulkanVideoPresenter
                             var item = slice.Items[position];
                             _presenter._translation.CompleteDeferred(item.Work!);
                             CompleteItem(item);
+                            Diagnostics.ItemCostTally.Note(item.Work!.CostKind, Diagnostics.ItemCostTally.Joined, 0);
                             ran++;
                         }
 
@@ -859,11 +898,15 @@ internal static partial class VulkanVideoPresenter
             return ran;
         }
 
+        private static void NoteItemCost(Item item, int stage, long started) =>
+            Diagnostics.ItemCostTally.Note(item.Work?.CostKind ?? Diagnostics.ItemCostTally.Other, stage, Stopwatch.GetTimestamp() - started);
+
         private void RunInline(Item item, Action betweenItems)
         {
             var started = Stopwatch.GetTimestamp();
             Execute(item);
             CompleteItem(item);
+            NoteItemCost(item, Diagnostics.ItemCostTally.Inline, started);
             betweenItems();
             Interlocked.Increment(ref _serialItems);
             Interlocked.Add(ref _inlineTicks, Stopwatch.GetTimestamp() - started);
@@ -1009,6 +1052,7 @@ internal static partial class VulkanVideoPresenter
                 {
                     var started = tally ? Stopwatch.GetTimestamp() : 0;
                     var allocated = tally ? GC.GetAllocatedBytesForCurrentThread() : 0;
+                    _producerState = ProducerBusy;
                     var result = _runSlice();
                     if (tally)
                     {
@@ -1022,6 +1066,7 @@ internal static partial class VulkanVideoPresenter
                     switch (result)
                     {
                         case SliceResult.NoWork:
+                            _producerState = ProducerIdle;
                             _ = _queue.WaitForWork(8);
                             if (tally)
                             {
@@ -1030,6 +1075,7 @@ internal static partial class VulkanVideoPresenter
 
                             break;
                         case SliceResult.AllBlocked:
+                            _producerState = ProducerBlocked;
                             WaitBlocked(ref lastProgress);
                             if (tally)
                             {
@@ -1040,6 +1086,7 @@ internal static partial class VulkanVideoPresenter
                         case SliceResult.BlockedWithoutProgress:
                             if (!_queue.HasUnblockedPending)
                             {
+                                _producerState = ProducerBlocked;
                                 WaitBlocked(ref lastProgress);
                                 if (tally)
                                 {

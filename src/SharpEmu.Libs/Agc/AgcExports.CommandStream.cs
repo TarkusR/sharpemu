@@ -27,6 +27,8 @@ public static partial class AgcExports
     internal abstract record DeferredWork
     {
         public virtual bool IsDispatch => false;
+
+        public virtual int CostKind => IsDispatch ? Diagnostics.ItemCostTally.Dispatch : Diagnostics.ItemCostTally.ResolvedDraw;
     }
 
     // Takes the deferred work of a command stream interpreted on its own thread.

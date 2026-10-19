@@ -30,6 +30,11 @@ public static partial class AgcExports
         public readonly ResolveReadLog Reads = new();
         public readonly ManualResetEventSlim Done = new(false);
 
+        public override int CostKind =>
+            (Indexed ? IndexedArguments.OffsetSource : AutoArguments.OffsetSource) == DrawOffsetSource.IndirectArguments
+                ? Diagnostics.ItemCostTally.IndirectDraw
+                : Diagnostics.ItemCostTally.DirectDraw;
+
         public void Reset()
         {
             Banks = null!;
@@ -352,6 +357,7 @@ public static partial class AgcExports
             private void Resolve(Worker worker, DeferredDraw work)
             {
                 var host = _owner._host;
+                var started = Stopwatch.GetTimestamp();
                 host.BeginWorkerResolve(work.Sequence, work.Reads);
                 try
                 {
@@ -379,6 +385,7 @@ public static partial class AgcExports
                 finally
                 {
                     host.EndWorkerResolve();
+                    Diagnostics.ItemCostTally.Note(work.CostKind, Diagnostics.ItemCostTally.Resolve, Stopwatch.GetTimestamp() - started);
                 }
             }
 

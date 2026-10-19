@@ -1818,6 +1818,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         if (copies.Count != 0)
         {
+            Interlocked.Increment(ref ReadbacksSynchronous);
             DownloadBufferMemory(copies);
             _tracker.ClearGpuDirtyPages(windowBegin, windowEnd - windowBegin);
         }
@@ -2218,6 +2219,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         Interlocked.Increment(ref _reportedKnownApplied);
     }
 
+    public static long ReadbacksStarted;
+    public static long ReadbacksNoWriter;
+    public static long ReadbacksTooLarge;
+    public static long ReadbacksBusy;
+    public static long ReadbacksSynchronous;
+
     private bool TryBeginDownloadAsync(List<DownloadPiece> copies, out VulkanAsyncReadback.Ticket ticket, out ulong[] writeTicks)
     {
         ticket = null!;
@@ -2235,6 +2242,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             var written = copies[index].Buffer.LastGpuWriteTickIn(copies[index].SourceOffset, copies[index].Size);
             if (written == 0)
             {
+                Interlocked.Increment(ref ReadbacksNoWriter);
                 return false;
             }
 
@@ -2245,6 +2253,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         if (total > AsyncReadbackLimit)
         {
+            Interlocked.Increment(ref ReadbacksTooLarge);
             return false;
         }
 
@@ -2265,8 +2274,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         if (!readback.TryBegin(pieces, waitTick, out var started) || started is null)
         {
+            Interlocked.Increment(ref ReadbacksBusy);
             return false;
         }
+
+        Interlocked.Increment(ref ReadbacksStarted);
 
         ticket = started;
         writeTicks = ticks;

@@ -172,7 +172,8 @@ internal static class BufferUploadProfile
         FormattableString.Invariant($"[PERF][BUFFER_SYNC_TOTAL] uploads={Interlocked.Exchange(ref _totalUploads, 0)} copies={Interlocked.Exchange(ref _totalCopies, 0)} bytes={Interlocked.Exchange(ref _totalBytes, 0)} range_bytes={Interlocked.Exchange(ref _totalRangeBytes, 0)} ") +
         TakeShapeReport() + " " +
         FormattableString.Invariant($"widened={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploads, 0)} widened_bytes={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploadBytes, 0)} ") +
-        FormattableString.Invariant($"hot_skipped={SharpEmu.HLE.GpuMemory.TrackedRegion.TakeHotUploadsSkipped()}");
+        FormattableString.Invariant($"hot_skipped={SharpEmu.HLE.GpuMemory.TrackedRegion.TakeHotUploadsSkipped()} ") +
+        FormattableString.Invariant($"readbacks=async:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksStarted, 0)},sync:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSynchronous, 0)},no_writer:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksNoWriter, 0)},too_large:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksTooLarge, 0)},busy:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksBusy, 0)}");
 
     internal readonly struct Scope : IDisposable
     {
