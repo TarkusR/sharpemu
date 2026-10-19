@@ -93,7 +93,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
         header = _registry.RequireEntry(codeAddress, label);
-        var hash = IdentityOf(header, codeAddress, label);
+        return SourceOf(header, IdentityOf(header, codeAddress, label), stage, userData, userDataBase, geometryPointer);
+    }
+
+    private static ShaderSource SourceOf(ShaderHeaderEntry header, ulong hash, ShaderStage stage, uint[] userData, uint userDataBase, ulong geometryPointer)
+    {
         if (stage == ShaderStage.Mesh && header.Shader.IsFused)
         {
             var withPointer = new uint[VertexUserDataBase + userData.Length];
@@ -104,6 +108,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         return new ShaderSource(header.Shader, hash, userData, userDataBase, stage);
+    }
+
+    // The header a pair found last stays its header while no shader was registered since.
+    private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, uint[] userData, uint userDataBase, ref ShaderHeaderEntry? cached,
+        out ShaderHeaderEntry header, ulong geometryPointer = 0)
+    {
+        if (cached is not { } known || known.Registrations != ShaderHeaderRegistry.Registrations)
+        {
+            var source = PrepareSource(codeAddress, stage, label, userData, userDataBase, out header, geometryPointer);
+            cached = header;
+            return source;
+        }
+
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
+        header = known;
+        return SourceOf(header, IdentityOf(header, codeAddress, label), stage, userData, userDataBase, geometryPointer);
     }
 
     private const int IdentityRecheckPeriod = 64;
@@ -206,13 +226,35 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     [ThreadStatic]
     private static KeptUserData? _vertexUserData;
     [ThreadStatic]
-    private static KeptUserData? _pixelUserData;
-    [ThreadStatic]
     private static KeptVertexInput? _vertexInput;
     [ThreadStatic]
-    private static KeptPixelInput? _pixelInput;
-    [ThreadStatic]
     private static KeptGraphicsPrograms? _keptGraphics;
+    [ThreadStatic]
+    private static Dictionary<(ulong Vertex, ulong Pixel), GraphicsPair>? _pairs;
+    private const int MaxPairs = 4096;
+    private static long _pairEntryHits;
+    private static long _pairEntryMisses;
+
+    public static string TakePairReport() => FormattableString.Invariant(
+        $"pair_entry_hits={Interlocked.Exchange(ref _pairEntryHits, 0)} pair_entry_misses={Interlocked.Exchange(ref _pairEntryMisses, 0)}");
+
+    private static GraphicsPair PairOf(ulong vertex, ulong pixel)
+    {
+        var pairs = _pairs ??= new Dictionary<(ulong Vertex, ulong Pixel), GraphicsPair>();
+        if (pairs.TryGetValue((vertex, pixel), out var pair))
+        {
+            return pair;
+        }
+
+        if (pairs.Count >= MaxPairs)
+        {
+            pairs.Clear();
+        }
+
+        pair = new GraphicsPair();
+        pairs.Add((vertex, pixel), pair);
+        return pair;
+    }
     [ThreadStatic]
     private static Dictionary<ulong, List<KeptComputeProgram>>? _keptComputes;
     private const int KeptComputesPerShader = 4;
@@ -320,12 +362,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         var vertexLabel = mesh is null ? "vertex" : "mesh";
-        var vertexUserData = KeptUserData(_vertexUserData ??= new KeptUserData(), vertexUserDataStamp, programsStamp,
+        var pair = PairOf(vertex.ExportAddress, pixelActive ? pixel.Address : 0);
+        var vertexUserData = KeptUserData(_vertexUserData = pair.VertexUserData, vertexUserDataStamp, programsStamp,
             vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount, vertex.ExportAddress, vertexLabel);
         var vertexSource = PrepareSource(vertex.ExportAddress, mesh is null ? ShaderStage.Vertex : ShaderStage.Mesh, vertexLabel, vertexUserData,
-            VertexUserDataBase, out var vertexHeader, vertex.GeometryUserDataAddress);
+            VertexUserDataBase, ref pair.VertexHeader, out var vertexHeader, vertex.GeometryUserDataAddress);
         var vertexInfo = mesh is null
-            ? PrepareVertexInput(vertexSource, vertexHeader, shaderInterface, context, _vertexInput ??= new KeptVertexInput(), startInstanceUserData)
+            ? PrepareVertexInput(vertexSource, vertexHeader, shaderInterface, context, _vertexInput = pair.VertexInput, startInstanceUserData)
             : new VertexInputInfo();
         vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
         ShaderSource? pixelSource = null;
@@ -335,14 +378,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var attributeCount = 0u;
         if (pixelActive)
         {
-            var pixelUserData = KeptUserData(_pixelUserData ??= new KeptUserData(), pixelUserDataStamp, programsStamp,
+            var pixelUserData = KeptUserData(pair.PixelUserData, pixelUserDataStamp, programsStamp,
                 pixel.UserScalars, pixel.Resource2.UserScalarCount, pixel.Address, "pixel");
-            pixelSource = PrepareSource(pixel.Address, ShaderStage.Pixel, "pixel", pixelUserData, userDataBase: 0, out var pixelHeader);
+            pixelSource = PrepareSource(pixel.Address, ShaderStage.Pixel, "pixel", pixelUserData, userDataBase: 0, ref pair.PixelHeader, out var pixelHeader);
             if (RenderTrace.Enabled)
                 RenderTrace.Write($"PixelDrawState shader=0x{pixelSource.Address:X16} hash=0x{pixelSource.Hash:X16} " +
                     $"user_data=[{string.Join(",", pixelSource.UserData.Select(word => $"{word:X8}"))}]");
             using var pixelProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PixelInputResolution);
-            pixelInfo = PreparePixelInput(banks, pixelSource, pixelHeader, targetExportMapping, depthBound, _pixelInput ??= new KeptPixelInput(),
+            pixelInfo = PreparePixelInput(banks, pixelSource, pixelHeader, targetExportMapping, depthBound, pair.PixelInput,
                 out pixelOutputs, out attributeCount, out dropUnwritten);
             pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
         }
@@ -355,22 +398,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var pushDataCursor = 0u;
         if (pixelSource is not null)
         {
-            if (!TryPrepareProgram(
-                pixelSource,
-                new StageCompileOptions
-                {
-                    PixelInfo = pixelInfo,
-                    PixelOutputs = pixelOutputs,
-                    PixelInputEnable = shaderInterface.PixelInputEnable,
-                    PixelInputAddress = shaderInterface.PixelInputAddress,
-                },
-                ref pushDataCursor,
-                out pixelProgramHandle,
-                out pixelStage))
+            var pixelOptions = new StageCompileOptions
+            {
+                PixelInfo = pixelInfo,
+                PixelOutputs = pixelOutputs,
+                PixelInputEnable = shaderInterface.PixelInputEnable,
+                PixelInputAddress = shaderInterface.PixelInputAddress,
+            };
+            if (!TryPreparePairProgram(pixelSource, pixelOptions, pair.Pixel, pair.PixelInput.Info, 0, ref pushDataCursor, out pixelProgramHandle, out pixelStage))
                 return new GraphicsPrograms { Available = false };
         }
 
-        if (!TryPrepareProgram(
+        if (!TryPreparePairProgram(
             vertexSource,
             mesh is null
                 ? new StageCompileOptions { VertexInfo = vertexInfo, RequiredVertexOutputCount = (int)attributeCount }
@@ -379,6 +418,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     MeshInfo = mesh, RequiredVertexOutputCount = (int)attributeCount,
                     MeshOutputLocationMask = pixelSource is null ? 0u : pixelStage.Program?.InputLocationMask,
                 },
+            pair.Vertex,
+            mesh is null ? pair.VertexInput.Info : null,
+            (int)attributeCount,
             ref pushDataCursor,
             out vertexProgram,
             out vertexStage))
@@ -392,7 +434,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         SolidColorClear? solidClear = null;
         var disableBlending = false;
-        if (mesh is null && pixelInfo is not null)
+        if (mesh is null && pixelInfo is not null && vertexInfo.Attributes.Length == 0 && HasNoImagesOrBuffers(vertexStage) && HasNoImagesOrBuffers(pixelStage))
         {
             var vertexProgramWords = _programs.Decode(vertexSource);
             var pixelProgramWords = _programs.Decode(pixelSource!);
@@ -457,6 +499,48 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             viewport.XOffset, viewport.YOffset,
             Math.Min(limits.MaxViewportWidth, MaxViewportDimension) * 0.5f,
             Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
+    }
+
+    private static bool HasNoImagesOrBuffers(in ShaderStageResources stage) =>
+        stage.Program?.Resources?.Info is { } info && info.Images.Count == 0 && info.Buffers.Count == 0;
+
+    // The program entry a pair's stage used stays its entry while the stage's static inputs are the
+    // same memoized object: the entry's key is built from them alone.
+    private bool TryPreparePairProgram(ShaderSource source, StageCompileOptions options, GraphicsPairStage kept, object? staticInputs, int requiredOutputs,
+        ref uint pushDataCursor, out ShaderProgram program, out ShaderStageResources stage)
+    {
+        var startInstance = options.VertexInfo?.StartInstanceUserData ?? -1;
+        var ieeeMode = options.VertexInfo?.IeeeMode ?? options.PixelInfo?.IeeeMode ?? false;
+        if (kept.Entry is { } entry && staticInputs is not null && ReferenceEquals(kept.StaticInputs, staticInputs) && kept.Hash == source.Hash &&
+            kept.UserDataCount == source.UserData.Length && kept.RequiredOutputs == requiredOutputs && kept.StartInstance == startInstance &&
+            kept.IeeeMode == ieeeMode && kept.Registrations == ShaderHeaderRegistry.Registrations)
+        {
+            Interlocked.Increment(ref _pairEntryHits);
+            if (_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
+            {
+                return true;
+            }
+
+            ReportShaderSkip(source, rejection);
+            return false;
+        }
+
+        Interlocked.Increment(ref _pairEntryMisses);
+        if (!TryPrepareProgram(source, options, ref pushDataCursor, out program, out stage))
+        {
+            kept.Entry = null;
+            return false;
+        }
+
+        kept.Entry = ShaderProgramCache.LastEntry;
+        kept.StaticInputs = staticInputs;
+        kept.Hash = source.Hash;
+        kept.UserDataCount = source.UserData.Length;
+        kept.RequiredOutputs = requiredOutputs;
+        kept.StartInstance = startInstance;
+        kept.IeeeMode = ieeeMode;
+        kept.Registrations = ShaderHeaderRegistry.Registrations;
+        return true;
     }
 
     // The vertex tables of the draw and the clip-space transform when clipping is off.
@@ -1510,6 +1594,31 @@ internal sealed class KeptComputeProgram
     public uint DimensionX;
     public uint DimensionY;
     public uint DimensionZ;
+}
+
+internal sealed class GraphicsPairStage
+{
+    public ProgramSourceEntry? Entry;
+    public object? StaticInputs;
+    public ulong Hash;
+    public int UserDataCount;
+    public int RequiredOutputs;
+    public int StartInstance;
+    public bool IeeeMode;
+    public long Registrations;
+}
+
+// One vertex/pixel program pair's memos, so pairs that alternate keep theirs.
+internal sealed class GraphicsPair
+{
+    public readonly KeptUserData VertexUserData = new();
+    public readonly KeptUserData PixelUserData = new();
+    public readonly KeptVertexInput VertexInput = new();
+    public readonly KeptPixelInput PixelInput = new();
+    public readonly GraphicsPairStage Vertex = new();
+    public readonly GraphicsPairStage Pixel = new();
+    public ShaderHeaderEntry? VertexHeader;
+    public ShaderHeaderEntry? PixelHeader;
 }
 
 internal sealed class KeptUserData

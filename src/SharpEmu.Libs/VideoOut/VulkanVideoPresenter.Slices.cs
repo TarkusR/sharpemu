@@ -69,7 +69,7 @@ internal static unsafe partial class VulkanVideoPresenter
         FormattableString.Invariant($"stolen={Interlocked.Exchange(ref _slicesStolen, 0)} stolen_items={Interlocked.Exchange(ref _stolenItems, 0)} rest_chunks={Interlocked.Exchange(ref _restChunks, 0)} rest_items={Interlocked.Exchange(ref _restItems, 0)} ") +
         FormattableString.Invariant($"tail_producer=busy:{Interlocked.Exchange(ref _tailByProducer[0], 0)},idle:{Interlocked.Exchange(ref _tailByProducer[1], 0)},blocked:{Interlocked.Exchange(ref _tailByProducer[2], 0)},space:{Interlocked.Exchange(ref _tailByProducer[3], 0)},run:{Interlocked.Exchange(ref _tailByProducer[4], 0)} ") +
         "round_trips=" + TakeRoundTrips() + " " + Presenter.TakeCommandReadReport() + " " + SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.TakeProgramReport() + " " +
-        SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.TakeFastReport() + " " + SubmissionScheduler.TakeDeferredReport() + " " +
+        SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.TakeFastReport() + " " + SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakePairReport() + " " + SubmissionScheduler.TakeDeferredReport() + " " +
         "serial_reasons=" + TakeSerialReasons() + " " + GuestImageCache.TakeSliceLookupReport() + " " + TakeGcReport() + " " + Diagnostics.ItemCostTally.TakeReport() + " posts=" + TakePosts();
 
     private static double Ticks(ref long ticks) => Interlocked.Exchange(ref ticks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
