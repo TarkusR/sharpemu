@@ -25,6 +25,7 @@ internal static unsafe partial class VulkanVideoPresenter
 {
     private static long _slicesRecorded;
     private static long _segmentsRecorded;
+    private static long _usesShared;
     private static long _segmentsEmpty;
     private static long _slicesSerial;
     private static long _slicesInvalid;
@@ -58,7 +59,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static long _workerAllocated;
 
     internal static string TakeSliceReport() =>
-        FormattableString.Invariant($"[PERF][SLICES] slices={Interlocked.Exchange(ref _slicesRecorded, 0)} segments={Interlocked.Exchange(ref _segmentsRecorded, 0)} empty={Interlocked.Exchange(ref _segmentsEmpty, 0)} ") +
+        FormattableString.Invariant($"[PERF][SLICES] slices={Interlocked.Exchange(ref _slicesRecorded, 0)} segments={Interlocked.Exchange(ref _segmentsRecorded, 0)} empty={Interlocked.Exchange(ref _segmentsEmpty, 0)} uses_shared={Interlocked.Exchange(ref _usesShared, 0)} ") +
         FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
         FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
         FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +
@@ -138,6 +139,54 @@ internal static unsafe partial class VulkanVideoPresenter
         public readonly List<BufferSliceUse> Buffers = new();
         public readonly List<(ulong Address, ulong Size)> SyncRanges = new();
         public readonly List<ImageSliceUse> Images = new();
+        private HashSet<BufferSliceUse>? _bufferSet;
+        private Dictionary<(ResourceSlotIdentifier Image, ImageRole Role, ImageViewDescription View), int>? _imageIndex;
+
+        public void AddBuffer(in BufferSliceUse use)
+        {
+            if (Buffers.Count != 0)
+            {
+                if (_bufferSet is null)
+                {
+                    _bufferSet = [.. Buffers];
+                }
+
+                if (!_bufferSet.Add(use))
+                {
+                    Interlocked.Increment(ref _usesShared);
+                    return;
+                }
+            }
+
+            Buffers.Add(use);
+        }
+
+        public void AddImage(in ImageSliceUse use)
+        {
+            var key = (use.Image, use.Request.Role, use.Request.View);
+            if (!System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<ImageRequest>())
+            {
+                _imageIndex ??= new();
+                if (_imageIndex.TryGetValue(key, out var index))
+                {
+                    var known = Images[index];
+                    if (ReferenceEquals(known.Expected, use.Expected) && SameRequest(known.Request, use.Request))
+                    {
+                        Interlocked.Increment(ref _usesShared);
+                        return;
+                    }
+                }
+                else
+                {
+                    _imageIndex.Add(key, Images.Count);
+                }
+            }
+
+            Images.Add(use);
+        }
+
+        internal static bool SameRequest(in ImageRequest left, in ImageRequest right) =>
+            MemoryMarshal.AsBytes(new ReadOnlySpan<ImageRequest>(in left)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<ImageRequest>(in right)));
         public readonly List<(ulong Address, uint[] Words)> KnownWrites = new();
         public readonly List<SubmissionUploadResources> Resources = new();
         public bool NeedsBdaSweep;
@@ -767,7 +816,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("buffer lookup", resumable: true);
             }
 
-            Requests.Buffers.Add(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
+            Requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
             return (buffer.Handle, buffer.Offset(address), buffer.Size - buffer.Offset(address));
         }
 
@@ -852,7 +901,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             target.View = view;
             target.Image = image;
-            Requests.Images.Add(new ImageSliceUse(target.ImageIdentifier, image, target.Request));
+            Requests.AddImage(new ImageSliceUse(target.ImageIdentifier, image, target.Request));
             var range = target.Request.View;
             TransitionImage(image, AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit,
                 new SubresourceRange(range.BaseLevel, range.LevelCount, range.BaseLayer, range.LayerCount), BeginBatchedGuestCommands());
@@ -900,7 +949,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var image = Image(depth.Image);
-            Requests.Images.Add(new ImageSliceUse(depth.Image, image, resolution.Request));
+            Requests.AddImage(new ImageSliceUse(depth.Image, image, resolution.Request));
             return new DepthAttachmentAcquisition(view, image.Backing.Samples, false);
         }
 
@@ -911,7 +960,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("texture acquire", resumable: true);
             }
 
-            Requests.Images.Add(new ImageSliceUse(imageIdentifier, Image(imageIdentifier), request));
+            Requests.AddImage(new ImageSliceUse(imageIdentifier, Image(imageIdentifier), request));
             return view;
         }
     }

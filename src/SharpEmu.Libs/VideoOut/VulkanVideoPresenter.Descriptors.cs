@@ -1358,7 +1358,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     if (_worker)
                     {
-                        Requests.Images.Add(new ImageSliceUse(binding.ImageIdentifier, binding.CachedImage, binding.Request));
+                        Requests.AddImage(new ImageSliceUse(binding.ImageIdentifier, binding.CachedImage, binding.Request));
                     }
 
                     Interlocked.Increment(ref _stageMemoAcquireReuses);
