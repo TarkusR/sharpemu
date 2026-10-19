@@ -577,7 +577,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     try
                     {
                         _itemSequence = slice.Items[index].Sequence;
-                        _presenter._translation.RunDeferred(slice.Items[index].Work!, _workerRecorder!);
+                        if (slice.Items[index].Work is SharpEmu.Libs.Agc.AgcExports.GlobalBarrierWork)
+                        {
+                            RecordGuestCacheFlush();
+                        }
+                        else
+                        {
+                            _presenter._translation.RunDeferred(slice.Items[index].Work!, _workerRecorder!);
+                        }
+
                         segment!.Count++;
                     }
                     catch (SerialRequiredException serial)
@@ -611,6 +619,24 @@ internal static unsafe partial class VulkanVideoPresenter
                 slice.Chunks = _arena!.TakeChunks();
                 _segment = null;
             }
+        }
+
+        private void RecordGuestCacheFlush()
+        {
+            if (DeferGlobalBarriers && _renderingActive && !_renderingWritesMemory)
+            {
+                _globalBarrierAfterRendering = true;
+                return;
+            }
+
+            EndRendering();
+            if (BatchBarriers)
+            {
+                RequestGuestMemoryBarrier(GlobalMemoryBarrier);
+                return;
+            }
+
+            _presenter.RecordGlobalBarrier(BeginBatchedGuestCommands());
         }
 
         private SliceSegment BeginSegment(int first)

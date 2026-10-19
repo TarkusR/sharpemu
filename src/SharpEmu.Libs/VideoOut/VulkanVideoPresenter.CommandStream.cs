@@ -411,6 +411,12 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RunDeferredWork(AgcExports.DeferredWork work)
         {
+            if (work is AgcExports.GlobalBarrierWork)
+            {
+                EmitGlobalBarrier();
+                return;
+            }
+
             using var translationScope = RenderPhaseProfile.MeasureDetail(work.IsDispatch
                 ? RenderPhaseProfile.Phase.CommandDispatchTranslation
                 : RenderPhaseProfile.Phase.CommandDrawTranslation);
@@ -712,7 +718,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
-                _commandThread!.Post(EmitGlobalBarrier);
+                _commandThread!.EnqueueDeferred(AgcExports.GlobalBarrierWork.Instance, isDraw: false);
                 return;
             }
             // Inside a rendering scope whose draws only wrote attachments, the barrier matters only

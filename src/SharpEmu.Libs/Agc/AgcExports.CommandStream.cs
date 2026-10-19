@@ -31,6 +31,14 @@ public static partial class AgcExports
         public virtual int CostKind => IsDispatch ? Diagnostics.ItemCostTally.Dispatch : Diagnostics.ItemCostTally.ResolvedDraw;
     }
 
+    // A guest cache flush in stream order, recorded by whichever thread records its neighbours.
+    internal sealed record GlobalBarrierWork : DeferredWork
+    {
+        public static readonly GlobalBarrierWork Instance = new();
+
+        public override int CostKind => Diagnostics.ItemCostTally.Barrier;
+    }
+
     // Takes the deferred work of a command stream interpreted on its own thread.
     internal interface IDeferredWorkSink
     {
