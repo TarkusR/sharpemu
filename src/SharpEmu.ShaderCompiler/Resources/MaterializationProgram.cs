@@ -408,12 +408,41 @@ internal sealed class MaterializationProgram
         }
     }
 
-    private bool Run(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Scratch scratch, bool[] activeSources,
-        out List<DescriptorWords> sources, out uint[] table, out DeviceAddressRange[] ranges)
+    // The words of one evaluation, held by the thread that runs it and reused by the next.
+    internal sealed class Output
     {
-        sources = null!;
-        table = null!;
-        ranges = null!;
+        public uint[] Words = new uint[256];
+        public int[] Offsets = new int[33];
+        public uint[] Table = new uint[64];
+        public int TableLength;
+        public DeviceAddressRange[] Ranges = new DeviceAddressRange[8];
+        public int RangeCount;
+
+        public Span<uint> Source(int index) => Words.AsSpan(Offsets[index], Offsets[index + 1] - Offsets[index]);
+
+        public Span<uint> TableWords => Table.AsSpan(0, TableLength);
+
+        public ReadOnlySpan<DeviceAddressRange> RangeValues => Ranges.AsSpan(0, RangeCount);
+    }
+
+    internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output)
+    {
+        var activeSources = plan.ResourceBranches.Count != 0 ? RuntimeValueEvaluator.EvaluateActiveSources(plan, inputs) : [];
+        var scratch = _scratch ?? new Scratch();
+        _scratch = null;
+        try
+        {
+            Evaluate(inputs, scratch);
+            return Emit(plan, additionalTableWords, scratch, activeSources, output);
+        }
+        finally
+        {
+            _scratch = scratch;
+        }
+    }
+
+    private void Evaluate(ResourceRuntimeInputs inputs, Scratch scratch)
+    {
         scratch.Ensure(_registerCount);
         var values = scratch.Values;
         var valid = scratch.Valid;
@@ -432,7 +461,108 @@ internal sealed class MaterializationProgram
                 Execute(step, inputs, values, valid, operands);
             }
         }
+    }
 
+    private bool Emit(ShaderResourcePlan plan, int additionalTableWords, Scratch scratch, bool[] activeSources, Output output)
+    {
+        var values = scratch.Values;
+        var valid = scratch.Valid;
+        var total = 0;
+        foreach (var registers in _sourceWords)
+        {
+            total += registers.Length;
+        }
+
+        if (output.Words.Length < total)
+        {
+            output.Words = new uint[Math.Max(total, output.Words.Length * 2)];
+        }
+
+        if (output.Offsets.Length < _sourceWords.Length + 1)
+        {
+            output.Offsets = new int[_sourceWords.Length + 1];
+        }
+
+        var cursor = 0;
+        for (var source = 0; source < _sourceWords.Length; source++)
+        {
+            var registers = _sourceWords[source];
+            output.Offsets[source] = cursor;
+            var inactive = activeSources.Length != 0 && !activeSources[plan.MaterializationSources[source]];
+            for (var word = 0; word < registers.Length; word++)
+            {
+                var register = registers[word];
+                if (inactive)
+                {
+                    output.Words[cursor++] = 0;
+                    continue;
+                }
+
+                if (!valid[register])
+                {
+                    return false;
+                }
+
+                output.Words[cursor++] = (uint)values[register];
+            }
+        }
+
+        output.Offsets[_sourceWords.Length] = cursor;
+        var tableLength = checked(_tableWords.Length + additionalTableWords);
+        if (output.Table.Length < tableLength)
+        {
+            output.Table = new uint[Math.Max(tableLength, output.Table.Length * 2)];
+        }
+
+        Array.Clear(output.Table, 0, tableLength);
+        output.TableLength = tableLength;
+        for (var index = 0; index < _tableWords.Length; index++)
+        {
+            var register = _tableWords[index];
+            if (!valid[register])
+            {
+                return false;
+            }
+
+            output.Table[_tableOffsets[index]] = (uint)values[register];
+        }
+
+        var planned = plan.DeviceAddressRanges;
+        if (output.Ranges.Length < planned.Count)
+        {
+            output.Ranges = new DeviceAddressRange[Math.Max(planned.Count, output.Ranges.Length * 2)];
+        }
+
+        output.RangeCount = planned.Count;
+        for (var index = 0; index < planned.Count; index++)
+        {
+            output.Ranges[index] = RangeOf(planned[index], index, values, valid);
+        }
+
+        return true;
+    }
+
+    private DeviceAddressRange RangeOf(DeviceAddressRangePlan range, int index, ulong[] values, bool[] valid)
+    {
+        var low = _rangeLow[index];
+        var high = _rangeHigh[index];
+        var plannedRange = low >= 0 && valid[low] && valid[high];
+        var handleBase = plannedRange ? ((uint)values[low] | ((ulong)(uint)values[high] << 32)) & AddressMask : 0;
+        var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
+        var baseAddress = plannedRange ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
+        var size = range.Bounded ? range.Extent : DeviceAddressRangePlanner.MaxRangeBytes;
+        return new DeviceAddressRange(range.Handle, baseAddress, plannedRange ? size : 0, plannedRange, range.Written);
+    }
+
+    private bool Run(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Scratch scratch, bool[] activeSources,
+        out List<DescriptorWords> sources, out uint[] table, out DeviceAddressRange[] ranges)
+    {
+        sources = null!;
+        table = null!;
+        ranges = null!;
+        Evaluate(inputs, scratch);
+        var values = scratch.Values;
+        var valid = scratch.Valid;
         var evaluated = new List<DescriptorWords>(_sourceWords.Length);
         for (var source = 0; source < _sourceWords.Length; source++)
         {
@@ -474,15 +604,7 @@ internal sealed class MaterializationProgram
         var result = new DeviceAddressRange[planned.Count];
         for (var index = 0; index < result.Length; index++)
         {
-            var range = planned[index];
-            var low = _rangeLow[index];
-            var high = _rangeHigh[index];
-            var plannedRange = low >= 0 && valid[low] && valid[high];
-            var handleBase = plannedRange ? ((uint)values[low] | ((ulong)(uint)values[high] << 32)) & AddressMask : 0;
-            var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
-            var baseAddress = plannedRange ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
-            var size = range.Bounded ? range.Extent : DeviceAddressRangePlanner.MaxRangeBytes;
-            result[index] = new DeviceAddressRange(range.Handle, baseAddress, plannedRange ? size : 0, plannedRange, range.Written);
+            result[index] = RangeOf(planned[index], index, values, valid);
         }
 
         sources = evaluated;
