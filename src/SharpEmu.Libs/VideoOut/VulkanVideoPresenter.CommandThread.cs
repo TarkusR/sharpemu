@@ -645,7 +645,11 @@ internal static partial class VulkanVideoPresenter
                         return ran;
                     }
 
-                    FlushCutting();
+                    if (FlushCutting())
+                    {
+                        _units[^1].Slice!.Origin = 1;
+                    }
+
                     continue;
                 }
 
@@ -764,7 +768,7 @@ internal static partial class VulkanVideoPresenter
 
             if (slice.TryClaim())
             {
-                Presenter.NoteStolen(slice.Items.Count);
+                Presenter.NoteStolen(slice);
                 slice.Done.Set();
                 try
                 {
@@ -787,7 +791,10 @@ internal static partial class VulkanVideoPresenter
                 while (_presenter.NextSegment(slice) is { } segment)
                 {
                     var end = segment.First + segment.Count;
-                    if (_presenter.JoinSegment(slice, segment))
+                    var joinStarted = Stopwatch.GetTimestamp();
+                    var joined = _presenter.JoinSegment(slice, segment);
+                    Presenter.NoteJoin(joinStarted);
+                    if (joined)
                     {
                         for (var position = segment.First; position < end; position++)
                         {
@@ -835,7 +842,7 @@ internal static partial class VulkanVideoPresenter
                 for (var chunk = 0; chunk < chunks; chunk++)
                 {
                     var end = inline + (int)((long)(slice.Items.Count - inline) * (chunk + 1) / chunks);
-                    var rest = new RenderSlice();
+                    var rest = new RenderSlice { Origin = 2 };
                     rest.Items.AddRange(slice.Items.GetRange(start, end - start));
                     _units.Insert(_unitHead + chunk, new Unit { Slice = rest });
                     _presenter.DispatchSlice(rest, urgent: true);
@@ -855,10 +862,12 @@ internal static partial class VulkanVideoPresenter
 
         private void RunInline(Item item, Action betweenItems)
         {
+            var started = Stopwatch.GetTimestamp();
             Execute(item);
             CompleteItem(item);
             betweenItems();
             Interlocked.Increment(ref _serialItems);
+            Interlocked.Add(ref _inlineTicks, Stopwatch.GetTimestamp() - started);
         }
 
         private void CompleteItem(Item item)

@@ -35,6 +35,15 @@ internal static unsafe partial class VulkanVideoPresenter
     private static long _stolenItems;
     private static long _restChunks;
     private static long _restItems;
+    private static long _workerBusyTicks;
+    private static long _workerItems;
+    private static long _inlineTicks;
+    private static long _joinTicks;
+    private static long _validateTicks;
+    private static long _prologueTicks;
+    private static readonly long[] _stolenByOrigin = new long[3];
+    private static readonly long[] _waitByOrigin = new long[3];
+    private static readonly long[] _stolenByAge = new long[3];
     private static long _streamCopies;
     private static long _streamFallbacks;
     private static readonly ConcurrentDictionary<string, long> _serialReasons = new();
@@ -51,8 +60,14 @@ internal static unsafe partial class VulkanVideoPresenter
         FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
         FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
         FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +
+        FormattableString.Invariant($"worker_busy_ms={Interlocked.Exchange(ref _workerBusyTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} worker_items={Interlocked.Exchange(ref _workerItems, 0)} inline_ms={Interlocked.Exchange(ref _inlineTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
+        FormattableString.Invariant($"join_ms={Ticks(ref _joinTicks):F1} validate_ms={Ticks(ref _validateTicks):F1} prologue_ms={Ticks(ref _prologueTicks):F1} stolen_origin=ahead:{Interlocked.Exchange(ref _stolenByOrigin[0], 0)},tail:{Interlocked.Exchange(ref _stolenByOrigin[1], 0)},rest:{Interlocked.Exchange(ref _stolenByOrigin[2], 0)} ") +
+        FormattableString.Invariant($"stolen_age=lt100us:{Interlocked.Exchange(ref _stolenByAge[0], 0)},lt1ms:{Interlocked.Exchange(ref _stolenByAge[1], 0)},ge1ms:{Interlocked.Exchange(ref _stolenByAge[2], 0)} ") +
+        FormattableString.Invariant($"wait_origin_ms=ahead:{Ticks(ref _waitByOrigin[0]):F1},tail:{Ticks(ref _waitByOrigin[1]):F1},rest:{Ticks(ref _waitByOrigin[2]):F1} ") +
         FormattableString.Invariant($"stolen={Interlocked.Exchange(ref _slicesStolen, 0)} stolen_items={Interlocked.Exchange(ref _stolenItems, 0)} rest_chunks={Interlocked.Exchange(ref _restChunks, 0)} rest_items={Interlocked.Exchange(ref _restItems, 0)} ") +
         "serial_reasons=" + TakeSerialReasons() + " " + GuestImageCache.TakeSliceLookupReport() + " " + TakeGcReport();
+
+    private static double Ticks(ref long ticks) => Interlocked.Exchange(ref ticks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     private static string TakeGcReport()
     {
@@ -121,6 +136,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public List<SliceArenaChunk> Chunks = [];
         public bool Submitted;
         public bool Dispatched;
+        public long DispatchedAt;
+        public int Origin;
         public Exception? Failure;
         private int _claimed;
 
@@ -181,9 +198,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 var allocated = RenderPhaseProfile.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
+                var busyStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 try
                 {
                     host.RecordSlice(slice);
+                    Interlocked.Add(ref _workerItems, slice.Resume);
                 }
                 catch (Exception exception)
                 {
@@ -196,6 +215,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         Interlocked.Add(ref _workerAllocated, GC.GetAllocatedBytesForCurrentThread() - allocated);
                     }
 
+                    Interlocked.Add(ref _workerBusyTicks, System.Diagnostics.Stopwatch.GetTimestamp() - busyStarted);
                     slice.Done.Set();
                     slice.Progress.Set();
                 }
@@ -256,16 +276,22 @@ internal static unsafe partial class VulkanVideoPresenter
         internal void DispatchSlice(RenderSlice slice, bool urgent = false)
         {
             slice.Dispatched = true;
+            slice.DispatchedAt = System.Diagnostics.Stopwatch.GetTimestamp();
             slice.Generation = _scheduler.BeginSliceCut();
             _bufferCache.RefreshSnapshot();
             _workers!.Dispatch(slice, urgent);
         }
 
-        internal static void NoteStolen(int items)
+        internal static void NoteStolen(RenderSlice slice)
         {
             Interlocked.Increment(ref _slicesStolen);
-            Interlocked.Add(ref _stolenItems, items);
+            Interlocked.Add(ref _stolenItems, slice.Items.Count);
+            Interlocked.Increment(ref _stolenByOrigin[slice.Origin]);
+            var age = (System.Diagnostics.Stopwatch.GetTimestamp() - slice.DispatchedAt) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency;
+            Interlocked.Increment(ref _stolenByAge[age < 100 ? 0 : age < 1000 ? 1 : 2]);
         }
+
+        internal static void NoteJoin(long started) => Interlocked.Add(ref _joinTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
 
         internal static void NoteRestChunk(int items)
         {
@@ -288,7 +314,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         break;
                     }
 
-                    Interlocked.Add(ref _sliceWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+                    var waitedForDone = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted;
+                    Interlocked.Add(ref _sliceWaitTicks, waitedForDone);
+                    Interlocked.Add(ref _waitByOrigin[slice.Origin], waitedForDone);
                     if (slice.Failure is { } failure)
                     {
                         throw new InvalidOperationException("A render worker failed.", failure);
@@ -315,7 +343,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            Interlocked.Add(ref _sliceWaitTicks, System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted);
+            var waited = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted;
+            Interlocked.Add(ref _sliceWaitTicks, waited);
+            Interlocked.Add(ref _waitByOrigin[slice.Origin], waited);
             return segment;
         }
 
@@ -333,15 +363,20 @@ internal static unsafe partial class VulkanVideoPresenter
                     return false;
                 }
 
-                if (!_imageCache.ValidateSliceImages(segment.Requests.Images, segment.Requests.LookupGeneration, segment.Requests.MetadataGeneration) || !_bufferCache.ValidateSliceBuffers(segment.Requests.Buffers) ||
-                    !ValidateDeferredItems(slice, segment))
+                var validateStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                var valid = _imageCache.ValidateSliceImages(segment.Requests.Images, segment.Requests.LookupGeneration, segment.Requests.MetadataGeneration) &&
+                    _bufferCache.ValidateSliceBuffers(segment.Requests.Buffers) && ValidateDeferredItems(slice, segment);
+                Interlocked.Add(ref _validateTicks, System.Diagnostics.Stopwatch.GetTimestamp() - validateStarted);
+                if (!valid)
                 {
                     Interlocked.Increment(ref _slicesInvalid);
                     _scheduler.DiscardRecording(segment.Buffer!);
                     return false;
                 }
 
+                var prologueStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 RecordSlicePrologue(segment.Requests);
+                Interlocked.Add(ref _prologueTicks, System.Diagnostics.Stopwatch.GetTimestamp() - prologueStarted);
                 var uploads = _spareSubmissionResources is { Count: not 0 } spare ? spare.Pop() : new SubmissionUploadResources();
                 uploads.DebugName = "SharpEmu slice";
                 _batchResources.Add(uploads);
