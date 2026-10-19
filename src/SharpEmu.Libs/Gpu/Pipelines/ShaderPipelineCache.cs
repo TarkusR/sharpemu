@@ -25,8 +25,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly IShaderPipelineHost _host;
     private readonly ShaderHeaderRegistry _registry;
     private readonly ShaderProgramCache _programs;
-    private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
-    private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
     private readonly object _pipelineGate = new();
     private readonly bool _strictShaders = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0";
@@ -1220,12 +1220,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, lookup.Rendering, lookup.StaticParameters, lookup.VertexInput);
         lookup.VertexProgramId = vertexProgram.Id;
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
-        lock (_pipelineGate)
+        if (_graphicsPipelines.TryGetValue(lookup, out var known))
         {
-            if (_graphicsPipelines.TryGetValue(lookup, out var cached))
-            {
-                return cached;
-            }
+            return known;
         }
 
         var description = BuildGraphicsDescription(
@@ -1252,7 +1249,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var created = _host.CreateGraphicsPipeline(description);
             lock (_pipelineGate)
             {
-                _graphicsPipelines.Add(key, created);
+                _graphicsPipelines.TryAdd(key, created);
             }
 
             ShaderCacheCounters.CountGraphicsPipeline();
@@ -1476,12 +1473,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var stage = input.Stage.Program ?? throw SubmissionScheduler.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
-        lock (_pipelineGate)
+        if (_computePipelines.TryGetValue(key, out var known))
         {
-            if (_computePipelines.TryGetValue(key, out var cached))
-            {
-                return cached;
-            }
+            return known;
         }
 
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
@@ -1501,7 +1495,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var created = _host.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = program, Stage = stage });
             lock (_pipelineGate)
             {
-                _computePipelines.Add(key, created);
+                _computePipelines.TryAdd(key, created);
             }
 
             ShaderCacheCounters.CountComputePipeline();
@@ -1520,13 +1514,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var stage = input.Stage.Program ?? throw SubmissionScheduler.Fatal("The compute stage has no program.");
         var key = new ComputePipelineKey(program.Id);
-        lock (_pipelineGate)
+        if (_computePipelines.TryGetValue(key, out var known))
         {
-            if (_computePipelines.TryGetValue(key, out var cached))
-            {
-                handle = cached;
-                return true;
-            }
+            handle = known;
+            return true;
         }
 
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
@@ -1548,7 +1539,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             lock (_pipelineGate)
             {
-                _computePipelines.Add(key, created);
+                _computePipelines.TryAdd(key, created);
             }
 
             ShaderCacheCounters.CountComputePipeline();
