@@ -584,7 +584,6 @@ public sealed partial class GuestImageCache
             ref readonly var cached = ref image.Description.Metadata;
             ref readonly var requested = ref request.Description.Metadata;
             return SliceLookupFailed(cached.Range.Address != requested.Range.Address ? SliceLookupFailure.DepthMetadataAddress :
-                cached.Range.Size != requested.Range.Size ? SliceLookupFailure.DepthMetadataSize :
                 cached.Kind != requested.Kind ? SliceLookupFailure.DepthMetadataKind : SliceLookupFailure.DepthMetadataCompression, request.Role);
         }
 
@@ -621,7 +620,7 @@ public sealed partial class GuestImageCache
     }
 
     private static bool SameMetadataPlacement(in MetadataDescription cached, in MetadataDescription requested) =>
-        cached.Range.Equals(requested.Range) && cached.Kind == requested.Kind && cached.Compression == requested.Compression;
+        cached.Range.Address == requested.Range.Address && cached.Kind == requested.Kind && cached.Compression == requested.Compression;
 
     // Whether TryClearImageFromBuffer would select an image for the fill without recording anything.
     public bool WouldPublishImagesUnderWrite(ulong address, ulong size, bool wholeImages)
