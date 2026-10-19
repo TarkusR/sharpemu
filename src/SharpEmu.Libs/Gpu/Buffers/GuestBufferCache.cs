@@ -960,7 +960,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                     finally
                     {
                         _inDeviceAddressSweep = false;
-                        CloseSweepBarrier();
+                        if (_uploadBatchDepth == 0)
+                        {
+                            CloseSweepBarrier();
+                        }
                     }
                 }
 
@@ -977,6 +980,17 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
     private bool _inDeviceAddressSweep;
+    private int _uploadBatchDepth;
+
+    public void BeginUploadBatch() => _uploadBatchDepth++;
+
+    public void EndUploadBatch()
+    {
+        if (--_uploadBatchDepth == 0 && !_inDeviceAddressSweep)
+        {
+            CloseSweepBarrier();
+        }
+    }
     private CommandBuffer _sweepBarrierBuffer;
 
     private void OpenSweepBarrier(CommandBuffer native)
@@ -2556,7 +2570,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         command.EndRendering();
         var native = new CommandBuffer(command.TransferHandle);
         var vk = _device.Vk;
-        var sweep = _inDeviceAddressSweep;
+        var sweep = _inDeviceAddressSweep || _uploadBatchDepth != 0;
         var before = new BufferMemoryBarrier2
         {
             SType = StructureType.BufferMemoryBarrier2,

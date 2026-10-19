@@ -856,20 +856,22 @@ internal static unsafe partial class VulkanVideoPresenter
             var serial = _bufferCache.RegistrationSerial;
             var spans = GuestGpuMemoryHook.Current?.SpanVersion ?? 0;
             var foundSets = _worker ? null : _foundRangeSets ??= new (DeviceAddressRange[]?, long, long)[FoundRangeSetSlots];
+            var found = false;
             if (foundSets is not null)
             {
-                foreach (var found in foundSets)
+                foreach (var set in foundSets)
                 {
-                    if (ReferenceEquals(found.Ranges, ranges) && found.Serial == serial && found.Spans == spans)
+                    if (ReferenceEquals(set.Ranges, ranges) && set.Serial == serial && set.Spans == spans)
                     {
-                        return;
+                        found = true;
+                        break;
                     }
                 }
             }
 
             foreach (var range in ranges)
             {
-                if (!range.Planned || range.Size == 0 ||
+                if ((found && !range.Written) || !range.Planned || range.Size == 0 ||
                     range.Base >= PageOwnerTable.AddressSpaceSize || range.Size > PageOwnerTable.AddressSpaceSize - range.Base ||
                     (!range.Written && !_guestMemory.CanRead(range.Base, 1)))
                 {
@@ -882,7 +884,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     PublishImagesUnderWrite(formatted: false, range.Base, size);
                 }
 
-                _ = FindBuffer(range.Base, size);
+                if (!found)
+                {
+                    _ = FindBuffer(range.Base, size);
+                }
+            }
+
+            if (!found && foundSets is not null)
+            {
+                foundSets[_foundRangeSetNext] = (ranges, _bufferCache.RegistrationSerial, spans);
+                _foundRangeSetNext = (_foundRangeSetNext + 1) % FoundRangeSetSlots;
             }
         }
 
@@ -929,12 +940,6 @@ internal static unsafe partial class VulkanVideoPresenter
             else
             {
                 _imageCache.PublishImagesUnderRawWrite(address, size);
-            }
-
-            if (foundSets is not null)
-            {
-                foundSets[_foundRangeSetNext] = (ranges, _bufferCache.RegistrationSerial, spans);
-                _foundRangeSetNext = (_foundRangeSetNext + 1) % FoundRangeSetSlots;
             }
         }
 
@@ -1059,10 +1064,26 @@ internal static unsafe partial class VulkanVideoPresenter
             var stage = (PreparedStageBindings)prepared;
             var info = stage.Resources.Info;
             using var stallProfile = DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.Bind, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count);
-            using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.BindBuffers, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
-                BindBuffers(stage);
-            using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.ObtainAddressRanges, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
-                ObtainDeviceAddressRanges(stage);
+            if (!_worker)
+            {
+                _bufferCache.BeginUploadBatch();
+            }
+
+            try
+            {
+                using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.BindBuffers, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
+                    BindBuffers(stage);
+                using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.ObtainAddressRanges, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
+                    ObtainDeviceAddressRanges(stage);
+            }
+            finally
+            {
+                if (!_worker)
+                {
+                    _bufferCache.EndUploadBatch();
+                }
+            }
+
             using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.BindImages, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
                 BindImages(stage);
             _preparedTextures.Add(stage.Textures);
