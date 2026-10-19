@@ -120,6 +120,7 @@ public sealed class KeptStageInputsTests : IDisposable
     public void PixelInput_IsKeptUntilAContextRegisterIsWritten()
     {
         var first = PixelLookup();
+        _banks.MarkWritten(1u << (int)RegisterStamp.PixelUserData);
         var second = PixelLookup();
         SetKillEnable(true);
         var changed = PixelLookup();
@@ -136,6 +137,7 @@ public sealed class KeptStageInputsTests : IDisposable
     public void VertexInput_IsKeptWhileItsTablesHoldTheSameWords()
     {
         var first = Lookup();
+        _banks.MarkWritten(1u << (int)RegisterStamp.VertexUserData);
         var second = Lookup();
 
         Assert.Equal(2, first.Attributes.Length);
@@ -179,6 +181,7 @@ public sealed class KeptStageInputsTests : IDisposable
         var first = Lookup();
         _banks.Context.Clip.ClipDisable = true;
         _banks.Context.ScreenViewport.Viewports[0] = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = 32, YOffset = 32 };
+        _banks.MarkWritten(1u << (int)RegisterStamp.Context);
         var clipped = Lookup();
 
         Assert.NotSame(first.Attributes, clipped.Attributes);

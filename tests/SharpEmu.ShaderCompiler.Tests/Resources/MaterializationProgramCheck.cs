@@ -13,6 +13,8 @@ internal static class MaterializationProgramCheck
     [ThreadStatic]
     private static bool _suspended;
 
+    internal static bool Suspended => _suspended;
+
     internal static Suspension Suspend()
     {
         _suspended = true;

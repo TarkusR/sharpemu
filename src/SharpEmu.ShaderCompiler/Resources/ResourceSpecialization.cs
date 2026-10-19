@@ -43,7 +43,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public List<uint> SamplerDescriptorGroups { get; init; } = [];
 
     public bool Equals(ResourceSpecialization? other) =>
-        other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
+        ReferenceEquals(this, other) || other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
         Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables) &&
         ImageDescriptorGroups.SequenceEqual(other.ImageDescriptorGroups) &&
         SamplerDescriptorGroups.SequenceEqual(other.SamplerDescriptorGroups);

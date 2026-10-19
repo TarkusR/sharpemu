@@ -139,6 +139,280 @@ public static partial class ResourceMaterializer
         };
         specialization = nextSpecialization;
         failure = ResourceMaterializationFailure.None;
+        MaterializedCheck?.Invoke(plan, inputs, snapshot, specialization);
+        return true;
+    }
+
+    // The words BuildSpecialization reads, with the specialization and the specialized image and
+    // sampler arrays they produced; a draw whose words match takes all three unchanged.
+    private sealed class SpecializationMemo
+    {
+        public required uint[][] KeyImages;
+        public required uint[][] KeySamplers;
+        public required uint[] KeyBuffers;
+        public required uint[][] Images;
+        public required uint[][] Samplers;
+        public required ResourceSpecialization Specialization;
+    }
+
+    private const int SpecializationMemoEntries = 8;
+
+    internal static Action<ShaderResourcePlan, ResourceRuntimeInputs, ResourceSnapshot, ResourceSpecialization>? MaterializedCheck;
+
+    private static long _fastMaterializations;
+    private static long _fastSpecializationHits;
+    private static long _fastStatisticsHits;
+
+    public static string TakeFastReport() => FormattableString.Invariant(
+        $"fast_materializations={Interlocked.Exchange(ref _fastMaterializations, 0)} fast_specialization_hits={Interlocked.Exchange(ref _fastSpecializationHits, 0)} fast_statistics_hits={Interlocked.Exchange(ref _fastStatisticsHits, 0)}");
+
+    private sealed record FastOrigin(ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs);
+
+    // A fast snapshot is still current when its plan evaluates to the same words again; null when
+    // the snapshot did not come from the fast path.
+    public static bool? RevalidateFast(ResourceSnapshot snapshot)
+    {
+        if (snapshot.Origin is not FastOrigin origin)
+        {
+            return null;
+        }
+
+        var current = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        return MaterializeFast(origin.Plan, origin.Inputs, ref current, ref specialization, out _) && SameSnapshot(snapshot, current);
+    }
+
+    private static bool SameSnapshot(ResourceSnapshot left, ResourceSnapshot right) =>
+        SameWords(left.Buffers, right.Buffers) && SameWords(left.Images, right.Images) && SameWords(left.Samplers, right.Samplers) &&
+        left.FlattenedResourceTable.AsSpan().SequenceEqual(right.FlattenedResourceTable) && left.UserData.AsSpan().SequenceEqual(right.UserData) &&
+        left.DeviceAddressRanges.AsSpan().SequenceEqual(right.DeviceAddressRanges) &&
+        (left.MipStatistics is null ? right.MipStatistics is null : right.MipStatistics is not null && left.MipStatistics.AsSpan().SequenceEqual(right.MipStatistics));
+
+    private static bool SameWords(uint[][] left, uint[][] right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left.Length != right.Length)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.Length; index++)
+        {
+            if (!ReferenceEquals(left[index], right[index]) && !left[index].AsSpan().SequenceEqual(right[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public static bool CanMaterializeFast(ShaderResourcePlan plan) =>
+        plan.IndirectImages.Count == 0 && plan.BufferCandidateTables.Count == 0 && plan.MaterializationProgram is not null;
+
+    // Materializes every draw from the plan's program: no cached snapshot to prove. The
+    // specialization is a function of descriptor words only, so equal words reuse it.
+    public static bool MaterializeFast(
+        ShaderResourcePlan plan,
+        ResourceRuntimeInputs inputs,
+        ref ResourceSnapshot snapshot,
+        ref ResourceSpecialization specialization,
+        out ResourceMaterializationFailure failure)
+    {
+        using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
+        if (!MaterializeSnapshot(plan, inputs, captureSelectorDiagnostic: false, out var materialized, out var programRanges, out failure))
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _fastMaterializations);
+        var ranges = programRanges ?? DeviceAddressRangePlanner.Evaluate(plan, inputs);
+        foreach (var range in ranges)
+        {
+            if (!plan.WrittenRangeSlotByHandle.TryGetValue(range.Handle, out var slot))
+            {
+                continue;
+            }
+
+            var offset = (int)slot;
+            materialized.FlattenedTable[offset] = (uint)range.Base;
+            materialized.FlattenedTable[offset + 1] = (uint)(range.Base >> 32);
+            materialized.FlattenedTable[offset + 2] = (uint)Math.Min(range.Size, uint.MaxValue);
+        }
+
+        var memos = Volatile.Read(ref plan.SpecializationMemos);
+        SpecializationMemo? memo = null;
+        var statisticsDiffer = false;
+        if (memos is not null)
+        {
+            foreach (var candidate in memos)
+            {
+                if (candidate is SpecializationMemo entry && MatchesMemo(entry, materialized, out statisticsDiffer) &&
+                    (!statisticsDiffer || entry.Specialization.ImageDescriptorGroups.SequenceEqual(DescriptorBindingAliases.Group(materialized.Images))))
+                {
+                    memo = entry;
+                    break;
+                }
+            }
+        }
+
+        if (memo is not null)
+        {
+            foreach (var words in materialized.Buffers)
+            {
+                if ((words[3] >> 30) != 0)
+                {
+                    Array.Clear(words);
+                }
+            }
+
+            Interlocked.Increment(ref _fastSpecializationHits);
+            uint[]? statistics = null;
+            if (statisticsDiffer)
+            {
+                Interlocked.Increment(ref _fastStatisticsHits);
+                statistics = new uint[materialized.Images.Length];
+                for (var index = 0; index < statistics.Length; index++)
+                {
+                    var words = materialized.Images[index];
+                    statistics[index] = words.Length >= 7 ? ResourceSnapshot.MipStatisticsOf(words[5], words[6]) : ResourceSnapshot.NoMipStatistics;
+                }
+            }
+
+            snapshot = new ResourceSnapshot
+            {
+                Buffers = materialized.Buffers,
+                Images = memo.Images,
+                Samplers = memo.Samplers,
+                FlattenedResourceTable = materialized.FlattenedTable,
+                UserData = materialized.UserData,
+                DeviceAddressRanges = ranges,
+                MipStatistics = statistics,
+                Origin = new FastOrigin(plan, inputs),
+            };
+            specialization = memo.Specialization;
+            failure = ResourceMaterializationFailure.None;
+            return true;
+        }
+
+        var keyImages = new uint[materialized.Images.Length][];
+        for (var index = 0; index < keyImages.Length; index++)
+        {
+            keyImages[index] = [.. materialized.Images[index]];
+        }
+
+        var keySamplers = new uint[materialized.Samplers.Length][];
+        for (var index = 0; index < keySamplers.Length; index++)
+        {
+            keySamplers[index] = [.. materialized.Samplers[index]];
+        }
+
+        var keyBuffers = new uint[materialized.Buffers.Length * 2];
+        var keyable = true;
+        for (var index = 0; index < materialized.Buffers.Length; index++)
+        {
+            var words = materialized.Buffers[index];
+            if (words.Length != 4)
+            {
+                keyable = false;
+                break;
+            }
+
+            keyBuffers[index * 2] = words[1] >> 16;
+            keyBuffers[index * 2 + 1] = words[3];
+        }
+
+        if (!BuildSpecialization(plan, materialized, out var nextSnapshot, out var nextSpecialization, out failure, null))
+        {
+            return false;
+        }
+
+        if (keyable)
+        {
+            memos ??= Interlocked.CompareExchange(ref plan.SpecializationMemos, new object?[SpecializationMemoEntries], null) ?? plan.SpecializationMemos!;
+            var slot = (int)((uint)Interlocked.Increment(ref plan.NextSpecializationMemo) % SpecializationMemoEntries);
+            Volatile.Write(ref memos[slot], new SpecializationMemo
+            {
+                KeyImages = keyImages,
+                KeySamplers = keySamplers,
+                KeyBuffers = keyBuffers,
+                Images = nextSnapshot.Images,
+                Samplers = nextSnapshot.Samplers,
+                Specialization = nextSpecialization,
+            });
+        }
+
+        snapshot = new ResourceSnapshot
+        {
+            Buffers = nextSnapshot.Buffers,
+            Images = nextSnapshot.Images,
+            Samplers = nextSnapshot.Samplers,
+            FlattenedResourceTable = nextSnapshot.FlattenedTable,
+            UserData = nextSnapshot.UserData,
+            DeviceAddressRanges = ranges,
+            Origin = new FastOrigin(plan, inputs),
+        };
+        specialization = nextSpecialization;
+        failure = ResourceMaterializationFailure.None;
+        return true;
+    }
+
+    private static bool MatchesMemo(SpecializationMemo memo, MaterializedSnapshot snapshot, out bool statisticsDiffer)
+    {
+        statisticsDiffer = false;
+        if (memo.KeyImages.Length != snapshot.Images.Length || memo.KeySamplers.Length != snapshot.Samplers.Length ||
+            memo.KeyBuffers.Length != snapshot.Buffers.Length * 2)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < snapshot.Buffers.Length; index++)
+        {
+            var words = snapshot.Buffers[index];
+            if (words.Length != 4 || words[1] >> 16 != memo.KeyBuffers[index * 2] || words[3] != memo.KeyBuffers[index * 2 + 1])
+            {
+                return false;
+            }
+        }
+
+        for (var index = 0; index < snapshot.Samplers.Length; index++)
+        {
+            if (!snapshot.Samplers[index].AsSpan().SequenceEqual(memo.KeySamplers[index]))
+            {
+                return false;
+            }
+        }
+
+        for (var index = 0; index < snapshot.Images.Length; index++)
+        {
+            var current = snapshot.Images[index];
+            var key = memo.KeyImages[index];
+            if (current.Length != key.Length)
+            {
+                return false;
+            }
+
+            for (var word = 0; word < current.Length; word++)
+            {
+                if (current[word] == key[word])
+                {
+                    continue;
+                }
+
+                var mask = word == 5 ? ResourceSnapshot.MipStatisticsEnableWordMask : word == 6 ? ResourceSnapshot.MipStatisticsSlotWordMask : 0u;
+                if (((current[word] ^ key[word]) & ~mask) != 0)
+                {
+                    return false;
+                }
+
+                statisticsDiffer = true;
+            }
+        }
+
         return true;
     }
 

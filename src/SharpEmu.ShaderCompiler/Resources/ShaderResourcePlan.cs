@@ -72,6 +72,9 @@ public sealed class ShaderResourcePlan
         return Interlocked.CompareExchange(ref _materializationProgram, built, null) ?? built;
     }
 
+    internal object?[]? SpecializationMemos;
+    internal int NextSpecializationMemo;
+
     internal CompiledResourceEvaluator? CompiledEvaluator
     {
         get

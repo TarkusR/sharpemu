@@ -141,6 +141,7 @@ internal sealed class ProgramSourceEntry
     public EmbeddedVertexFetchPlan? EmbeddedFetch { get; init; }
     public ShaderVertexInput[] VertexInputs { get; init; } = [];
     public List<ProgramPermutation> Permutations { get; } = new(8);
+    public ProgramPermutation? LastPermutation;
 }
 
 // Programs keyed by identity and static state; each draw materializes its resources and reuses
@@ -173,7 +174,8 @@ internal sealed class ShaderProgramCache
         MaterializationCacheEnabled ? _threadMaterializations ??= new ResourceMaterializationCache(limitChurn: true) : null;
 
     public bool Revalidate(in ShaderStageResources stage) =>
-        stage.Program is not null && Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes);
+        stage.Program is not null && (ResourceMaterializer.RevalidateFast(stage.Resources) ??
+            (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes)));
 
     // Read once: the draw path asked the environment on every draw and dispatch
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
@@ -389,11 +391,14 @@ internal sealed class ShaderProgramCache
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.
-            var materialized = Materializations is { } materializations && captureIndirectImageFailure is null
-                ? materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
-                    out var materializationFailure)
-                : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
-                    captureIndirectImageFailure);
+            ResourceMaterializationFailure materializationFailure;
+            var materialized = captureIndirectImageFailure is null && ResourceMaterializer.CanMaterializeFast(entry.Plan)
+                ? ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure)
+                : Materializations is { } materializations && captureIndirectImageFailure is null
+                    ? materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
+                        out materializationFailure)
+                    : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                        captureIndirectImageFailure);
             if (!materialized)
             {
                 var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
@@ -445,6 +450,15 @@ internal sealed class ShaderProgramCache
             }
         }
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
+
+        if (Volatile.Read(ref entry.LastPermutation) is { } last && ReferenceEquals(last.Specialization, specialization) &&
+            last.Bindings.PushDataStartDword == PushData.StartFor(pushDataCursor, last.Bindings.ShaderDataDwordCount))
+        {
+            stage = CreateStageResources(last.Program, snapshot, source, options);
+            last.Bindings.AdvancePushData(ref pushDataCursor);
+            return last.Handle;
+        }
+
         lock (_gate)
         {
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
@@ -454,6 +468,11 @@ internal sealed class ShaderProgramCache
                     var layout = candidate.Bindings;
                     if (layout.PushDataStartDword == PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount) && candidate.Specialization.Equals(specialization))
                     {
+                        if (ReferenceEquals(candidate.Specialization, specialization))
+                        {
+                            Volatile.Write(ref entry.LastPermutation, candidate);
+                        }
+
                         stage = CreateStageResources(candidate.Program, snapshot, source, options);
                         layout.AdvancePushData(ref pushDataCursor);
                         if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -468,6 +487,10 @@ internal sealed class ShaderProgramCache
 
             var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? KeyFor(source, options), sourceWasCached, snapshot);
             entry.Permutations.Add(permutation);
+            if (ReferenceEquals(permutation.Specialization, specialization))
+            {
+                Volatile.Write(ref entry.LastPermutation, permutation);
+            }
             ShaderCacheCounters.CountPermutation();
             stage = CreateStageResources(permutation.Program, snapshot, source, options);
             permutation.Bindings.AdvancePushData(ref pushDataCursor);
