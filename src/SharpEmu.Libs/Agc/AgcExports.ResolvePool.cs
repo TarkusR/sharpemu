@@ -279,7 +279,7 @@ public static partial class AgcExports
                 }
             }
 
-            private const int SpillQueueLength = 8;
+            private const int SpillQueueLength = 32;
 
             // One shader pair keeps one worker while that worker keeps up; a run of its draws spills to
             // the least loaded worker rather than wait in line.
