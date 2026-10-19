@@ -679,7 +679,12 @@ internal static partial class VulkanVideoPresenter
                         return ran;
                     }
 
-                    if (FlushCutting())
+                    if (_presenter.SlicesEnabled && _cutting.Items.Count >= 2 * RestChunkItems)
+                    {
+                        SplitTail();
+                        Presenter.NoteTail(_producerState);
+                    }
+                    else if (FlushCutting())
                     {
                         _units[^1].Slice!.Origin = 1;
                         Presenter.NoteTail(_producerState);
@@ -785,6 +790,23 @@ internal static partial class VulkanVideoPresenter
 
             Interlocked.Add(ref _serialItems, slice.Items.Count);
             return false;
+        }
+
+        private void SplitTail()
+        {
+            var tail = _cutting!;
+            _cutting = null;
+            var chunks = (tail.Items.Count + RestChunkItems - 1) / RestChunkItems;
+            var start = 0;
+            for (var chunk = 0; chunk < chunks; chunk++)
+            {
+                var end = (int)((long)tail.Items.Count * (chunk + 1) / chunks);
+                var part = new RenderSlice { Origin = 1 };
+                part.Items.AddRange(tail.Items.GetRange(start, end - start));
+                _units.Add(new Unit { Slice = part });
+                _presenter.DispatchSlice(part, urgent: true);
+                start = end;
+            }
         }
 
         private void CloseSlice()
