@@ -68,6 +68,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         uint IShaderPipelineHost.MaxPushDescriptors => _maxPushDescriptors;
 
+        bool IShaderPipelineHost.TableBlocks => true;
+
         // Wave64 compute runs natively when the device's subgroup is that wide; smaller devices emulate it.
         bool IShaderPipelineHost.ComputeWave64SubgroupNative =>
             Volatile.Read(ref _nativeSubgroupSize) >= 64 && (_canRequireComputeSubgroup64 || Volatile.Read(ref _nativeSubgroupSize) == 64);

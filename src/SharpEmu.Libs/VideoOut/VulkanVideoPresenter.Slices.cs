@@ -61,7 +61,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
     internal static string TakeSliceReport() =>
         FormattableString.Invariant($"[PERF][SLICES] slices={Interlocked.Exchange(ref _slicesRecorded, 0)} segments={Interlocked.Exchange(ref _segmentsRecorded, 0)} empty={Interlocked.Exchange(ref _segmentsEmpty, 0)} uses_shared={Interlocked.Exchange(ref _usesShared, 0)} attachments_kept={RecordingHost.TakeAttachmentsKept()} ") +
-        SharpEmu.Libs.Gpu.Rendering.RenderRecorder.TakeInPlaceReport() + FormattableString.Invariant($" textures_kept={RecordingHost.TakeTexturesKept()} ") +
+        SharpEmu.Libs.Gpu.Rendering.RenderRecorder.TakeInPlaceReport() + FormattableString.Invariant($" textures_kept={RecordingHost.TakeTexturesKept()} ") + RecordingHost.TakeTableReport() +
         FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)} ") +
         FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
         FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
@@ -771,13 +771,13 @@ internal static unsafe partial class VulkanVideoPresenter
             return _buffers.TryFind(address, size, out _, out var identifier) ? identifier : throw Serial("buffer lookup", resumable: true);
         }
 
-        private (VkBuffer Buffer, ulong Offset) ObtainBufferForSlice(ulong address, ulong size, bool isWritten, bool isTexelBuffer, bool invalidateImages = false)
+        private (GpuBuffer Buffer, ulong Offset) ObtainBufferForSlice(ulong address, ulong size, bool isWritten, bool isTexelBuffer, bool invalidateImages = false)
         {
             var (buffer, offset, _) = ObtainBufferRangeForSlice(address, size, isWritten, isTexelBuffer, invalidateImages);
             return (buffer, offset);
         }
 
-        private (VkBuffer Buffer, ulong Offset, ulong Available) ObtainBufferRangeForSlice(ulong address, ulong size, bool isWritten, bool isTexelBuffer,
+        private (GpuBuffer Buffer, ulong Offset, ulong Available) ObtainBufferRangeForSlice(ulong address, ulong size, bool isWritten, bool isTexelBuffer,
             bool invalidateImages = false)
         {
             if (address == 0 || size == 0)
@@ -805,7 +805,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         _arena.Commit(in reservation);
                         Interlocked.Increment(ref _streamCopies);
-                        return (reservation.Buffer, reservation.Offset, (size + 3) & ~3UL);
+                        return (reservation.Chunk.Buffer, reservation.Offset, (size + 3) & ~3UL);
                     }
                 }
             }
@@ -816,7 +816,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             Requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
-            return (buffer.Handle, buffer.Offset(address), buffer.Size - buffer.Offset(address));
+            return (buffer, buffer.Offset(address), buffer.Size - buffer.Offset(address));
         }
 
         private void CompleteOverlappingPublications(ulong address, ulong size, bool includeLabels = true)

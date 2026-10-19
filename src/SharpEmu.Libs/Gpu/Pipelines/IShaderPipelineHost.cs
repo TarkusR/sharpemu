@@ -58,6 +58,8 @@ internal interface IShaderPipelineHost
 
     bool MipStatisticsSubgroupReduction => false;
 
+    bool TableBlocks => false;
+
     bool GraphicsSubgroupOperationsEnabled { get; }
 
     // The device supports shaderSharedInt64Atomics, so LDS 64-bit atomics can be

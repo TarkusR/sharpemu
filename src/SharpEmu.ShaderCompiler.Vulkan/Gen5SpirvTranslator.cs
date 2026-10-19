@@ -8002,13 +8002,8 @@ public static partial class Gen5SpirvTranslator
                 UInt(0));
         }
 
-        private uint ApplyGuestBufferByteBias(int binding, uint byteAddress)
-        {
-            {
-                // The packed memory-offset byte of this buffer, loaded at entry.
-                return IAdd(byteAddress, Load(_uintType, RuntimeBufferBiasPointer(binding)));
-            }
-        }
+        private uint ApplyGuestBufferByteBias(int binding, uint byteAddress) =>
+            IAdd(byteAddress, Load(_uintType, RuntimeBufferBiasPointer(binding)));
 
         private void StoreBufferWord(int binding, uint dwordAddress, uint value)
         {
@@ -8019,6 +8014,11 @@ public static partial class Gen5SpirvTranslator
 
         private uint IsBufferWordInRange(int binding, uint dwordAddress)
         {
+            if (_request.Bindings.UsesTableBlock)
+            {
+                return _module.AddInstruction(SpirvOp.ULessThan, _boolType, dwordAddress, TableBufferLength(binding));
+            }
+
             var buffer = _module.AddInstruction(
                 SpirvOp.AccessChain,
                 _storageBlockPointer,
@@ -8037,6 +8037,7 @@ public static partial class Gen5SpirvTranslator
         }
 
         private uint BufferWordPointer(int binding, uint dwordAddress) =>
+            _request.Bindings.UsesTableBlock ? TableBufferWordPointer(binding, dwordAddress) :
             _module.AddInstruction(
                 SpirvOp.AccessChain,
                 _storageUintPointer,
@@ -8474,7 +8475,9 @@ public static partial class Gen5SpirvTranslator
                     UInt(0));
             }
 
-            return _module.AddInstruction(SpirvOp.Load, type, pointer);
+            return _physicalPointers.Contains(pointer)
+                ? _module.AddInstruction(SpirvOp.Load, type, pointer, 2u, 4u)
+                : _module.AddInstruction(SpirvOp.Load, type, pointer);
         }
 
         private void Store(uint pointer, uint value)
@@ -8487,6 +8490,12 @@ public static partial class Gen5SpirvTranslator
                     value,
                     UInt(1),
                     UInt(0));
+            }
+
+            if (_physicalPointers.Contains(pointer))
+            {
+                _module.AddStatement(SpirvOp.Store, pointer, value, 2u, 4u);
+                return;
             }
 
             _module.AddStatement(SpirvOp.Store, pointer, value);

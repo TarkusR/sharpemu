@@ -251,6 +251,27 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             meshDrawParameters.CopyTo(shaderData, (int)layout.MeshDrawParametersDword);
         }
 
+        if (layout.UsesTableBlock)
+        {
+            var bound = boundBuffers.TryGetValue(DescriptorBindingKind.Buffers, out var tableBuffers) ? tableBuffers : [];
+            var table = flattenedTable ?? [];
+            var block = new uint[layout.TableFlattenedDword + table.Length];
+            block[0] = (uint)table.Length;
+            for (var index = 0; index < layout.BufferCount; index++)
+            {
+                var buffer = index < bound.Length ? bound[index] : CreateBuffer(16);
+                var record = (int)(BindingLayout.TableBlockHeaderDwords + (uint)index * BindingLayout.TableBufferDwords);
+                block[record] = (uint)buffer.DeviceAddress;
+                block[record + 1] = (uint)(buffer.DeviceAddress >> 32);
+                block[record + 2] = (uint)(buffer.Size >> 2);
+            }
+
+            table.CopyTo(block, (int)layout.TableFlattenedDword);
+            var blockAddress = CreateBuffer(MemoryMarshal.AsBytes<uint>(block)).DeviceAddress;
+            shaderData[layout.TableBlockDword] = (uint)blockAddress;
+            shaderData[layout.TableBlockDword + 1] = (uint)(blockAddress >> 32);
+        }
+
         var setLayout = _setLayout;
         var allocateInfo = new DescriptorSetAllocateInfo { SType = StructureType.DescriptorSetAllocateInfo, DescriptorPool = _pool, DescriptorSetCount = 1, PSetLayouts = &setLayout };
         Require(vk.AllocateDescriptorSets(device, &allocateInfo, out var set), "vkAllocateDescriptorSets");

@@ -743,7 +743,7 @@ internal sealed class ShaderProgramCache
             resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, source.UserDataBase, (uint)source.UserData.Length, pushDataCursor,
                 source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions,
-                usesMeshDrawParameters: source.Stage == ShaderStage.Mesh);
+                usesMeshDrawParameters: source.Stage == ShaderStage.Mesh, tableBlocks: _host.TableBlocks && source.Stage != ShaderStage.Mesh);
         }
         catch (ResourcePlanException exception)
         {
@@ -991,7 +991,8 @@ internal sealed class ShaderProgramCache
     }
 
     private static BindingLayout AllocateLayout(Gen5ShaderProgram program, ShaderResourcePlan plan, SpecializedResourceInfo resources,
-        uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits, bool usesMeshDrawParameters = false) =>
+        uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits, bool usesMeshDrawParameters = false,
+        bool tableBlocks = false) =>
         BindingLayout.Allocate(
             resources.Info,
             BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, plan.Graph.ExcludedUserDataRegisters),
@@ -1000,7 +1001,8 @@ internal sealed class ShaderProgramCache
             BindingLayout.ReadsShaderBase(program),
             pushDataCursor,
             usesDispatchThreadLimits: usesDispatchThreadLimits,
-            usesMeshDrawParameters: usesMeshDrawParameters);
+            usesMeshDrawParameters: usesMeshDrawParameters,
+            tableBlock: tableBlocks);
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
@@ -1028,7 +1030,7 @@ internal sealed class ShaderProgramCache
     internal static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
         bool sharedInt64Atomics, bool execGuardElision, bool signedZeroInfNanPreserve, out IGuestCompiledShader? compiled,
         out BindingLayout? layout, out string error, bool hostWave64Supported = false, bool hostComputeSubgroup32 = false,
-        bool imageInt64Atomics = false)
+        bool imageInt64Atomics = false, bool tableBlocks = false)
     {
         compiled = null;
         layout = null;
@@ -1043,7 +1045,7 @@ internal sealed class ShaderProgramCache
                 waveSize: record.Info.WaveSize);
             var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
-                record.Info.DispatchThreadDimensions);
+                record.Info.DispatchThreadDimensions, tableBlocks: tableBlocks);
             var request = BuildComputeRequest(plan, resources, layout, record.Info, record.SystemRegisters,
                 sharedInt64Atomics, execGuardElision, signedZeroInfNanPreserve, hostWave64Supported, hostComputeSubgroup32,
                 imageInt64Atomics);

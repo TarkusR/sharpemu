@@ -53,6 +53,8 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public MeshShaderLimits MeshLimits { get; set; }
     public uint MeshSubgroupSize { get; set; } = 32;
 
+    public bool TableBlocks { get; set; }
+
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);

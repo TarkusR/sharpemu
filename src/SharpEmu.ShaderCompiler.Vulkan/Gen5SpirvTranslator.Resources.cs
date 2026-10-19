@@ -108,6 +108,12 @@ public static partial class Gen5SpirvTranslator
         private uint _samplerPointer;
         private uint _storageUlongPointer;
         private uint _physicalUintPointer;
+        private uint _privateUlongPointer;
+        private uint _tableBlock;
+        private uint _tableBufferBases;
+        private uint _tableBufferLengths;
+        private uint _tableFlattenedLength;
+        private readonly HashSet<uint> _physicalPointers = [];
         private uint _deviceEntryScratch;
         private uint _deviceWordScratch;
         private uint _deviceBufferWordScratch;
@@ -279,12 +285,35 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_runtimeBufferBiases);
             }
 
-            if (info.UsesDeviceAddresses || _stage == Gen5SpirvStage.Mesh)
+            if (info.UsesDeviceAddresses || _stage == Gen5SpirvStage.Mesh || layout.UsesTableBlock)
             {
                 _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
                 _module.SetPhysicalStorageBuffer64MemoryModel();
                 _physicalUintPointer = _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _uintType);
             }
+
+            if (layout.UsesTableBlock)
+            {
+                _privateUlongPointer = _module.TypePointer(SpirvStorageClass.Private, _ulongType);
+                _tableBlock = _module.AddGlobalVariable(_privateUlongPointer, SpirvStorageClass.Private, ULong(0));
+                _module.AddName(_tableBlock, "tableBlock");
+                _interfaces.Add(_tableBlock);
+                _tableFlattenedLength = DeclareFunctionUint(UInt(0));
+                _module.AddName(_tableFlattenedLength, "tableFlattenedLength");
+                if (info.Buffers.Count != 0)
+                {
+                    var count = (uint)info.Buffers.Count;
+                    var baseArray = _module.TypeArray(_ulongType, count);
+                    _tableBufferBases = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.Private, baseArray), SpirvStorageClass.Private, _module.ConstantNull(baseArray));
+                    _module.AddName(_tableBufferBases, "tableBufferBases");
+                    _interfaces.Add(_tableBufferBases);
+                    var lengthArray = _module.TypeArray(_uintType, count);
+                    _tableBufferLengths = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.Private, lengthArray), SpirvStorageClass.Private, _module.ConstantNull(lengthArray));
+                    _module.AddName(_tableBufferLengths, "tableBufferLengths");
+                    _interfaces.Add(_tableBufferLengths);
+                }
+            }
+
             if (info.UsesDeviceAddresses)
             {
                 var privateUlongPointer = _module.TypePointer(SpirvStorageClass.Private, _ulongType);
@@ -496,7 +525,45 @@ public static partial class Gen5SpirvTranslator
                 var bias = BitwiseAnd(ShiftRightLogical(packed, UInt((buffer % 4) * 8)), UInt(0xFF));
                 Store(RuntimeBufferBiasPointer((int)buffer), bias);
             }
+
+            if (layout.UsesTableBlock)
+            {
+                Store(_tableBlock, Pair64(LoadShaderDataDword(UInt(layout.TableBlockDword)), LoadShaderDataDword(UInt(layout.TableBlockDword + 1))));
+                if (layout.UsesFlattenedTable)
+                {
+                    Store(_tableFlattenedLength, LoadTableWord(UInt(0)));
+                }
+
+                for (uint buffer = 0; buffer < layout.BufferCount; buffer++)
+                {
+                    var record = BindingLayout.TableBlockHeaderDwords + buffer * BindingLayout.TableBufferDwords;
+                    Store(TableBufferBasePointer((int)buffer), Pair64(LoadTableWord(UInt(record)), LoadTableWord(UInt(record + 1))));
+                    Store(TableBufferLengthPointer((int)buffer), LoadTableWord(UInt(record + 2)));
+                    Store(RuntimeBufferBiasPointer((int)buffer), LoadTableWord(UInt(record + 3)));
+                }
+            }
         }
+
+        private uint PhysicalWordPointer(uint baseAddress, uint dwordIndex)
+        {
+            var pointer = _module.AddInstruction(SpirvOp.ConvertUToPtr, _physicalUintPointer,
+                IAdd64(baseAddress, Widen(ShiftLeftLogical(dwordIndex, UInt(2)))));
+            _physicalPointers.Add(pointer);
+            return pointer;
+        }
+
+        private uint LoadTableWord(uint dwordIndex) => Load(_uintType, PhysicalWordPointer(Load(_ulongType, _tableBlock), dwordIndex));
+
+        private uint TableBufferBasePointer(int binding) =>
+            _module.AddInstruction(SpirvOp.AccessChain, _privateUlongPointer, _tableBufferBases, UInt((uint)binding));
+
+        private uint TableBufferLengthPointer(int binding) =>
+            _module.AddInstruction(SpirvOp.AccessChain, _privateUintPointer, _tableBufferLengths, UInt((uint)binding));
+
+        private uint TableBufferWordPointer(int binding, uint dwordAddress) =>
+            PhysicalWordPointer(Load(_ulongType, TableBufferBasePointer(binding)), dwordAddress);
+
+        private uint TableBufferLength(int binding) => Load(_uintType, TableBufferLengthPointer(binding));
 
         private uint LoadShaderDataDword(uint dwordIndex)
         {
@@ -555,15 +622,26 @@ public static partial class Gen5SpirvTranslator
             return _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0);
         }
 
-        private uint LoadFlattenedWord(uint slot) => LoadBlockWord(_flattenedTable, slot);
+        private uint LoadFlattenedWord(uint slot)
+        {
+            if (!_request.Bindings.UsesTableBlock)
+            {
+                return LoadBlockWord(_flattenedTable, slot);
+            }
+
+            var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, slot, Load(_uintType, _tableFlattenedLength));
+            var safeSlot = _module.AddInstruction(SpirvOp.Select, _uintType, inRange, slot, UInt(0));
+            var value = LoadTableWord(IAdd(UInt(_request.Bindings.TableFlattenedDword), safeSlot));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, inRange, value, UInt(0));
+        }
 
         // A planned slot is inside the table the host binds, so its load skips the runtime bounds
         // check. Large shaders make hundreds of these reads, and every check costs the Metal
         // compiler time (one large pixel shader made about 376 of them).
         private uint LoadFlattenedSlot(uint slot) =>
-            slot < _request.FlattenedTableReservedWords
-                ? Load(_uintType, BlockWordPointer(_flattenedTable, UInt(slot)))
-                : LoadFlattenedWord(UInt(slot));
+            slot >= _request.FlattenedTableReservedWords ? LoadFlattenedWord(UInt(slot))
+            : _request.Bindings.UsesTableBlock ? LoadTableWord(UInt(_request.Bindings.TableFlattenedDword + slot))
+            : Load(_uintType, BlockWordPointer(_flattenedTable, UInt(slot)));
 
         // The shader base the host pushes for this draw, as two dwords.
         private (uint Low, uint High) LoadShaderBase()
@@ -1617,7 +1695,7 @@ public static partial class Gen5SpirvTranslator
             return false;
         }
 
-        private bool HasFlattenedTable => _flattenedTable != 0;
+        private bool HasFlattenedTable => _flattenedTable != 0 || _request.Bindings is { UsesTableBlock: true, UsesFlattenedTable: true };
 
         // Resolves the image an instruction reads through its class array, joined with
         // its sampler for sampling operations.

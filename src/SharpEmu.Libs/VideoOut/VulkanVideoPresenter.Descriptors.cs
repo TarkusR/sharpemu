@@ -1144,10 +1144,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"A storage buffer range or the device alignment is unsupported: buffer={slot} size=0x{size:X} alignment={alignment} hash=0x{program.Hash:X16}.");
             }
 
-            var (bufferHandle, offset, available) = _worker
-                ? ObtainBufferRangeForSlice(address, size, resource.Written, resource.Formatted, invalidateImages: resource.Formatted && resource.Written)
-                : (_bufferCache.ObtainBuffer(address, size, resource.Written, isTexelBuffer: resource.Formatted, bufferIdentifier, program.Hash) is var obtained
-                    ? (obtained.Buffer.Handle, obtained.Offset, obtained.Buffer.Size - obtained.Offset) : default);
+            var (buffer, offset, available) = ObtainStorageBuffer(address, size, resource, bufferIdentifier, program.Hash);
+            var bufferHandle = buffer.Handle;
             _presenter.TraceBufferParameter(program.Hash, slot, address, size, bufferHandle.Handle, offset, resource.Written);
             var alignedOffset = offset - offset % alignment;
             // The shader adds the adjustment to its byte address, so a base that is only two byte aligned
@@ -1159,6 +1157,17 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             memoryOffset = (uint)adjustment;
+            return new BufferView(bufferHandle, alignedOffset,
+                StorageBufferViewRange(size + adjustment, available + adjustment, maxRange));
+        }
+
+        private (GpuBuffer Buffer, ulong Offset, ulong Available) ObtainStorageBuffer(ulong address, ulong size, BufferResource resource,
+            ResourceSlotIdentifier bufferIdentifier, ulong programHash)
+        {
+            var obtained = _worker
+                ? ObtainBufferRangeForSlice(address, size, resource.Written, resource.Formatted, invalidateImages: resource.Formatted && resource.Written)
+                : (_bufferCache.ObtainBuffer(address, size, resource.Written, isTexelBuffer: resource.Formatted, bufferIdentifier, programHash) is var found
+                    ? (found.Buffer, found.Offset, found.Buffer.Size - found.Offset) : default);
             // The images a raw write covers in part, and all images under a formatted write, were published
             // when the stage was prepared (FindBuffers).
             if (!_worker && resource.Written && resource.Formatted)
@@ -1170,9 +1179,101 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.InvalidateMemoryCopiesFromGpu(address, size);
             }
 
-            return new BufferView(bufferHandle, alignedOffset,
-                StorageBufferViewRange(size + adjustment, available + adjustment, maxRange));
+            return obtained;
         }
+
+        private uint[] _tableBlockWords = new uint[64];
+        private static long _tableBlocks;
+        private static long _descriptorsShadowed;
+
+        internal static string TakeTableReport() =>
+            FormattableString.Invariant($"table_blocks={Interlocked.Exchange(ref _tableBlocks, 0)} descriptors_shadowed={Interlocked.Exchange(ref _descriptorsShadowed, 0)} ");
+
+        private ulong NullBufferAddress => _nullBufferAddress != 0 ? _nullBufferAddress : _nullBufferAddress = _bufferCache.GetBuffer(GuestBufferCache.NullBufferId).DeviceAddress;
+
+        private ulong _nullBufferAddress;
+
+        private void WriteTableBlock(PreparedStageBindings prepared, uint[] shaderData)
+        {
+            var program = prepared.Program;
+            var layout = prepared.Layout;
+            var info = prepared.Resources.Info;
+            var flattened = layout.UsesFlattenedTable ? prepared.Stage.Resources.FlattenedResourceTable : [];
+            var length = (int)layout.TableFlattenedDword + flattened.Length;
+            if (_tableBlockWords.Length < length)
+            {
+                _tableBlockWords = new uint[Math.Max(length, _tableBlockWords.Length * 2)];
+            }
+
+            var words = _tableBlockWords.AsSpan(0, length);
+            words[0] = (uint)flattened.Length;
+            for (var index = 0; index < info.Buffers.Count; index++)
+            {
+                var (descriptor, bufferIdentifier, size) = prepared.BufferSources[index];
+                var record = (int)(BindingLayout.TableBlockHeaderDwords + (uint)index * BindingLayout.TableBufferDwords);
+                var address = NullBufferAddress;
+                var dwords = 0u;
+                var bias = 0u;
+                if (descriptor.Address != 0 && size != 0)
+                {
+                    var (buffer, offset, available) = ObtainStorageBuffer(descriptor.Address, size, info.Buffers[index], bufferIdentifier, program.Hash);
+                    _presenter.TraceBufferParameter(program.Hash, index, descriptor.Address, size, buffer.Handle.Handle, offset, info.Buffers[index].Written);
+                    var exact = buffer.DeviceAddress + offset;
+                    bias = (uint)(exact % sizeof(uint));
+                    address = exact - bias;
+                    var bytes = StorageBufferViewRange(size + bias, available + bias, ulong.MaxValue);
+                    if (bytes >> 2 > uint.MaxValue)
+                    {
+                        throw SubmissionScheduler.Fatal($"A table buffer size is unsupported: buffer={index} address=0x{exact:X} size=0x{size:X} hash=0x{program.Hash:X16}.");
+                    }
+
+                    dwords = (uint)(bytes >> 2);
+                }
+
+                words[record] = (uint)address;
+                words[record + 1] = (uint)(address >> 32);
+                words[record + 2] = dwords;
+                words[record + 3] = bias;
+            }
+
+            flattened.CopyTo(words[(int)layout.TableFlattenedDword..]);
+            Interlocked.Increment(ref _tableBlocks);
+            var block = UploadTableBlock(System.Runtime.InteropServices.MemoryMarshal.AsBytes(words), program);
+            shaderData[layout.TableBlockDword] = (uint)block;
+            shaderData[layout.TableBlockDword + 1] = (uint)(block >> 32);
+        }
+
+        private ulong UploadTableBlock(ReadOnlySpan<byte> bytes, ShaderProgramInfo program)
+        {
+            if (_worker)
+            {
+                if (!_arena!.TryReserve((ulong)bytes.Length, TableBlockAlignment, out var reservation))
+                {
+                    throw Serial("arena", resumable: true);
+                }
+
+                bytes.CopyTo(reservation.Destination);
+                _arena.Commit(in reservation);
+                return reservation.Chunk.Buffer.DeviceAddress + reservation.Offset;
+            }
+
+            if (_contentUploads is { } arena && arena.TryUploadAddress(bytes, TableBlockAlignment, out var address))
+            {
+                return address;
+            }
+
+            var stream = _bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream);
+            if (stream.TryMap((ulong)bytes.Length, out var offset, TableBlockAlignment))
+            {
+                bytes.CopyTo(stream.Mapped[(int)offset..]);
+                stream.Commit();
+                return stream.DeviceAddress + offset;
+            }
+
+            throw SubmissionScheduler.Fatal($"No upload ring could take a table block: bytes={bytes.Length} hash=0x{program.Hash:X16}.");
+        }
+
+        private const uint TableBlockAlignment = 16;
 
         private BufferView UploadDwords(uint[] data, string label, ShaderProgramInfo program, bool byIdentity)
         {
@@ -1205,25 +1306,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The prepared bindings are stale: hash=0x{program.Hash:X16}.");
             }
 
-            // Reset only packed buffer offsets; dispatch limits follow them in shader data.
-            Array.Clear(shaderData, (int)layout.MemoryOffsetDword, (int)((layout.MemoryOffsetCount + 3) / 4));
-            var views = prepared.Descriptors.Buffers;
-            if (views.Length != info.Buffers.Count)
+            if (layout.UsesTableBlock)
             {
-                Scratch.Buffers.Return(views);
-                views = Scratch.Buffers.Rent(info.Buffers.Count);
-                prepared.Descriptors.Buffers = views;
+                WriteTableBlock(prepared, shaderData);
             }
-            for (var index = 0; index < views.Length; index++)
+            else
             {
-                var (descriptor, bufferIdentifier, mappedSize) = prepared.BufferSources[index];
-                views[index] = BindStorageBuffer(in descriptor, info.Buffers[index], program, index, bufferIdentifier, mappedSize, out var memoryOffset);
-                var dword = layout.MemoryOffsetDword + (uint)index / 4;
-                var shift = ((uint)index % 4) * 8;
-                shaderData[dword] |= memoryOffset << (int)shift;
+                BindBufferViews(prepared, shaderData);
             }
 
-            prepared.Descriptors.Buffers = views;
             if (layout.MipStatisticsCount != 0)
             {
                 if (_worker && _presenter._lodStatistics is null)
@@ -1244,6 +1335,32 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 prepared.Descriptors.ShaderData = UploadDwords(shaderData, "shader data", program, byIdentity: false);
             }
+        }
+
+        private void BindBufferViews(PreparedStageBindings prepared, uint[] shaderData)
+        {
+            var program = prepared.Program;
+            var layout = prepared.Layout;
+            var info = prepared.Resources.Info;
+            // Reset only packed buffer offsets; dispatch limits follow them in shader data.
+            Array.Clear(shaderData, (int)layout.MemoryOffsetDword, (int)((layout.MemoryOffsetCount + 3) / 4));
+            var views = prepared.Descriptors.Buffers;
+            if (views.Length != info.Buffers.Count)
+            {
+                Scratch.Buffers.Return(views);
+                views = Scratch.Buffers.Rent(info.Buffers.Count);
+                prepared.Descriptors.Buffers = views;
+            }
+            for (var index = 0; index < views.Length; index++)
+            {
+                var (descriptor, bufferIdentifier, mappedSize) = prepared.BufferSources[index];
+                views[index] = BindStorageBuffer(in descriptor, info.Buffers[index], program, index, bufferIdentifier, mappedSize, out var memoryOffset);
+                var dword = layout.MemoryOffsetDword + (uint)index / 4;
+                var shift = ((uint)index % 4) * 8;
+                shaderData[dword] |= memoryOffset << (int)shift;
+            }
+
+            prepared.Descriptors.Buffers = views;
         }
 
         // Device-address reads need persistent page-table entries before the shader runs.
@@ -1768,7 +1885,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     PushConstantsShadowed(command, entry.Layout, pushStages, pushData);
                 }
 
-                if (writeIndex != 0 && !DescriptorsAlreadyBound(command, bindPoint, entry.Layout, writes[..writeIndex]))
+                if (writeIndex != 0 && DescriptorsAlreadyBound(command, bindPoint, entry.Layout, writes[..writeIndex]))
+                {
+                    Interlocked.Increment(ref _descriptorsShadowed);
+                }
+                else if (writeIndex != 0)
                 {
                     fixed (WriteDescriptorSet* writePointer = writes)
                     {

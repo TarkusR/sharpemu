@@ -119,6 +119,26 @@ public sealed class ContentUploadArena : IDisposable
         return true;
     }
 
+    public bool TryUploadAddress(ReadOnlySpan<byte> data, ulong alignment, out ulong address)
+    {
+        address = 0;
+        if (!TryUpload(data, alignment, out var buffer, out var offset))
+        {
+            return false;
+        }
+
+        foreach (var arena in _arenas)
+        {
+            if (arena.Buffer.Handle.Handle == buffer.Handle)
+            {
+                address = arena.Buffer.DeviceAddress + offset;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private bool TryStore(ReadOnlySpan<byte> data, ulong alignment, ulong tick, out Arena stored, out VkBuffer buffer, out ulong offset)
     {
         var active = _arenas[_active];

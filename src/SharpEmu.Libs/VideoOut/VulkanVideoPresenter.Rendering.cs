@@ -482,7 +482,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_worker)
             {
                 var (sliceBuffer, sliceOffset) = ObtainBufferForSlice(address, size, isWritten, isTexelBuffer: false);
-                return new BufferBinding(sliceBuffer.Handle, sliceOffset);
+                return new BufferBinding(sliceBuffer.Handle.Handle, sliceOffset);
             }
 
             var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, isWritten);
@@ -1430,9 +1430,10 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool TryDispatchIndirect(ulong argumentsAddress)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
-            var (buffer, offset) = _worker
+            var (obtainedBuffer, offset) = _worker
                 ? ObtainBufferForSlice(argumentsAddress, 3u * sizeof(uint), isWritten: false, isTexelBuffer: false)
-                : (_bufferCache.ObtainBuffer(argumentsAddress, 3u * sizeof(uint), false) is var obtained ? (obtained.Buffer.Handle, obtained.Offset) : default);
+                : _bufferCache.ObtainBuffer(argumentsAddress, 3u * sizeof(uint), false);
+            var buffer = obtainedBuffer.Handle;
             var command = BeginBatchedGuestCommands();
             var barrier = new BufferMemoryBarrier2
             {

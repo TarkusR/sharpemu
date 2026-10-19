@@ -202,7 +202,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _supportsShaderSignedZeroInfNanPreserveFloat32, out var compiled, out var layout, out var error,
                     ((IShaderPipelineHost)this).ComputeWave64SubgroupNative,
                     ((IShaderPipelineHost)this).ComputeRunsOn32LaneSubgroups(record.Info),
-                    ImageInt64AtomicsEnabled))
+                    ImageInt64AtomicsEnabled, tableBlocks: ((IShaderPipelineHost)this).TableBlocks))
             {
                 NoteShaderPrewarmFailure(record, error);
                 return false;
