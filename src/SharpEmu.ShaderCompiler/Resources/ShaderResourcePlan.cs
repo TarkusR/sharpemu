@@ -55,6 +55,23 @@ public sealed class ShaderResourcePlan
     internal ResourceMaterializer.SpecializationGuard? SpecializationGuard;
     private int _compiledEvaluatorState;
 
+    private sealed record ProgramBox(MaterializationProgram? Program, string Ineligibility);
+
+    private ProgramBox? _materializationProgram;
+
+    internal MaterializationProgram? MaterializationProgram =>
+        (Volatile.Read(ref _materializationProgram) ?? InitializeMaterializationProgram()).Program;
+
+    internal string MaterializationProgramIneligibility =>
+        (Volatile.Read(ref _materializationProgram) ?? InitializeMaterializationProgram()).Ineligibility;
+
+    private ProgramBox InitializeMaterializationProgram()
+    {
+        var program = Resources.MaterializationProgram.Build(this, out var reason);
+        var built = new ProgramBox(program, reason);
+        return Interlocked.CompareExchange(ref _materializationProgram, built, null) ?? built;
+    }
+
     internal CompiledResourceEvaluator? CompiledEvaluator
     {
         get

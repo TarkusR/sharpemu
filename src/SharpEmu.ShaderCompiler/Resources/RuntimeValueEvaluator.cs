@@ -580,6 +580,12 @@ public sealed class RuntimeValueEvaluator
 
     internal static bool HasResourceStructure(ShaderResourcePlan plan) =>
         plan.ResourceBranches.Count != 0 || plan.IndirectImages.Count != 0 || plan.BufferCandidateTables.Count != 0;
+    internal static bool[] EvaluateActiveSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    {
+        using var cleanScratch = RuntimeEvaluationScratch.Rent();
+        var cleanEvaluator = new RuntimeValueEvaluator(cleanScratch, plan, inputs.WithReader(inputs.ReadCleanMemory));
+        return EvaluateActiveSources(plan, inputs, cleanEvaluator, cleanScratch);
+    }
 
     private static bool[] EvaluateActiveSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, RuntimeValueEvaluator cleanEvaluator,
         RuntimeEvaluationScratch scratch)

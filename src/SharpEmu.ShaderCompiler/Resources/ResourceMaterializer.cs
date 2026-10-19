@@ -77,7 +77,7 @@ public static partial class ResourceMaterializer
         Action<IndirectImageFailure>? captureIndirectImageFailure = null)
     {
         using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
-        if (!MaterializeSnapshot(plan, inputs, captureIndirectImageFailure is not null, out var materialized, out failure))
+        if (!MaterializeSnapshot(plan, inputs, captureIndirectImageFailure is not null, out var materialized, out var programRanges, out failure))
         {
             return false;
         }
@@ -85,7 +85,7 @@ public static partial class ResourceMaterializer
         // The written ranges follow the table reads so every store can check its own.
         DeviceAddressRange[] ranges;
         using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DeviceAddressRanges))
-            ranges = DeviceAddressRangePlanner.Evaluate(plan, inputs);
+            ranges = programRanges ?? DeviceAddressRangePlanner.Evaluate(plan, inputs);
         foreach (var range in ranges)
         {
             if (!plan.WrittenRangeSlotByHandle.TryGetValue(range.Handle, out var slot))
@@ -159,23 +159,70 @@ public static partial class ResourceMaterializer
 
     // ---- snapshot ----
 
+    internal static Action<ShaderResourcePlan, ResourceRuntimeInputs, List<DescriptorWords>, uint[], DeviceAddressRange[]>? ProgramCheck;
+
+    private static long _programRuns;
+    private static long _programFallbacks;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long[]> _programIneligible = new();
+
+    public static string TakeProgramReport()
+    {
+        var parts = new List<string>();
+        foreach (var (reason, count) in _programIneligible)
+        {
+            var taken = Interlocked.Exchange(ref count[0], 0);
+            if (taken != 0)
+            {
+                parts.Add(reason + ":" + taken.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+
+        return FormattableString.Invariant($"program_runs={Interlocked.Exchange(ref _programRuns, 0)} program_fallbacks={Interlocked.Exchange(ref _programFallbacks, 0)} ") +
+            "program_ineligible=" + string.Join(",", parts);
+    }
+
+    private static void NoteProgramIneligible(string reason) =>
+        Interlocked.Increment(ref _programIneligible.GetOrAdd(reason, static _ => new long[1])[0]);
+
     private static bool MaterializeSnapshot(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
-        bool captureSelectorDiagnostic, out MaterializedSnapshot snapshot, out ResourceMaterializationFailure failure)
+        bool captureSelectorDiagnostic, out MaterializedSnapshot snapshot, out DeviceAddressRange[]? ranges, out ResourceMaterializationFailure failure)
     {
         using var snapshotProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Snapshot);
         failure = ResourceMaterializationFailure.Other;
         snapshot = new MaterializedSnapshot();
+        ranges = null;
         if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
         {
             return false;
         }
 
-        if (!RuntimeValueEvaluator.EvaluateSources(plan, plan.MaterializationSources, inputs, plan.CleanFlatSlots,
-            evaluateTable: true, out var values, out var table, out var activeSources,
-            additionalTableWords: checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount)))
+        var additionalTableWords = checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount);
+        List<DescriptorWords> values;
+        uint[] table;
+        bool[] activeSources = [];
+        var program = inputs.TablePhase is null && !captureSelectorDiagnostic ? plan.MaterializationProgram : null;
+        if (program is not null && program.TryRun(plan, inputs, additionalTableWords, out values, out table, out var programRanges, out activeSources))
         {
-            SpecializationFailed(DiagnoseSnapshotEvaluationFailure(plan, inputs, activeSources));
-            return false;
+            Interlocked.Increment(ref _programRuns);
+            ProgramCheck?.Invoke(plan, inputs, values, table, programRanges);
+            ranges = programRanges;
+        }
+        else
+        {
+            if (program is not null)
+            {
+                Interlocked.Increment(ref _programFallbacks);
+            }
+            else
+            {
+                NoteProgramIneligible(inputs.TablePhase is not null ? "table_phase" : captureSelectorDiagnostic ? "diagnostic" : plan.MaterializationProgramIneligibility);
+            }
+            if (!RuntimeValueEvaluator.EvaluateSources(plan, plan.MaterializationSources, inputs, plan.CleanFlatSlots,
+                evaluateTable: true, out values, out table, out activeSources, additionalTableWords))
+            {
+                SpecializationFailed(DiagnoseSnapshotEvaluationFailure(plan, inputs, activeSources));
+                return false;
+            }
         }
 
         var cursor = 0;
