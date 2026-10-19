@@ -33,12 +33,23 @@ public sealed partial class GuestImageCache
         Unresolved,
         ChangedAtJoin,
         MetadataChangedAtJoin,
+        DepthUnregistered,
+        DepthOwner,
+        DepthRebind,
+        DepthMetadataAddress,
+        DepthMetadataSize,
+        DepthMetadataKind,
+        DepthMetadataCompression,
+        DepthMetadataUnregistered,
+        DepthStencil,
+        DepthStencilAssociation,
     }
 
     private static readonly string[] SliceLookupFailureNames =
     [
         "display", "target_dcc_sync", "no_candidate", "format", "resources", "view_type", "unregistered", "texture_metadata", "texture_dcc_sync", "dcc_clear",
         "null_image", "depth_recreate", "grow", "park", "unresolved", "changed_at_join", "metadata_changed_at_join",
+        "depth_unregistered", "depth_owner", "depth_rebind", "depth_metadata_address", "depth_metadata_size", "depth_metadata_kind", "depth_metadata_compression", "depth_metadata_unregistered", "depth_stencil", "depth_stencil_association",
     ];
     private static readonly string[] SliceLookupRoleNames = ["texture", "storage", "color", "depth", "display"];
     private static readonly long[] SliceLookupFailures = new long[SliceLookupFailureNames.Length];
@@ -547,24 +558,41 @@ public sealed partial class GuestImageCache
 
         using var held = _lock.Read();
         var image = _slots.TryGet(imageIdentifier);
-        if (image is null || !image.Registered || image.DepthOwner.IsValid || image.Binding.NeedsRebind)
+        if (image is null || !image.Registered)
         {
-            return false;
+            return SliceLookupFailed(SliceLookupFailure.DepthUnregistered, request.Role);
+        }
+
+        if (image.DepthOwner.IsValid)
+        {
+            return SliceLookupFailed(SliceLookupFailure.DepthOwner, request.Role);
+        }
+
+        if (image.Binding.NeedsRebind)
+        {
+            return SliceLookupFailed(SliceLookupFailure.DepthRebind, request.Role);
+        }
+
+        if (request.Description.HasMetadata && !SameMetadataPlacement(image.Description.Metadata, request.Description.Metadata))
+        {
+            ref readonly var cached = ref image.Description.Metadata;
+            ref readonly var requested = ref request.Description.Metadata;
+            return SliceLookupFailed(cached.Range.Address != requested.Range.Address ? SliceLookupFailure.DepthMetadataAddress :
+                cached.Range.Size != requested.Range.Size ? SliceLookupFailure.DepthMetadataSize :
+                cached.Kind != requested.Kind ? SliceLookupFailure.DepthMetadataKind : SliceLookupFailure.DepthMetadataCompression, request.Role);
         }
 
         if (request.Description.HasMetadata &&
-            (!image.Description.Metadata.Equals(request.Description.Metadata) ||
-             !_surfaceMetadata.TryGetValue(request.Description.Metadata.Range.Address, out var metadata) ||
-             metadata.Kind != SurfaceMetadataKind.HTile))
+            (!_surfaceMetadata.TryGetValue(request.Description.Metadata.Range.Address, out var metadata) || metadata.Kind != SurfaceMetadataKind.HTile))
         {
-            return false;
+            return SliceLookupFailed(SliceLookupFailure.DepthMetadataUnregistered, request.Role);
         }
 
         if (request.Description.HasStencil)
         {
             if (!image.Description.Stencil.Equals(request.Description.Stencil) || !ImageDescription.IsValidRange(request.Description.Stencil))
             {
-                return false;
+                return SliceLookupFailed(SliceLookupFailure.DepthStencil, request.Role);
             }
 
             var association = ResourceSlotIdentifier.Invalid;
@@ -578,13 +606,16 @@ public sealed partial class GuestImageCache
 
             if (!association.IsValid)
             {
-                return false;
+                return SliceLookupFailed(SliceLookupFailure.DepthStencilAssociation, request.Role);
             }
         }
 
         view = image.GetOrCreateView(request.View);
         return true;
     }
+
+    private static bool SameMetadataPlacement(in MetadataDescription cached, in MetadataDescription requested) =>
+        cached.Range.Equals(requested.Range) && cached.Kind == requested.Kind && cached.Compression == requested.Compression;
 
     // Whether TryClearImageFromBuffer would select an image for the fill without recording anything.
     public bool WouldPublishImagesUnderWrite(ulong address, ulong size, bool wholeImages)
