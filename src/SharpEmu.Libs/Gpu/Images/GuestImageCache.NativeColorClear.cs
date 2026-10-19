@@ -50,6 +50,7 @@ public sealed unsafe partial class GuestImageCache
             }
             registration.NativeColorClear = true;
             registration.DccSliceCount = layers;
+            NoteMetadataChange(metadata.Range.Address);
             // Native bytes own the clear state. Do not reuse deferred fill flags.
             registration.ClearMask = 0;
             registration.FillSize = 0;

@@ -482,10 +482,12 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             {
                 metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc };
                 _surfaceMetadata[address] = metadata;
+                NoteMetadataChange(address);
             }
             else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
             {
                 metadata.Kind = SurfaceMetadataKind.Dcc;
+                NoteMetadataChange(address);
             }
             else if (metadata.Kind != SurfaceMetadataKind.Dcc)
             {
@@ -545,11 +547,13 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             {
                 metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile, ClearMask = image.Description.HtileClearMask };
                 _surfaceMetadata.Add(address, metadata);
+                NoteMetadataChange(address);
             }
             else if (metadata.Invalidated && metadata.Kind == SurfaceMetadataKind.HTile)
             {
                 metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile };
                 _surfaceMetadata[address] = metadata;
+                NoteMetadataChange(address);
             }
             else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
             {
@@ -559,6 +563,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 metadata.ClearMask = image.Description.HtileClearMask;
                 metadata.FillValue = 0xffffffff;
                 metadata.FillSize = 0;
+                NoteMetadataChange(address);
             }
             else if (metadata.Kind != SurfaceMetadataKind.HTile)
             {

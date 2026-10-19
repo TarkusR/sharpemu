@@ -49,6 +49,7 @@ public sealed partial class GuestImageCache
             }
 
             _surfaceMetadata.Remove(range.Address);
+            NoteMetadataChange(range.Address);
         }
 
         var layers = description.TransferLayers;
@@ -322,6 +323,7 @@ public sealed partial class GuestImageCache
         previous.FillSize = 0;
         previous.Invalidated = true;
         _surfaceMetadata[address] = replacement;
+        NoteMetadataChange(address);
         return replacement;
     }
 
@@ -341,6 +343,7 @@ public sealed partial class GuestImageCache
                 metadata.ClearMask = 0;
                 metadata.FillSize = 0;
                 metadata.Invalidated = true;
+                NoteMetadataChange(metadataAddress);
             }
         }
     }
@@ -393,6 +396,49 @@ public sealed partial class GuestImageCache
                     $"colorTarget={owner.Uses.RenderTarget}");
             }
         });
+    }
+
+    private const int MetadataEventSlots = 1024;
+    private readonly (long Generation, ulong Address)[] _metadataEvents = new (long, ulong)[MetadataEventSlots];
+    private long _metadataGeneration = 1;
+
+    public long MetadataGeneration => Volatile.Read(ref _metadataGeneration);
+
+    private void NoteMetadataChange(ulong address)
+    {
+        var generation = _metadataGeneration + 1;
+        _metadataEvents[generation & (MetadataEventSlots - 1)] = (generation, address);
+        Volatile.Write(ref _metadataGeneration, generation);
+    }
+
+    internal bool MetadataUnchangedSinceForTest(long generation, ulong address)
+    {
+        using var held = _lock.Read();
+        return MetadataUnchangedSince(generation, address);
+    }
+
+    private bool MetadataUnchangedSince(long generation, ulong address)
+    {
+        var current = _metadataGeneration;
+        if (generation == current)
+        {
+            return true;
+        }
+
+        if (current - generation >= MetadataEventSlots)
+        {
+            return false;
+        }
+
+        for (var at = current; at > generation; at--)
+        {
+            if (_metadataEvents[at & (MetadataEventSlots - 1)].Address == address)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public bool IsMetadata(ulong address)
@@ -466,6 +512,7 @@ public sealed partial class GuestImageCache
         }
 
         found.ClearMask = uint.MaxValue;
+        NoteMetadataChange(address);
         return true;
     }
 
@@ -490,6 +537,7 @@ public sealed partial class GuestImageCache
         };
         using var held = _lock.Hold();
         RecordMetadataEvent("dcc-fill-request", address, size, fillValue);
+        NoteMetadataChange(address);
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated)
         {
             IncludeMetadataWriteRange(address, size);
@@ -609,6 +657,7 @@ public sealed partial class GuestImageCache
             return false;
         }
 
+        NoteMetadataChange(address);
         found.SetSliceClear(slice, isClear);
 
         return true;

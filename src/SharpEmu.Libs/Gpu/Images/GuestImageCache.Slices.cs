@@ -32,12 +32,13 @@ public sealed partial class GuestImageCache
         Park,
         Unresolved,
         ChangedAtJoin,
+        MetadataChangedAtJoin,
     }
 
     private static readonly string[] SliceLookupFailureNames =
     [
         "display", "target_dcc_sync", "no_candidate", "format", "resources", "view_type", "unregistered", "texture_metadata", "texture_dcc_sync", "dcc_clear",
-        "null_image", "depth_recreate", "grow", "park", "unresolved", "changed_at_join",
+        "null_image", "depth_recreate", "grow", "park", "unresolved", "changed_at_join", "metadata_changed_at_join",
     ];
     private static readonly string[] SliceLookupRoleNames = ["texture", "storage", "color", "depth", "display"];
     private static readonly long[] SliceLookupFailures = new long[SliceLookupFailureNames.Length];
@@ -672,7 +673,7 @@ public sealed partial class GuestImageCache
         };
     }
 
-    public bool ValidateSliceImages(List<ImageSliceUse> uses, ulong lookupGeneration)
+    public bool ValidateSliceImages(List<ImageSliceUse> uses, ulong lookupGeneration, long metadataGeneration)
     {
         using var held = _lock.Read();
         foreach (var use in uses)
@@ -697,6 +698,12 @@ public sealed partial class GuestImageCache
             if (!LookupUnchangedSince(lookupGeneration, range.Address, range.End))
             {
                 return SliceLookupFailed(SliceLookupFailure.ChangedAtJoin, use.Request.Role);
+            }
+
+            if ((use.Request.Description.HasMetadata && !MetadataUnchangedSince(metadataGeneration, use.Request.Description.Metadata.Range.Address)) ||
+                (image.Description.HasMetadata && !MetadataUnchangedSince(metadataGeneration, image.Description.Metadata.Range.Address)))
+            {
+                return SliceLookupFailed(SliceLookupFailure.MetadataChangedAtJoin, use.Request.Role);
             }
         }
 

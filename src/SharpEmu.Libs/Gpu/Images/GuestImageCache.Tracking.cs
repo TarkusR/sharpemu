@@ -122,6 +122,7 @@ public sealed partial class GuestImageCache
             RecordMetadataEvent("remove-image-metadata", image.Description.Metadata.Range.Address,
                 image.Description.Metadata.Range.Size);
             _surfaceMetadata.Remove(image.Description.Metadata.Range.Address);
+            NoteMetadataChange(image.Description.Metadata.Range.Address);
         }
 
         RemoveFromIndex(imageIdentifier);
@@ -850,6 +851,7 @@ public sealed partial class GuestImageCache
         foreach (var metadataAddress in stale)
         {
             _surfaceMetadata.Remove(metadataAddress);
+            NoteMetadataChange(metadataAddress);
         }
 
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false, includeParked: true))

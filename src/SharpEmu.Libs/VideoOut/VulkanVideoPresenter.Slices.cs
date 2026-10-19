@@ -88,6 +88,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public readonly List<SubmissionUploadResources> Resources = new();
         public bool NeedsBdaSweep;
         public ulong LookupGeneration;
+        public long MetadataGeneration;
         public IReadOnlyList<GuestSpan>? BdaSpans;
         public ulong BdaMapping;
     }
@@ -288,7 +289,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     return false;
                 }
 
-                if (!_imageCache.ValidateSliceImages(segment.Requests.Images, segment.Requests.LookupGeneration) || !_bufferCache.ValidateSliceBuffers(segment.Requests.Buffers) ||
+                if (!_imageCache.ValidateSliceImages(segment.Requests.Images, segment.Requests.LookupGeneration, segment.Requests.MetadataGeneration) || !_bufferCache.ValidateSliceBuffers(segment.Requests.Buffers) ||
                     !ValidateDeferredItems(slice, segment))
                 {
                     Interlocked.Increment(ref _slicesInvalid);
@@ -487,6 +488,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var segment = new SliceSegment { First = first };
             segment.Requests.LookupGeneration = _imageCache.LookupGeneration;
+            segment.Requests.MetadataGeneration = _imageCache.MetadataGeneration;
             _segment = segment;
             _workerBuffer = _spareBuffers!.TryTake(out var buffer) ? buffer : _scheduler.CreateRecordingBuffer(this);
             _scheduler.BeginRecording(_workerBuffer);
