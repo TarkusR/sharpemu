@@ -664,7 +664,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
-                _commandThread!.Run(Flush);
+                _commandThread!.Post(Flush);
                 return;
             }
 
@@ -913,15 +913,13 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool HasFlipSlot()
         {
-            if (OnCommandThread)
-            {
-                return _commandThread!.Run(HasFlipSlot);
-            }
             lock (_gate)
             {
-                return _pendingGuestImagePresentations.Count < MaxPendingGuestFlipVersions;
+                return _pendingGuestImagePresentations.Count + Volatile.Read(ref _flipsAwaitingCapture) < MaxPendingGuestFlipVersions;
             }
         }
+
+        private int _flipsAwaitingCapture;
 
         public ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument) =>
             PrepareFlip(0, handle, index, flipMode, flipArgument);
@@ -930,7 +928,32 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
-                return _commandThread!.Run(() => PrepareFlip(queueId, handle, index, flipMode, flipArgument));
+                _translation.PrepareFlip(handle, index);
+                var result = VideoOutExports.TryReserveFlipRequest(handle, index, flipMode, flipArgument, gpuQueued: true, out var requestId);
+                if (result != 0 || requestId == 0)
+                {
+                    throw SubmissionScheduler.Fatal($"Could not submit the GPU flip: result={result} request={requestId} handle={handle} index={index} mode={flipMode} arg={flipArgument}");
+                }
+
+                Interlocked.Increment(ref _flipsAwaitingCapture);
+                _commandThread!.Post(() =>
+                {
+                    try
+                    {
+                        EnsureBatchedGuestCommands();
+                        CaptureFlipAfterPublications(queueId, handle, index, requestId, flipMode, flipArgument);
+                    }
+                    catch
+                    {
+                        VideoOutExports.CancelFlip(requestId);
+                        throw;
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref _flipsAwaitingCapture);
+                    }
+                });
+                return requestId;
             }
             EnsureBatchedGuestCommands();
             var publication = _guestPublications.LastRecorded(queueId) is null
@@ -952,14 +975,27 @@ internal static unsafe partial class VulkanVideoPresenter
             finally { _capturePublication = null; }
         }
 
-        public bool IsFlipDone(int handle, int index)
+        private void CaptureFlipAfterPublications(int queueId, int handle, int index, ulong requestId, int flipMode, long flipArgument)
         {
-            if (OnCommandThread)
+            var publication = _guestPublications.LastRecorded(queueId) is null
+                ? null : _guestPublications.AddAfterPending(queueId, 0, 0);
+            if (publication is not null) _guestPublications.Register(publication, _scheduler.CurrentTick);
+            _capturePublication = publication;
+            try
             {
-                return _commandThread!.Run(() => IsFlipDone(handle, index));
+                CaptureFlip(handle, index, requestId, flipMode, flipArgument);
+                if (publication is not null && !(_flipPublications ??= new()).TryAdd(requestId, publication))
+                    throw SubmissionScheduler.Fatal("The flip publication is already registered.");
             }
-            return VideoOutExports.IsFlipDone(handle, index);
+            catch (Exception exception)
+            {
+                FailGuestPublications(exception);
+                throw;
+            }
+            finally { _capturePublication = null; }
         }
+
+        public bool IsFlipDone(int handle, int index) => VideoOutExports.IsFlipDone(handle, index);
 
         public void PrepareCpuFlip(int handle, int index, ulong requestId)
         {
