@@ -841,9 +841,33 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private const int FoundRangeSetSlots = 16;
+        private (DeviceAddressRange[]? Ranges, long Serial, long Spans)[]? _foundRangeSets;
+        private int _foundRangeSetNext;
+
         private void FindDeviceAddressBuffers(PreparedStageBindings prepared)
         {
-            foreach (var range in prepared.Stage.Resources.DeviceAddressRanges)
+            var ranges = prepared.Stage.Resources.DeviceAddressRanges;
+            if (ranges.Length == 0)
+            {
+                return;
+            }
+
+            var serial = _bufferCache.RegistrationSerial;
+            var spans = GuestGpuMemoryHook.Current?.SpanVersion ?? 0;
+            var foundSets = _worker ? null : _foundRangeSets ??= new (DeviceAddressRange[]?, long, long)[FoundRangeSetSlots];
+            if (foundSets is not null)
+            {
+                foreach (var found in foundSets)
+                {
+                    if (ReferenceEquals(found.Ranges, ranges) && found.Serial == serial && found.Spans == spans)
+                    {
+                        return;
+                    }
+                }
+            }
+
+            foreach (var range in ranges)
             {
                 if (!range.Planned || range.Size == 0 ||
                     range.Base >= PageOwnerTable.AddressSpaceSize || range.Size > PageOwnerTable.AddressSpaceSize - range.Base ||
@@ -905,6 +929,12 @@ internal static unsafe partial class VulkanVideoPresenter
             else
             {
                 _imageCache.PublishImagesUnderRawWrite(address, size);
+            }
+
+            if (foundSets is not null)
+            {
+                foundSets[_foundRangeSetNext] = (ranges, _bufferCache.RegistrationSerial, spans);
+                _foundRangeSetNext = (_foundRangeSetNext + 1) % FoundRangeSetSlots;
             }
         }
 
