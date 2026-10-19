@@ -106,15 +106,29 @@ internal static unsafe partial class VulkanVideoPresenter
             public BufferView ShaderData;
         }
 
-        private sealed class PreparedStageBindings(ShaderStageResources stage, ShaderProgramInfo program) : IPreparedBindings
+        private sealed class PreparedStageBindings : IPreparedBindings
         {
-            public ShaderStageResources Stage => stage;
+            private ShaderStageResources _stage;
+            private ShaderProgramInfo _program = null!;
 
-            public ShaderProgramInfo Program => program;
+            public ShaderStageResources Stage => _stage;
 
-            public SpecializedResourceInfo Resources => program.Resources!;
+            public ShaderProgramInfo Program => _program;
 
-            public BindingLayout Layout => program.Bindings!;
+            public void Reset(ShaderStageResources stage, ShaderProgramInfo program)
+            {
+                _stage = stage;
+                _program = program;
+                Memoized = false;
+                Memo = null;
+                Descriptors.GlobalDataShare = default;
+                Descriptors.FlattenedTable = default;
+                Descriptors.ShaderData = default;
+            }
+
+            public SpecializedResourceInfo Resources => _program.Resources!;
+
+            public BindingLayout Layout => _program.Bindings!;
 
             public StageDescriptors Descriptors { get; } = new();
 
@@ -355,7 +369,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private PreparedStageBindings ReuseStagePreparation(RenderPreparation preparation, ShaderStageResources stage, ShaderProgramInfo program,
             StagePreparationMemo memo)
         {
-            var prepared = new PreparedStageBindings(stage, program) { Memoized = true, Memo = memo };
+            var prepared = RentStage(stage, program);
+            prepared.Memoized = true;
+            prepared.Memo = memo;
             preparation.Stages.Add(prepared);
             var descriptors = prepared.Descriptors;
             descriptors.Images = Scratch.Images.Rent(memo.Textures.Length);
@@ -751,7 +767,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             Interlocked.Increment(ref _stageMemoMisses);
-            var prepared = new PreparedStageBindings(stage, program);
+            var prepared = RentStage(stage, program);
             // Register ownership before preparation can fail halfway through.
             preparation.Stages.Add(prepared);
             var descriptors = prepared.Descriptors;
@@ -1418,6 +1434,15 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private readonly Stack<PreparedStageBindings> _spareStages = new();
+
+        private PreparedStageBindings RentStage(ShaderStageResources stage, ShaderProgramInfo program)
+        {
+            var prepared = _spareStages.Count != 0 ? _spareStages.Pop() : new PreparedStageBindings();
+            prepared.Reset(stage, program);
+            return prepared;
+        }
+
         private void ReturnStageScratch(PreparedStageBindings stage)
         {
             // CommitBindings copies texture references into submission-owned
@@ -1432,6 +1457,11 @@ internal static unsafe partial class VulkanVideoPresenter
             stage.Descriptors.Buffers = [];
             stage.BufferSources = [];
             stage.ShaderData = [];
+            stage.Reset(default, null!);
+            if (_spareStages.Count < 8)
+            {
+                _spareStages.Push(stage);
+            }
         }
 
         private static DescriptorImageInfo ImageInfo(TextureResource texture, uint element, ShaderProgramInfo program, int index)

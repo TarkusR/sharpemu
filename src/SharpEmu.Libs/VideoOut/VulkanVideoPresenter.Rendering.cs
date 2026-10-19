@@ -107,8 +107,21 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed partial class RecordingHost : IRenderHost
     {
         // Keep each new stream allocation intact until the draw is recorded.
-        private sealed class RenderPreparation(RecordingHost owner, IDisposable? streamRetention) : IResourcePreparation
+        private sealed class RenderPreparation(RecordingHost owner) : IResourcePreparation
         {
+            private IDisposable? streamRetention;
+
+            public RenderPreparation Open(IDisposable? retention)
+            {
+                streamRetention = retention;
+                StencilStorageImages = null;
+                StencilStorageWriteBackImages = null;
+                FeedbackSnapshots = null;
+                Committed = false;
+                CommandsRecorded = false;
+                return this;
+            }
+
             public List<PreparedStageBindings> Stages { get; } = new();
 
             // Host buffers that took an upload the ring could not hold; the committed draw owns them.
@@ -180,11 +193,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     foreach (var stage in Stages) owner.ReturnStageScratch(stage);
                     Stages.Clear();
+                    OverflowBuffers.Clear();
+                    streamRetention = null;
                 }
             }
         }
 
         private RenderPreparation? _preparation;
+        private RenderPreparation? _sparePreparation;
         private RenderPipelineEntry? _boundGraphicsPipeline;
         private ulong _profileComputePipeline;
 
@@ -514,7 +530,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (_worker)
             {
-                _preparation = new RenderPreparation(this, null);
+                _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(null);
                 return _preparation;
             }
 
@@ -534,7 +550,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             EnsureGuestSubmissionCapacity();
             EnsureBatchedGuestCommands();
-            _preparation = new RenderPreparation(this, _bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream).RetainUpcomingAllocations());
+            _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(_bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream).RetainUpcomingAllocations());
             return _preparation;
         }
 
