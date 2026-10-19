@@ -76,6 +76,11 @@ public interface IResourcePreparation : IDisposable
 {
 }
 
+public readonly record struct DrawScopeToken(long Scope, ulong Lookups, long Metadata)
+{
+    public bool IsActive => Scope != 0;
+}
+
 // Everything the executor needs from the renderer, the caches and the pipeline objects.
 public interface IRenderHost
 {
@@ -89,6 +94,12 @@ public interface IRenderHost
 
     // Records a draw's color-target base for the image-clear trace; see docs/image-clear-tracing.md.
     void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) { }
+
+    DrawScopeToken DrawScope => default;
+
+    void KeepDepthAttachment(in DepthAttachmentState depth)
+    {
+    }
 
     RenderHostLimits Limits { get; }
 

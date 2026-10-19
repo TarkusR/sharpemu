@@ -87,6 +87,39 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("create_graphics_pipeline colors=1 depth=False topology=TriangleList restart=False", _pipelines.Calls);
     }
 
+    [Fact]
+    public void ADrawRepeatingThePreviousTargetsInItsScopeKeepsTheirAcquisitions()
+    {
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        _host.Scope = new DrawScopeToken(1, 1, 1);
+        var banks = Banks();
+        _executor.DrawIndexed(7, banks, Indexed(6));
+        _host.Calls.Clear();
+        _executor.DrawIndexed(8, banks, Indexed(6));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("find_image", StringComparison.Ordinal) || call.StartsWith("acquire_color", StringComparison.Ordinal));
+        AssertOrder("bind_target 1", "prepare_bindings Vertex", "commit Graphics", "begin_rendering", "draw_indexed 6 1 0 0 0");
+    }
+
+    [Fact]
+    public void ADrawAcquiresItsTargetsAgainOnceTheScopeOrTheRegistersChange()
+    {
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        _host.Scope = new DrawScopeToken(1, 1, 1);
+        var banks = Banks();
+        _executor.DrawIndexed(7, banks, Indexed(6));
+        _host.Scope = new DrawScopeToken(2, 1, 1);
+        _host.Calls.Clear();
+        _executor.DrawIndexed(8, banks, Indexed(6));
+        Assert.Contains(_host.Calls, call => call.StartsWith("find_image", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+
+        _host.Calls.Clear();
+        banks.MarkWritten(1u << (int)RegisterStamp.Context);
+        _executor.DrawIndexed(9, banks, Indexed(6));
+        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+    }
+
     private const ulong IndirectArguments = RecordingRenderHost.MemoryBase + 0x60_0000;
 
     private void WriteIndirectArguments(params uint[] words)

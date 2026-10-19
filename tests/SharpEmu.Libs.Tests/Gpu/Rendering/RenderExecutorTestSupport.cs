@@ -217,6 +217,12 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void ResetBindings() => Calls.Add("reset_bindings");
 
+    public DrawScopeToken Scope { get; set; }
+
+    public DrawScopeToken DrawScope => Scope;
+
+    public void KeepDepthAttachment(in DepthAttachmentState depth) => Calls.Add($"keep_depth {depth.Image.Index}");
+
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
     {
         var address = target.Resolution.BaseAddress;

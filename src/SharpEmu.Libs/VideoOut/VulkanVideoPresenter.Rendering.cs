@@ -409,6 +409,16 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // The image transition ends the scope only when it records a barrier.
+        public DrawScopeToken DrawScope =>
+            _renderingActive ? new DrawScopeToken(_renderingScopesBegun, _imageCache.LookupGeneration, _imageCache.MetadataGeneration) : default;
+
+        public void KeepDepthAttachment(in DepthAttachmentState depth)
+        {
+            _hasBoundDepth = true;
+            _boundDepth = depth;
+            _boundDepthLoadState = depth.LoadState;
+        }
+
         public void TransitionDepthAttachment(in DepthAttachmentState depth, ImageAspectFlags writeAspects)
         {
             var command = BeginBatchedGuestCommands();

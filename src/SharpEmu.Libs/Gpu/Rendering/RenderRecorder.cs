@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
@@ -24,7 +25,128 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private readonly BufferBinding[] _vertexBindings = new BufferBinding[VertexInputInfo.MaxBuffers];
     private readonly VertexBufferRange[] _vertexRanges = new VertexBufferRange[VertexInputInfo.MaxBuffers];
     private readonly KeptPipeline _pipeline = new();
+    private readonly InPlaceDraw _inPlace = new();
     private long _sequence;
+    private static long _inPlaceDraws;
+    private static long _inPlaceRefused;
+
+    public static string TakeInPlaceReport() => FormattableString.Invariant(
+        $"in_place={Interlocked.Exchange(ref _inPlaceDraws, 0)} in_place_refused={Interlocked.Exchange(ref _inPlaceRefused, 0)}");
+
+    private sealed class InPlaceDraw
+    {
+        public bool Valid;
+        public DrawScopeToken Token;
+        public ulong ContextStamp;
+        public ulong DynamicStamp;
+        public uint TargetVersion;
+        public ulong VertexProgram;
+        public ulong PixelProgram;
+        public bool PixelActive;
+        public uint FoundCount;
+        public bool DepthResolved;
+        public readonly ResourceSlotIdentifier[] Found = new ResourceSlotIdentifier[RenderingState.ColorAttachmentCapacity];
+        public ResourceSlotIdentifier FoundDepth;
+        public uint AcquiredCount;
+        public readonly ImageView[] Views = new ImageView[RenderingState.ColorAttachmentCapacity];
+        public readonly uint[] Slots = new uint[RenderingState.ColorAttachmentCapacity];
+        public ImageView DepthView;
+        public bool DepthMetadataClear;
+        public RenderingState Rendering;
+    }
+
+    private bool RepeatsPreviousTargets(ResolvedDraw record, in DrawState state, DrawScopeToken token)
+    {
+        var kept = _inPlace;
+        return kept.Valid && token.IsActive && token == kept.Token && !ImageClearTrace.Enabled && record.ContextStamp == kept.ContextStamp &&
+            record.DynamicStamp == kept.DynamicStamp && record.TargetVersion == kept.TargetVersion && state.PixelActive == kept.PixelActive &&
+            state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram && state.ColorCount == kept.FoundCount &&
+            state.DepthResolved == kept.DepthResolved;
+    }
+
+    private void RestoreFoundTargets(ref DrawState state)
+    {
+        var kept = _inPlace;
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            state.Colors[index].Image = kept.Found[index];
+            _host.BindRenderTarget(kept.Found[index]);
+        }
+
+        if (state.DepthResolved)
+        {
+            state.Depth.Image = kept.FoundDepth;
+            _host.BindRenderTarget(kept.FoundDepth);
+        }
+    }
+
+    private bool TryRestoreAttachments(ref DrawState state)
+    {
+        var kept = _inPlace;
+        if (state.ColorCount != kept.AcquiredCount || _host.DrawScope != kept.Token)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            if (state.Colors[index].Slot != kept.Slots[index])
+            {
+                return false;
+            }
+        }
+
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            state.Colors[index].View = kept.Views[index];
+        }
+
+        if (state.Depth.HasTarget)
+        {
+            state.Depth.View = kept.DepthView;
+            state.Depth.MetadataClear = kept.DepthMetadataClear;
+            _host.KeepDepthAttachment(in state.Depth);
+        }
+
+        state.Rendering = kept.Rendering;
+        return true;
+    }
+
+    private void NoteFoundTargets(ref DrawState state)
+    {
+        var kept = _inPlace;
+        kept.FoundCount = state.ColorCount;
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            kept.Found[index] = state.Colors[index].Image;
+        }
+
+        kept.DepthResolved = state.DepthResolved;
+        kept.FoundDepth = state.DepthResolved ? state.Depth.Image : default;
+    }
+
+    private void KeepTargets(ResolvedDraw record, ref DrawState state)
+    {
+        var kept = _inPlace;
+        kept.Token = _host.DrawScope;
+        kept.Valid = kept.Token.IsActive;
+        kept.ContextStamp = record.ContextStamp;
+        kept.DynamicStamp = record.DynamicStamp;
+        kept.TargetVersion = record.TargetVersion;
+        kept.VertexProgram = state.Programs.Vertex.Id;
+        kept.PixelProgram = state.Programs.Pixel.Id;
+        kept.PixelActive = state.PixelActive;
+        kept.AcquiredCount = state.ColorCount;
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            kept.Views[index] = state.Colors[index].View;
+            kept.Slots[index] = state.Colors[index].Slot;
+        }
+
+        kept.DepthView = state.Depth.View;
+        kept.DepthMetadataClear = state.Depth.MetadataClear;
+        kept.Rendering = state.Rendering;
+    }
 
     private struct VertexBufferRange
     {
@@ -83,6 +205,11 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
 
         var state = record.State;
+        if (record.Kind != ResolvedDrawKind.Draw)
+        {
+            _inPlace.Valid = false;
+        }
+
         switch (record.Kind)
         {
             case ResolvedDrawKind.Skipped:
@@ -103,9 +230,22 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                 _host.ClearColorTargets(DrawState.BoundColors(ref state), record.Clear);
                 break;
             case ResolvedDrawKind.Draw:
-                FindTargets(ref state);
-                RecordDrawCommands(record, ref state);
+            {
+                var inPlace = RepeatsPreviousTargets(record, in state, _host.DrawScope);
+                if (inPlace)
+                {
+                    RestoreFoundTargets(ref state);
+                }
+                else
+                {
+                    _inPlace.Valid = false;
+                    FindTargets(ref state);
+                    NoteFoundTargets(ref state);
+                }
+
+                RecordDrawCommands(record, ref state, inPlace);
                 break;
+            }
         }
 
         if (record.ResetBindings)
@@ -218,7 +358,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
     }
 
-    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state)
+    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
         var submitId = record.SubmitId;
@@ -350,7 +490,19 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, RenderExecutor.IndexedIndirectArgumentsSize, isWritten: false)
             : default;
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
-        state.Rendering = AcquireAttachments(ref state);
+        if (inPlace && TryRestoreAttachments(ref state))
+        {
+            Interlocked.Increment(ref _inPlaceDraws);
+        }
+        else
+        {
+            if (inPlace)
+            {
+                Interlocked.Increment(ref _inPlaceRefused);
+            }
+
+            state.Rendering = AcquireAttachments(ref state);
+        }
         var pipeline = ResolvePipeline(record, ref state, vertexInput, state.PixelActive ? pixelInput : null);
         if (record.SetBindDebug)
         {
@@ -433,8 +585,13 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (record.WriteStages != PipelineStageFlags.None)
         {
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("write-barrier", $"sourceStages={record.WriteStages}");
+            _inPlace.Valid = false;
             _host.EndRendering();
             _host.ShaderWriteBarrier(record.WriteStages);
+        }
+        else
+        {
+            KeepTargets(record, ref state);
         }
 
         if (record.SetAutoDebug)
