@@ -61,6 +61,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
     internal static string TakeSliceReport() =>
         FormattableString.Invariant($"[PERF][SLICES] slices={Interlocked.Exchange(ref _slicesRecorded, 0)} segments={Interlocked.Exchange(ref _segmentsRecorded, 0)} empty={Interlocked.Exchange(ref _segmentsEmpty, 0)} uses_shared={Interlocked.Exchange(ref _usesShared, 0)} attachments_kept={RecordingHost.TakeAttachmentsKept()} ") +
+        FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)} ") +
         FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
         FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
         FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +

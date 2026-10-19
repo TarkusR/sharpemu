@@ -938,7 +938,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             }
 
             var epoch = _tracker.CpuDirtyEpoch;
-            if (epoch != _bdaSweepEpoch || mapping != _bdaSweepMapping)
+            if (mapping != _bdaSweepMapping || (epoch != _bdaSweepEpoch && (!ObservationGated || _observation != _bdaSweepObservation)))
             {
                 if (!_bdaSweepPlanBuilt || mapping != _bdaSweepPlanMapping)
                 {
@@ -985,6 +985,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
                 _bdaSweepEpoch = epoch;
                 _bdaSweepMapping = mapping;
+                _bdaSweepObservation = _observation;
+                Interlocked.Increment(ref BdaSweeps);
+            }
+            else if (epoch != _bdaSweepEpoch)
+            {
+                Interlocked.Increment(ref BdaSweepsSkipped);
             }
         }
 
@@ -1050,6 +1056,17 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     private long _bdaSweepEpoch = -1;
+    private long _bdaSweepObservation = -1;
+    private long _observation;
+    public static long BdaSweeps;
+    public static long BdaSweepsSkipped;
+
+    // With the command stream on its own thread, guest CPU writes reach the GPU at the stream's
+    // order points (a submission, a label, a write or copy the stream performs); a device-address
+    // sweep between two of them finds nothing a later item may rely on.
+    public bool ObservationGated { get; set; }
+
+    public void NoteObservation() => _observation++;
     private ulong _bdaSweepMapping;
     private GuestPageTracker.SweepPlan? _bdaSweepPlan;
     private readonly PageCoverage _bufferPages = new();

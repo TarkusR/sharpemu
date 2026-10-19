@@ -380,6 +380,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_commandThread is null)
             {
                 _commandThread = new CommandThread(this, _commandStream, _guestMemory, RunDeferredWork, RunCommandSlice);
+                _bufferCache.ObservationGated = true;
                 _betweenCommandItems = RunRelayBetweenCommandItems;
                 _translation.Sink = _commandThread;
                 _commandThread.Start();

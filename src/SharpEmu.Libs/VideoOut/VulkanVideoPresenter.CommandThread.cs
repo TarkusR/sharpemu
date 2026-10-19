@@ -960,9 +960,11 @@ internal static partial class VulkanVideoPresenter
                         _runDeferred(item.Work!);
                         break;
                     case Kind.Call:
+                        _presenter._bufferCache.NoteObservation();
                         item.Action!();
                         break;
                     case Kind.Write:
+                        _presenter._bufferCache.NoteObservation();
                         ApplyWrite(item);
                         break;
                 }
