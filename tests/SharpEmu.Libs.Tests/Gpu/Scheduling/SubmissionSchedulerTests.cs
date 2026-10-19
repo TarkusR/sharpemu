@@ -80,6 +80,32 @@ public sealed class SubmissionSchedulerTests
     }
 
     [Fact]
+    public void DeferredFlushesJoinTheNextSubmissionInOrderAndAWaitSubmitsThem()
+    {
+        _device.CompleteOnSubmit = true;
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        var worker = scheduler.CreateRecordingBuffer(new RecordingRenderingState());
+        scheduler.BeginRecording(worker);
+        scheduler.EndRecording(worker);
+
+        Assert.Equal(1UL, scheduler.FlushDeferred([worker]));
+        Assert.Empty(_device.Submits);
+        Assert.Equal(2UL, scheduler.FlushDeferred([]));
+        Assert.Empty(_device.Submits);
+
+        Assert.Equal(3UL, scheduler.Flush());
+        var submit = Assert.Single(_device.Submits);
+        Assert.Equal(new[] { "b0", "b4", "b1", "b2" }, submit.Buffers.Select(_device.Name));
+        Assert.Equal(3UL, submit.Tick);
+
+        Assert.Equal(4UL, scheduler.FlushDeferred([]));
+        scheduler.Wait(4UL);
+        Assert.Equal(2, _device.Submits.Count);
+        Assert.Equal(new[] { "b3" }, _device.Submits[1].Buffers.Select(_device.Name));
+        Assert.Equal(4UL, _device.Submits[1].Tick);
+    }
+
+    [Fact]
     public void AnUnendedTrailingBufferIsFatal()
     {
         _device.CompleteOnSubmit = true;

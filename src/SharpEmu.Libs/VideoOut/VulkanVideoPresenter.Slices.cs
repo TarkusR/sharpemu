@@ -393,7 +393,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueueSubmit))
                 {
-                    _ = _scheduler.Flush(new SubmitBundle(), [segment.Buffer!]);
+                    _ = _scheduler.FlushDeferred([segment.Buffer!]);
                 }
 
                 EnsureBatchedGuestCommands();

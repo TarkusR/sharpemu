@@ -2236,6 +2236,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _scheduler.Flush();
         }
+        else
+        {
+            _scheduler.EnsureSubmitted(waitTick);
+        }
 
         var pieces = new ReadbackPiece[copies.Count];
         for (var index = 0; index < pieces.Length; index++)
@@ -2287,6 +2291,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         if (waitTick >= _scheduler.CurrentTick)
         {
             _scheduler.Flush();
+        }
+        else
+        {
+            _scheduler.EnsureSubmitted(waitTick);
         }
 
         var pieces = new ReadbackPiece[copies.Count];

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Rendering;
 using Silk.NET.Vulkan;
@@ -54,6 +55,14 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     private bool _publishingMemory;
     private ulong _pendingTailTick;
     private ulong _enqueueSequence;
+    private const int MaxDeferredSubmissions = 8;
+    private readonly List<nint> _deferredBuffers = new();
+    private readonly List<ulong> _deferredTicks = new();
+    private static long _deferredSubmissions;
+    private static long _batchedSubmissions;
+
+    public static string TakeDeferredReport() =>
+        FormattableString.Invariant($"deferred_submits={Interlocked.Exchange(ref _deferredSubmissions, 0)} batched_submits={Interlocked.Exchange(ref _batchedSubmissions, 0)}");
 
     public SubmissionScheduler(
         IGpuTickDevice device,
@@ -263,6 +272,121 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         return tick;
     }
 
+    public ulong FlushDeferred(ReadOnlySpan<RecordingBuffer> trailing)
+    {
+        if (_command.IsInvalid)
+        {
+            throw Fatal("Cannot submit without a command buffer that is recording.");
+        }
+
+        var bundle = new SubmitBundle();
+        _prepareSubmit?.Invoke(bundle);
+        if (bundle.WaitCount != 0 || bundle.SignalCount != 0)
+        {
+            return Flush(bundle, trailing);
+        }
+
+        foreach (var recording in trailing)
+        {
+            if (recording.IsInvalid || !recording.Ended)
+            {
+                throw Fatal("A trailing command buffer must be recorded and ended before it is submitted.");
+            }
+        }
+
+        _command.End();
+        ulong tick;
+        lock (_operationLock)
+        {
+            lock (_device.QueueGate)
+            {
+                tick = _timeline.ReserveTick();
+            }
+        }
+
+        _deferredBuffers.Add(_command.Buffer);
+        foreach (var recording in trailing)
+        {
+            _deferredBuffers.Add(recording.Buffer);
+        }
+
+        _deferredTicks.Add(tick);
+        _command.Submitted(tick);
+        foreach (var recording in trailing)
+        {
+            recording.Submitted(tick);
+        }
+
+        _submitted?.Invoke(tick);
+        Interlocked.Increment(ref _deferredSubmissions);
+        if (_deferredTicks.Count >= MaxDeferredSubmissions)
+        {
+            SubmitDeferred();
+        }
+
+        BeginNextCommandBuffer();
+        return tick;
+    }
+
+    public void SubmitDeferred()
+    {
+        if (_deferredTicks.Count == 0)
+        {
+            return;
+        }
+
+        var submit = new SubmitBundle();
+        var last = _deferredTicks[^1];
+        Span<nint> buffers = stackalloc nint[_deferredBuffers.Count];
+        CollectionsMarshal.AsSpan(_deferredBuffers).CopyTo(buffers);
+        bool submitted;
+        string failure;
+        lock (_operationLock)
+        {
+            lock (_device.QueueGate)
+            {
+                submit.AddSignal(_timeline.Handle, last);
+                submitted = _device.TrySubmit(buffers, submit, out failure);
+            }
+
+            if (submitted)
+            {
+                EnqueueDeferredCompletions();
+            }
+        }
+
+        if (!submitted)
+        {
+            throw Fatal($"vkQueueSubmit failed for the deferred buffers: {failure}, tick={last}");
+        }
+
+        _deferredBuffers.Clear();
+        _deferredTicks.Clear();
+    }
+
+    private void EnqueueDeferredCompletions()
+    {
+        if (_completed is not { } completed)
+        {
+            return;
+        }
+
+        foreach (var tick in _deferredTicks)
+        {
+            _priority.Enqueue(new TickWork(() => completed(tick), tick));
+        }
+
+        Monitor.Pulse(_operationLock);
+    }
+
+    public void EnsureSubmitted(ulong tick)
+    {
+        if (_deferredTicks.Count != 0 && tick >= _deferredTicks[0])
+        {
+            SubmitDeferred();
+        }
+    }
+
     public void FlushAndWait()
     {
         var tick = Submit();
@@ -330,6 +454,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
         else
         {
+            EnsureSubmitted(tick);
             _timeline.Wait(tick);
         }
     }
@@ -587,7 +712,9 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             throw Fatal($"The submission exceeds its capacity: waits={submit.WaitCount} signals={submit.SignalCount}.");
         }
 
-        Span<nint> buffers = stackalloc nint[1 + trailing.Length];
+        var deferred = _deferredBuffers.Count;
+        Span<nint> buffers = stackalloc nint[deferred + 1 + trailing.Length];
+        CollectionsMarshal.AsSpan(_deferredBuffers).CopyTo(buffers);
         for (var index = 0; index < trailing.Length; index++)
         {
             if (trailing[index].IsInvalid || !trailing[index].Ended)
@@ -595,11 +722,11 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
                 throw Fatal("A trailing command buffer must be recorded and ended before it is submitted.");
             }
 
-            buffers[index + 1] = trailing[index].Buffer;
+            buffers[deferred + index + 1] = trailing[index].Buffer;
         }
 
         _command.End();
-        buffers[0] = _command.Buffer;
+        buffers[deferred] = _command.Buffer;
         bool submitted;
         string failure;
         ulong tick;
@@ -613,6 +740,11 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
                 submitted = _device.TrySubmit(buffers, submit, out failure);
             }
 
+            if (submitted)
+            {
+                EnqueueDeferredCompletions();
+            }
+
             if (submitted && _completed is { } completed)
             {
                 _priority.Enqueue(new TickWork(() => completed(tick), tick));
@@ -620,7 +752,14 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             }
         }
 
-        if (MeshDrawTrace.Enabled) MeshDrawTrace.Submitted((ulong)buffers[0], tick, submitted, failure);
+        if (submitted && deferred != 0)
+        {
+            Interlocked.Increment(ref _batchedSubmissions);
+            _deferredBuffers.Clear();
+            _deferredTicks.Clear();
+        }
+
+        if (MeshDrawTrace.Enabled) MeshDrawTrace.Submitted((ulong)buffers[deferred], tick, submitted, failure);
         if (!submitted)
         {
             Console.Error.WriteLine($"[GPU][ERROR] submission history known_completed_tick={_timeline.CompletedTick}");

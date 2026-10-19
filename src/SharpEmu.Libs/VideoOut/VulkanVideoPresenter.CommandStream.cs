@@ -401,6 +401,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (ran == 0 || System.Diagnostics.Stopwatch.GetTimestamp() >= renderWorkDeadline)
                 {
+                    _scheduler.SubmitDeferred();
                     return;
                 }
             }
