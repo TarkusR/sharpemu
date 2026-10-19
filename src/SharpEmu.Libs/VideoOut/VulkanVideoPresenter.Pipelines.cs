@@ -497,8 +497,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
+            return MayBeCleanReadPage(page);
+        }
+
+        private bool MayBeCleanReadPage(ulong page)
+        {
             var thread = _commandThread!;
-            return !thread.HasPendingStores(page, CleanReadPageBytes) &&
+            return !_bufferCache.MayHaveGpuDirtyPages(page, CleanReadPageBytes) && !thread.HasPendingStores(page, CleanReadPageBytes) &&
                 (_translation.PendingWrites is not { } pending || !pending.MayHavePending(page, CleanReadPageBytes)) &&
                 !thread.HasShadow(page, CleanReadPageBytes);
         }
@@ -512,6 +517,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var command = OnCommandThread;
             var worker = OnResolveWorker;
+            if ((command || worker) && !MayBeCleanReadPage(page))
+            {
+                return;
+            }
+
             if (!_guestMemory.CanRead(page, CleanReadPageBytes) || _bufferCache.HasGpuDirtyBytes(page, CleanReadPageBytes) ||
                 (command && IsPendingOnCommandThread(page, CleanReadPageBytes)) || (worker && IsPendingForWorker(page, CleanReadPageBytes)))
             {

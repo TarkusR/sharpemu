@@ -27,7 +27,7 @@ public sealed class PendingGpuWrites
 
     private readonly Level _fine = new(FineShift);
     private readonly Level _coarse = new(CoarseShift);
-    private readonly object _gate = new();
+    private readonly ReaderWriterLockSlim _gate = new(LockRecursionPolicy.NoRecursion);
     private readonly Dictionary<(ulong Address, ulong Size), Entry> _entries = new();
     private long _everythingSince;
     private int _sweepAt = SweepThreshold;
@@ -66,13 +66,7 @@ public sealed class PendingGpuWrites
         public readonly long[] Newest = new long[1 << BucketBits];
         public readonly Dictionary<ulong, List<Entry>> ByBlock = new();
 
-        public void NoteNewest(int bucket, long sequence)
-        {
-            if (sequence > Newest[bucket])
-            {
-                Volatile.Write(ref Newest[bucket], sequence);
-            }
-        }
+        public void NoteNewest(int bucket, long sequence) => RaiseTo(ref Newest[bucket], sequence);
 
         public bool MayHavePending(ulong address, ulong size, long released)
         {
@@ -113,7 +107,8 @@ public sealed class PendingGpuWrites
 
                 foreach (var entry in entries)
                 {
-                    if (entry.Sequence > afterSequence && entry.Sequence < beforeSequence &&
+                    var entrySequence = Volatile.Read(ref entry.Sequence);
+                    if (entrySequence > afterSequence && entrySequence < beforeSequence &&
                         entry.Address < address + size && address < entry.Address + entry.Size)
                     {
                         return true;
@@ -143,10 +138,11 @@ public sealed class PendingGpuWrites
                 _scannedEntries += entries.Count;
                 foreach (var entry in entries)
                 {
-                    if (entry.Sequence > released && entry.Sequence > sequence &&
+                    var entrySequence = Volatile.Read(ref entry.Sequence);
+                    if (entrySequence > released && entrySequence > sequence &&
                         entry.Address < address + size && address < entry.Address + entry.Size)
                     {
-                        sequence = entry.Sequence;
+                        sequence = entrySequence;
                         kind = entry.Kind;
                     }
                 }
@@ -174,11 +170,33 @@ public sealed class PendingGpuWrites
             return;
         }
 
-        lock (_gate)
+        _gate.EnterReadLock();
+        try
         {
             if (_entries.TryGetValue((address, size), out var remarked))
             {
-                Volatile.Write(ref remarked.Sequence, sequence);
+                RaiseTo(ref remarked.Sequence, sequence);
+                remarked.Kind = kind;
+                for (var block = remarked.FirstBlock; block <= remarked.LastBlock; block++)
+                {
+                    remarked.Level.NoteNewest(Bucket(block), sequence);
+                }
+
+                Interlocked.Increment(ref _remarked);
+                return;
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+
+        _gate.EnterWriteLock();
+        try
+        {
+            if (_entries.TryGetValue((address, size), out var remarked))
+            {
+                RaiseTo(ref remarked.Sequence, sequence);
                 remarked.Kind = kind;
                 for (var block = remarked.FirstBlock; block <= remarked.LastBlock; block++)
                 {
@@ -221,20 +239,32 @@ public sealed class PendingGpuWrites
                 _sweepAt = Math.Max(SweepThreshold, _entries.Count * 2);
             }
         }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    private static void RaiseTo(ref long target, long value)
+    {
+        var current = Volatile.Read(ref target);
+        while (value > current)
+        {
+            var seen = Interlocked.CompareExchange(ref target, value, current);
+            if (seen == current)
+            {
+                return;
+            }
+
+            current = seen;
+        }
     }
 
     public void MarkEverything(long sequence)
     {
         Interlocked.Increment(ref _generation);
-        lock (_gate)
-        {
-            if (sequence > _everythingSince)
-            {
-                Volatile.Write(ref _everythingSince, sequence);
-            }
-
-            _markedEverything++;
-        }
+        RaiseTo(ref _everythingSince, sequence);
+        Interlocked.Increment(ref _markedEverything);
     }
 
     public void Release(long sequence)
@@ -316,13 +346,15 @@ public sealed class PendingGpuWrites
         }
 
         var wideRead = ((address + size - 1) >> FineShift) - (address >> FineShift) >= MaxFineBlocksPerRead || address + size < address;
-        lock (_gate)
+        _gate.EnterReadLock();
+        try
         {
             if (wideRead)
             {
                 foreach (var entry in _entries.Values)
                 {
-                    if (entry.Sequence > afterSequence && entry.Sequence < beforeSequence &&
+                    var entrySequence = Volatile.Read(ref entry.Sequence);
+                    if (entrySequence > afterSequence && entrySequence < beforeSequence &&
                         entry.Address < address + size && address < entry.Address + entry.Size)
                     {
                         return true;
@@ -333,6 +365,10 @@ public sealed class PendingGpuWrites
             }
 
             return _fine.AnyBetween(address, size, afterSequence, beforeSequence) || _coarse.AnyBetween(address, size, afterSequence, beforeSequence);
+        }
+        finally
+        {
+            _gate.ExitReadLock();
         }
     }
 
@@ -363,19 +399,21 @@ public sealed class PendingGpuWrites
         }
 
         var kind = PendingWriteKind.Other;
-        lock (_gate)
+        _gate.EnterReadLock();
+        try
         {
             _lockedScans++;
-            released = _released;
+            released = Volatile.Read(ref _released);
             if (fine && wideRead)
             {
                 foreach (var entry in _entries.Values)
                 {
                     _scannedEntries++;
-                    if (entry.Level == _fine && entry.Sequence > released && entry.Sequence > sequence &&
+                    var entrySequence = Volatile.Read(ref entry.Sequence);
+                    if (entry.Level == _fine && entrySequence > released && entrySequence > sequence &&
                         entry.Address < address + size && address < entry.Address + entry.Size)
                     {
-                        sequence = entry.Sequence;
+                        sequence = entrySequence;
                         kind = entry.Kind;
                     }
                 }
@@ -389,6 +427,10 @@ public sealed class PendingGpuWrites
             {
                 _coarse.Scan(address, size, released, ref sequence, ref kind);
             }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
         }
 
         if (sequence == 0)

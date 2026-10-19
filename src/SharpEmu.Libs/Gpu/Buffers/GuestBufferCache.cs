@@ -50,7 +50,18 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly GpuBuffer _bdaPageTable;
     private readonly GuestBufferRegistry<GpuBuffer> _registry = new(CachingPageSize, PageOwnerTable.AddressSpaceSize);
     private readonly AvlSpanSet _gpuModifiedRanges = new();
-    private readonly object _gpuModifiedGate = new();
+    private readonly ReaderWriterLockSlim _gpuModifiedGate = new(LockRecursionPolicy.NoRecursion);
+
+    private GpuModifiedWrite WriteGpuModified()
+    {
+        _gpuModifiedGate.EnterWriteLock();
+        return new GpuModifiedWrite(_gpuModifiedGate);
+    }
+
+    private readonly ref struct GpuModifiedWrite(ReaderWriterLockSlim gate)
+    {
+        public void Dispose() => gate.ExitWriteLock();
+    }
     private const int ObtainMemoSlots = 4096;
     private readonly ObtainMemo[] _obtainMemos = new ObtainMemo[ObtainMemoSlots];
 
@@ -312,7 +323,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
             if (!_gpuModifiedRanges.Contains(guestAddress, size))
             {
-                lock (_gpuModifiedGate)
+                using (WriteGpuModified())
                 {
                     _gpuModifiedRanges.Add(guestAddress, size);
                 }
@@ -544,7 +555,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         if ((publishFill || images.OverlapsDccMetadata(guestAddress, size)) && TryWriteFillToBacking(guestAddress, size, value))
         {
-            lock (_gpuModifiedGate)
+            using (WriteGpuModified())
             {
                 _gpuModifiedRanges.Remove(guestAddress, size);
             }
@@ -815,9 +826,14 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     public bool HasGpuDirtyBytes(ulong guestAddress, ulong size)
     {
-        lock (_gpuModifiedGate)
+        _gpuModifiedGate.EnterReadLock();
+        try
         {
             return _gpuModifiedRanges.Overlaps(guestAddress, size);
+        }
+        finally
+        {
+            _gpuModifiedGate.ExitReadLock();
         }
     }
 
@@ -1849,7 +1865,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             {
                 if (current[index])
                 {
-                    lock (_gpuModifiedGate)
+                    using (WriteGpuModified())
                     {
                         _gpuModifiedRanges.Remove(copies[index].Address, copies[index].Size);
                     }
@@ -2109,7 +2125,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             foreach (var copy in copies)
             {
-                lock (_gpuModifiedGate)
+                using (WriteGpuModified())
                 {
                     _gpuModifiedRanges.Remove(copy.Address, copy.Size);
                 }
@@ -2151,7 +2167,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         foreach (var copy in copies)
         {
-            lock (_gpuModifiedGate)
+            using (WriteGpuModified())
             {
                 _gpuModifiedRanges.Remove(copy.Address, copy.Size);
             }
@@ -2186,7 +2202,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return;
         }
 
-        lock (_gpuModifiedGate)
+        using (WriteGpuModified())
         {
             _gpuModifiedRanges.Remove(address, size);
         }

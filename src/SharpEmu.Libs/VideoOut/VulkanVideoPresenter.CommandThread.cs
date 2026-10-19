@@ -123,6 +123,7 @@ internal static partial class VulkanVideoPresenter
 
         private readonly List<Shadow> _shadows = new();
         private volatile Shadow[] _shadowSnapshot = [];
+        private volatile Item[] _pendingRangeSnapshot = [];
         private long _shadowGeneration;
 
         private static readonly long RetryTicks = CommandStreamQueue.AllBlockedRetryMilliseconds * Stopwatch.Frequency / 1000L;
@@ -237,6 +238,7 @@ internal static partial class VulkanVideoPresenter
                 {
                     _pendingRanges.Add(item);
                     _pendingRangeCount = _pendingRanges.Count;
+                    _pendingRangeSnapshot = _pendingRanges.ToArray();
                 }
             }
 
@@ -295,20 +297,17 @@ internal static partial class VulkanVideoPresenter
 
         private bool TryFindPendingRange(ulong address, ulong size, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Item? found)
         {
-            lock (_writeLock)
+            foreach (var pending in _pendingRangeSnapshot)
             {
-                foreach (var pending in _pendingRanges)
+                if (!pending.Done && address < pending.Address + pending.RangeSize && pending.Address < address + size)
                 {
-                    if (address < pending.Address + pending.RangeSize && pending.Address < address + size)
-                    {
-                        found = pending;
-                        return true;
-                    }
+                    found = pending;
+                    return true;
                 }
-
-                found = null;
-                return false;
             }
+
+            found = null;
+            return false;
         }
 
         public void NoteKnownWrite(KnownGpuWrite known, long sequence) => NoteKnownWrite(known, sequence, ShadowSource.Dispatch);
@@ -942,6 +941,7 @@ internal static partial class VulkanVideoPresenter
                     {
                         _pendingRanges.Remove(item);
                         _pendingRangeCount = _pendingRanges.Count;
+                        _pendingRangeSnapshot = _pendingRanges.ToArray();
                     }
                 }
 
