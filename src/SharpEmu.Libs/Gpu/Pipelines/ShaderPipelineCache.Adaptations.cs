@@ -262,6 +262,9 @@ internal sealed partial class ShaderPipelineCache
     }
 
     // Replaces only the exact masked-copy kernel shape; its writes land in command order over the guest range.
+    private bool IsCopyKernel(Gen5ShaderProgram program) =>
+        _copyKernels.GetValue(program, static decoded => new System.Runtime.CompilerServices.StrongBox<CopyKernel>(ClassifyCopyKernel(decoded))).Value != CopyKernel.None;
+
     private bool TrySubmitMaskedDwordCopyKernel(
         Gen5ShaderProgram program,
         ShaderSource source,

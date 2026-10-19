@@ -289,6 +289,34 @@ internal sealed class ShaderProgramCache
 
     private sealed class ShaderProgramRejectedException(string message) : Exception(message);
 
+    [ThreadStatic]
+    private static ProgramSourceEntry? _lastEntry;
+
+    internal static ProgramSourceEntry? LastEntry => _lastEntry;
+
+    internal bool TryGetProgramForEntry(ProgramSourceEntry entry, ShaderSource source, StageCompileOptions options, bool strictShaders,
+        ref uint pushDataCursor, out ShaderProgram program, out ShaderStageResources stage, out string rejection)
+    {
+        rejection = string.Empty;
+        try
+        {
+            program = CompleteProgram(entry, sourceWasCached: true, key: null, source, options, ref pushDataCursor, out stage);
+            return true;
+        }
+        catch (ShaderProgramRejectedException exception)
+        {
+            if (strictShaders)
+            {
+                throw SubmissionScheduler.Fatal(exception.Message);
+            }
+
+            program = default;
+            stage = default;
+            rejection = exception.Message;
+            return false;
+        }
+    }
+
     private ShaderProgram GetOrCompileCore(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor, out ShaderStageResources stage)
     {
         ProgramKey? key = null;
@@ -319,6 +347,13 @@ internal sealed class ShaderProgramCache
             }
         }
 
+        return CompleteProgram(entry, sourceWasCached, key, source, options, ref pushDataCursor, out stage);
+    }
+
+    private ShaderProgram CompleteProgram(ProgramSourceEntry entry, bool sourceWasCached, ProgramKey? key, ShaderSource source, StageCompileOptions options,
+        ref uint pushDataCursor, out ShaderStageResources stage)
+    {
+        _lastEntry = entry;
         var inputs = new ResourceRuntimeInputs
         {
             UserData = source.UserData,
@@ -376,7 +411,7 @@ internal sealed class ShaderProgramCache
             {
                 var caller = entry.Program with { Address = source.Address };
                 var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _host.TryReadCleanGuestWord);
-                var linkedKey = (key ?? throw new InvalidOperationException("The cached shader has no program key."), library.Identity);
+                var linkedKey = (key ?? KeyFor(source, options), library.Identity);
                 ProgramSourceEntry? linked;
                 lock (_gate)
                 {
@@ -431,7 +466,7 @@ internal sealed class ShaderProgramCache
                 }
             }
 
-            var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? BuildProgramKey(source), sourceWasCached, snapshot);
+            var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? KeyFor(source, options), sourceWasCached, snapshot);
             entry.Permutations.Add(permutation);
             ShaderCacheCounters.CountPermutation();
             stage = CreateStageResources(permutation.Program, snapshot, source, options);
@@ -443,6 +478,12 @@ internal sealed class ShaderProgramCache
 
             return permutation.Handle;
         }
+    }
+
+    private ProgramKey KeyFor(ShaderSource source, StageCompileOptions options)
+    {
+        BuildStaticState(source.Stage, options);
+        return BuildProgramKey(source);
     }
 
     // The key of the entry the static state was just built for.

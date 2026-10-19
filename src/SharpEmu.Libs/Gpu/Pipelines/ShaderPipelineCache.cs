@@ -214,16 +214,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     [ThreadStatic]
     private static KeptGraphicsPrograms? _keptGraphics;
     [ThreadStatic]
-    private static KeptComputeProgram? _keptCompute;
+    private static Dictionary<ulong, List<KeptComputeProgram>>? _keptComputes;
+    private const int KeptComputesPerShader = 4;
 
     private static long _graphicsKept;
     private static long _graphicsResolved;
     private static long _computeKept;
+    private static long _computeRebound;
     private static long _computeResolved;
 
     public static string TakeKeptProgramsReport() =>
         FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={Interlocked.Exchange(ref _graphicsKept, 0)} graphics_resolved={Interlocked.Exchange(ref _graphicsResolved, 0)} ") +
-        FormattableString.Invariant($"compute_kept={Interlocked.Exchange(ref _computeKept, 0)} compute_resolved={Interlocked.Exchange(ref _computeResolved, 0)}");
+        FormattableString.Invariant($"compute_kept={Interlocked.Exchange(ref _computeKept, 0)} compute_rebound={Interlocked.Exchange(ref _computeRebound, 0)} compute_resolved={Interlocked.Exchange(ref _computeResolved, 0)}");
 
 
     private bool TryKeepGraphicsPrograms(KeptGraphicsPrograms kept, ulong programsStamp, ulong vertexUserDataStamp, ulong pixelUserDataStamp, ulong contextStamp,
@@ -872,36 +874,116 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ)
     {
-        var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
-        var userDataStamp = banks.Stamp(RegisterStamp.ComputeUserData);
-        var contextStamp = banks.Stamp(RegisterStamp.Context);
-        var kept = _keptCompute ??= new KeptComputeProgram();
-        if (kept.Program is { } previous && kept.ProgramsStamp == programsStamp && kept.UserDataStamp == userDataStamp && kept.ContextStamp == contextStamp &&
-            kept.DispatchInitiator == dispatchInitiator && kept.DimensionX == dimensionX && kept.DimensionY == dimensionY && kept.DimensionZ == dimensionZ &&
-            kept.Registrations == ShaderHeaderRegistry.Registrations && _programs.Revalidate(previous.Input.Stage))
+        var compute = banks.Shader.Compute;
+        var registrations = ShaderHeaderRegistry.Registrations;
+        var all = _keptComputes ??= new Dictionary<ulong, List<KeptComputeProgram>>();
+        if (!all.TryGetValue(compute.Address, out var keptList))
         {
-            Interlocked.Increment(ref _computeKept);
-            return previous;
+            keptList = new List<KeptComputeProgram>(KeptComputesPerShader);
+            all.Add(compute.Address, keptList);
+        }
+
+        KeptComputeProgram? kept = null;
+        foreach (var candidate in keptList)
+        {
+            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator && SameComputeShape(candidate.Registers, compute))
+            {
+                kept = candidate;
+                break;
+            }
+        }
+
+        if (kept is not null)
+        {
+            if (kept.Program is { } previous && kept.DimensionX == dimensionX && kept.DimensionY == dimensionY && kept.DimensionZ == dimensionZ &&
+                SameUserScalars(kept.Registers.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
+            {
+                Interlocked.Increment(ref _computeKept);
+                return previous;
+            }
+
+            if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
+            {
+                Interlocked.Increment(ref _computeRebound);
+                var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+                KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
+                return rebound;
+            }
         }
 
         Interlocked.Increment(ref _computeResolved);
-        kept.Program = null;
-        var program = GetComputeProgram(banks.Shader.Compute, banks.Context.ShaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
-        if (program.Available && !program.Consumed && program.KnownWrite is null)
+        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var copyKernel);
+        if (kept is null)
         {
-            kept.Program = program;
-            kept.ProgramsStamp = programsStamp;
-            kept.UserDataStamp = userDataStamp;
-            kept.ContextStamp = contextStamp;
-            kept.DispatchInitiator = dispatchInitiator;
-            kept.DimensionX = dimensionX;
-            kept.DimensionY = dimensionY;
-            kept.DimensionZ = dimensionZ;
-            kept.Registrations = ShaderHeaderRegistry.Registrations;
+            if (keptList.Count == KeptComputesPerShader)
+            {
+                keptList.RemoveAt(0);
+            }
+
+            kept = new KeptComputeProgram { Registrations = registrations, DispatchInitiator = dispatchInitiator };
+            keptList.Add(kept);
         }
 
+        kept.Source = source;
+        kept.SystemRegisters = systemRegisters;
+        kept.Entry = program.Available && !program.Consumed && !copyKernel && source is not null ? ShaderProgramCache.LastEntry : null;
+        KeepComputeProgram(kept, program, compute, dimensionX, dimensionY, dimensionZ);
         return program;
     }
+
+    private static void KeepComputeProgram(KeptComputeProgram kept, ComputeProgram program, ComputeStageRegisters compute, uint dimensionX, uint dimensionY, uint dimensionZ)
+    {
+        kept.Program = program.Available && !program.Consumed && program.KnownWrite is null ? program : null;
+        if (kept.Registers is { } registers && SameComputeShape(registers, compute))
+        {
+            var count = compute.UserScalarCount;
+            compute.UserScalars.Values.AsSpan(0, count).CopyTo(registers.UserScalars.Values);
+            compute.UserScalars.Kinds.AsSpan(0, count).CopyTo(registers.UserScalars.Kinds);
+        }
+        else
+        {
+            kept.Registers = compute.Copy();
+        }
+        kept.DimensionX = dimensionX;
+        kept.DimensionY = dimensionY;
+        kept.DimensionZ = dimensionZ;
+    }
+
+    private ComputeProgram RebindComputeProgram(KeptComputeProgram kept, ProgramSourceEntry entry, ComputeStageRegisters compute, uint dispatchInitiator,
+        uint dimensionX, uint dimensionY, uint dimensionZ)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+        var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
+        var source = kept.Source! with { UserData = userData };
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
+        var pushDataCursor = 0u;
+        var options = new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = kept.SystemRegisters };
+        if (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out var handle, out var stage, out var rejection))
+        {
+            ReportShaderSkip(source, rejection);
+            return new ComputeProgram { Available = false };
+        }
+
+        input.Stage = stage;
+        return new ComputeProgram { Program = handle, Input = input };
+    }
+
+    private static bool SameUserScalars(UserScalarRegisters kept, UserScalarRegisters current, int count) =>
+        kept.Values.AsSpan(0, count).SequenceEqual(current.Values.AsSpan(0, count)) &&
+        kept.Kinds.AsSpan(0, count).SequenceEqual(current.Kinds.AsSpan(0, count));
+
+    private static bool SameComputeShape(ComputeStageRegisters? kept, ComputeStageRegisters current) =>
+        kept is not null &&
+        kept.Address == current.Address && kept.ProgramChecksum == current.ProgramChecksum &&
+        kept.ThreadsX == current.ThreadsX && kept.ThreadsY == current.ThreadsY && kept.ThreadsZ == current.ThreadsZ &&
+        kept.VectorRegisterCount == current.VectorRegisterCount && kept.Priority == current.Priority && kept.FloatMode == current.FloatMode &&
+        kept.Dx10Clamp == current.Dx10Clamp && kept.DebugMode == current.DebugMode && kept.IeeeMode == current.IeeeMode &&
+        kept.RequireForwardProgress == current.RequireForwardProgress && kept.HalfPrecisionOverflow == current.HalfPrecisionOverflow &&
+        kept.ThreadgroupConfiguration == current.ThreadgroupConfiguration && kept.WaveSize == current.WaveSize && kept.ScratchEnable == current.ScratchEnable &&
+        kept.UserScalarCount == current.UserScalarCount && kept.ThreadGroupIdXEnable == current.ThreadGroupIdXEnable &&
+        kept.ThreadGroupIdYEnable == current.ThreadGroupIdYEnable && kept.ThreadGroupIdZEnable == current.ThreadGroupIdZEnable &&
+        kept.ThreadGroupSizeEnable == current.ThreadGroupSizeEnable && kept.ThreadIdComponentCount == current.ThreadIdComponentCount &&
+        kept.LocalDataShareSize == current.LocalDataShareSize && kept.SharedVectorRegisters == current.SharedVectorRegisters;
 
     public ComputeProgram GetComputeProgram(
         ComputeStageRegisters compute,
@@ -911,10 +993,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionY,
         uint dimensionZ)
     {
+        return ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out _, out _, out _);
+    }
+
+    private ComputeProgram ResolveComputeProgram(ComputeStageRegisters compute, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ,
+        out ShaderSource? resolvedSource, out Gen5ComputeSystemRegisters resolvedSystemRegisters, out bool copyKernel)
+    {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
         var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", userData, userDataBase: 0, out _);
         var program = _programs.Decode(source);
+        var systemRegisters = DecodeComputeSystemRegisters(compute);
+        resolvedSource = source;
+        resolvedSystemRegisters = systemRegisters;
+        copyKernel = IsCopyKernel(program);
         if (_skipRayTracing)
         {
             lock (_rayTracingComputePrograms)
@@ -933,7 +1025,6 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
         }
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
-        var systemRegisters = DecodeComputeSystemRegisters(compute);
         if (TrySubmitMaskedDwordCopyKernel(program, source, systemRegisters, input, dimensionX, dimensionY, dimensionZ, out var description, out var knownWrite))
         {
             if (RenderTrace.Enabled)
@@ -966,6 +1057,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (_programs.TryGetProgram(source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
             return true;
 
+        ReportShaderSkip(source, rejection);
+        return false;
+    }
+
+    private void ReportShaderSkip(ShaderSource source, string rejection)
+    {
         bool reported;
         lock (_reportedShaderSkips)
         {
@@ -978,7 +1075,6 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             Console.Error.WriteLine($"[GPU][WARN][{tag}] {rejection} " +
                 "The operation was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on this failure.");
         }
-        return false;
     }
 
     // The system registers that follow the user data, in the order the resource register enables them.
@@ -1404,9 +1500,11 @@ internal sealed class KeptGraphicsPrograms
 internal sealed class KeptComputeProgram
 {
     public ComputeProgram? Program;
-    public ulong ProgramsStamp;
-    public ulong UserDataStamp;
-    public ulong ContextStamp;
+    public ComputeStageRegisters? Registers;
+    public ShaderSource? Source;
+    public Gen5ComputeSystemRegisters SystemRegisters;
+    public ProgramSourceEntry? Entry;
+    public long Rebinds;
     public long Registrations;
     public uint DispatchInitiator;
     public uint DimensionX;
