@@ -20,6 +20,8 @@ public unsafe class GpuBuffer : IDisposable
 
     public const BufferUsageFlags AllFlags = ReadFlags | BufferUsageFlags.TransferDstBit | BufferUsageFlags.StorageBufferBit;
 
+    public const BufferUsageFlags AddressedFlags = AllFlags | BufferUsageFlags.ShaderDeviceAddressBit;
+
     private const AccessFlags MemoryAccess = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit;
     private const AccessFlags HostAccess = AccessFlags.HostReadBit | AccessFlags.HostWriteBit;
 

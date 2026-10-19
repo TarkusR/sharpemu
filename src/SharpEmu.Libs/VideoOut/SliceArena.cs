@@ -55,7 +55,7 @@ internal sealed class SliceArenaPool : IDisposable
         }
 
         var size = Math.Max(ChunkBytes, (minimumBytes + ChunkBytes - 1) / ChunkBytes * ChunkBytes);
-        chunk = new SliceArenaChunk(new GpuBuffer(_device, _scheduler, GpuBufferUsage.Upload, 0, GpuBuffer.AllFlags, size));
+        chunk = new SliceArenaChunk(new GpuBuffer(_device, _scheduler, GpuBufferUsage.Upload, 0, GpuBuffer.AddressedFlags, size));
         lock (_all)
         {
             _all.Add(chunk);
