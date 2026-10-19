@@ -2531,7 +2531,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         bool isTexelBuffer, bool preserveCpuWriteHotPages, long startedAt)
     {
         var copies = collector.Copies;
+        var trackingStarted = RenderPhaseProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         _tracker.ForEachUploadRange(guestAddress, size, isWritten, collector.Collect, collector.Upload, preserveCpuWriteHotPages);
+        var recordStarted = trackingStarted != 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         var source = collector.Source;
         var totalSize = collector.TotalSize;
         if (source != null)
@@ -2542,6 +2544,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         if (source != null)
         {
             BufferUploadProfile.NoteUpload(copies.Count, totalSize, size);
+            if (recordStarted != 0)
+            {
+                BufferUploadProfile.NoteUploadShape(guestAddress, size, totalSize, recordStarted - trackingStarted, System.Diagnostics.Stopwatch.GetTimestamp() - recordStarted);
+            }
         }
 
         if (BufferUploadProfile.Enabled)

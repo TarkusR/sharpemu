@@ -120,8 +120,57 @@ internal static class BufferUploadProfile
         Interlocked.Add(ref _totalRangeBytes, (long)rangeBytes);
     }
 
+    private static readonly long[] _shapeUploads = new long[5];
+    private static readonly long[] _shapeBytes = new long[5];
+    private static readonly string[] ShapeNames = ["le4k", "le16k", "le64k", "le256k", "gt256k"];
+    private static readonly Dictionary<(ulong, ulong), long> _lastUploadAt = new();
+    private static long _repeatUploads;
+    private static long _trackingTicks;
+    private static long _recordTicks;
+
+    internal static void NoteUploadShape(ulong address, ulong rangeSize, ulong bytes, long trackingTicks, long recordTicks)
+    {
+        if (!RenderPhaseProfile.Enabled) return;
+        var bucket = bytes <= 4096 ? 0 : bytes <= 16384 ? 1 : bytes <= 65536 ? 2 : bytes <= 262144 ? 3 : 4;
+        _shapeUploads[bucket]++;
+        _shapeBytes[bucket] += (long)bytes;
+        _trackingTicks += trackingTicks;
+        _recordTicks += recordTicks;
+        var now = Environment.TickCount64;
+        if (_lastUploadAt.TryGetValue((address, rangeSize), out var last) && now - last <= 100)
+        {
+            _repeatUploads++;
+        }
+
+        if (_lastUploadAt.Count >= 65536)
+        {
+            _lastUploadAt.Clear();
+        }
+
+        _lastUploadAt[(address, rangeSize)] = now;
+    }
+
+    private static string TakeShapeReport()
+    {
+        var parts = new List<string>();
+        for (var index = 0; index < ShapeNames.Length; index++)
+        {
+            parts.Add(ShapeNames[index] + "=" + FormattableString.Invariant($"{_shapeUploads[index]}/{_shapeBytes[index] / 1048576.0:F1}MB"));
+            _shapeUploads[index] = 0;
+            _shapeBytes[index] = 0;
+        }
+
+        var report = "shapes=" + string.Join(",", parts) + " " +
+            FormattableString.Invariant($"repeat_100ms={_repeatUploads} tracking_ms={_trackingTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} record_ms={_recordTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
+        _repeatUploads = 0;
+        _trackingTicks = 0;
+        _recordTicks = 0;
+        return report;
+    }
+
     internal static string TakeTotalsReport() =>
         FormattableString.Invariant($"[PERF][BUFFER_SYNC_TOTAL] uploads={Interlocked.Exchange(ref _totalUploads, 0)} copies={Interlocked.Exchange(ref _totalCopies, 0)} bytes={Interlocked.Exchange(ref _totalBytes, 0)} range_bytes={Interlocked.Exchange(ref _totalRangeBytes, 0)} ") +
+        TakeShapeReport() + " " +
         FormattableString.Invariant($"widened={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploads, 0)} widened_bytes={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploadBytes, 0)} ") +
         FormattableString.Invariant($"hot_skipped={SharpEmu.HLE.GpuMemory.TrackedRegion.TakeHotUploadsSkipped()}");
 
