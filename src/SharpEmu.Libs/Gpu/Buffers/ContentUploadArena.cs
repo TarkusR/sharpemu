@@ -16,6 +16,7 @@ public sealed class ContentUploadArena : IDisposable
     private sealed class Arena(GpuBuffer buffer)
     {
         public readonly GpuBuffer Buffer = buffer;
+        public readonly byte[] Mirror = GC.AllocateUninitializedArray<byte>((int)ArenaBytes);
         public readonly Dictionary<ulong, (ulong Offset, int Size)> Entries = new();
         public readonly Dictionary<uint[], (ulong Offset, int Size)> IdentityEntries = new(ReferenceEqualityComparer.Instance);
         public ulong Offset;
@@ -96,7 +97,7 @@ public sealed class ContentUploadArena : IDisposable
                 continue;
             }
 
-            if (entry.Size != data.Length || !data.SequenceEqual(arena.Buffer.Mapped.Slice((int)entry.Offset, entry.Size)))
+            if (entry.Size != data.Length || !data.SequenceEqual(arena.Mirror.AsSpan((int)entry.Offset, entry.Size)))
             {
                 Interlocked.Increment(ref _collisions);
                 break;
@@ -144,6 +145,7 @@ public sealed class ContentUploadArena : IDisposable
         }
 
         active.Buffer.Write(aligned, data);
+        data.CopyTo(active.Mirror.AsSpan((int)aligned));
         active.Offset = aligned + (ulong)data.Length;
         active.LastUseTick = tick;
         Interlocked.Increment(ref _stores);
