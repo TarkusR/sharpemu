@@ -31,6 +31,10 @@ internal static unsafe partial class VulkanVideoPresenter
     private static long _sliceItems;
     private static long _serialItems;
     private static long _sliceWaitTicks;
+    private static long _slicesStolen;
+    private static long _stolenItems;
+    private static long _restChunks;
+    private static long _restItems;
     private static long _streamCopies;
     private static long _streamFallbacks;
     private static readonly ConcurrentDictionary<string, long> _serialReasons = new();
@@ -47,6 +51,7 @@ internal static unsafe partial class VulkanVideoPresenter
         FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
         FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
         FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +
+        FormattableString.Invariant($"stolen={Interlocked.Exchange(ref _slicesStolen, 0)} stolen_items={Interlocked.Exchange(ref _stolenItems, 0)} rest_chunks={Interlocked.Exchange(ref _restChunks, 0)} rest_items={Interlocked.Exchange(ref _restItems, 0)} ") +
         "serial_reasons=" + TakeSerialReasons() + " " + GuestImageCache.TakeSliceLookupReport() + " " + TakeGcReport();
 
     private static string TakeGcReport()
@@ -117,12 +122,18 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool Submitted;
         public bool Dispatched;
         public Exception? Failure;
+        private int _claimed;
+
+        public bool TryClaim() => Interlocked.CompareExchange(ref _claimed, 1, 0) == 0;
     }
 
 
     private sealed class RenderWorkerPool : IDisposable
     {
-        private readonly BlockingCollection<RenderSlice> _queue = new();
+        private readonly ConcurrentQueue<RenderSlice> _queue = new();
+        private readonly ConcurrentQueue<RenderSlice> _urgent = new();
+        private readonly SemaphoreSlim _available = new(0);
+        private volatile bool _stopping;
         private readonly Thread[] _threads;
         private readonly RecordingHost[] _hosts;
 
@@ -141,14 +152,34 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public int Count => _threads.Length;
 
-        public void Dispatch(RenderSlice slice) => _queue.Add(slice);
+        public void Dispatch(RenderSlice slice, bool urgent)
+        {
+            (urgent ? _urgent : _queue).Enqueue(slice);
+            _available.Release();
+        }
 
         private void Run(RecordingHost host)
         {
             RenderPhaseProfile.AttachResolveWorker();
             SubmissionScheduler.MarkReadOnlyThread(static operation => new SerialRequiredException("unguarded " + operation));
-            foreach (var slice in _queue.GetConsumingEnumerable())
+            while (true)
             {
+                _available.Wait();
+                if (!_urgent.TryDequeue(out var slice) && !_queue.TryDequeue(out slice))
+                {
+                    if (_stopping)
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                if (!slice.TryClaim())
+                {
+                    continue;
+                }
+
                 var allocated = RenderPhaseProfile.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
                 try
                 {
@@ -173,7 +204,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void Dispose()
         {
-            _queue.CompleteAdding();
+            _stopping = true;
+            _available.Release(_threads.Length);
             foreach (var thread in _threads)
             {
                 thread.Join();
@@ -221,12 +253,24 @@ internal static unsafe partial class VulkanVideoPresenter
 
         internal int WorkerCount => _workers?.Count ?? 0;
 
-        internal void DispatchSlice(RenderSlice slice)
+        internal void DispatchSlice(RenderSlice slice, bool urgent = false)
         {
             slice.Dispatched = true;
             slice.Generation = _scheduler.BeginSliceCut();
             _bufferCache.RefreshSnapshot();
-            _workers!.Dispatch(slice);
+            _workers!.Dispatch(slice, urgent);
+        }
+
+        internal static void NoteStolen(int items)
+        {
+            Interlocked.Increment(ref _slicesStolen);
+            Interlocked.Add(ref _stolenItems, items);
+        }
+
+        internal static void NoteRestChunk(int items)
+        {
+            Interlocked.Increment(ref _restChunks);
+            Interlocked.Add(ref _restItems, items);
         }
 
         // The next finished segment of the slice in order, or null once the recording thread is done with it.

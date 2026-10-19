@@ -81,6 +81,8 @@ internal static partial class VulkanVideoPresenter
 
         private const int SliceItems = 256;
         private const int MinimumSliceItems = 8;
+        private const int RestInlineItems = 8;
+        private const int RestChunkItems = 32;
         internal const ulong SmallTransferBytes = 64;
 
         private readonly Presenter _presenter;
@@ -760,6 +762,26 @@ internal static partial class VulkanVideoPresenter
                 _presenter.DispatchSlice(slice);
             }
 
+            if (slice.TryClaim())
+            {
+                Presenter.NoteStolen(slice.Items.Count);
+                slice.Done.Set();
+                try
+                {
+                    foreach (var item in slice.Items)
+                    {
+                        RunInline(item, betweenItems);
+                        ran++;
+                    }
+                }
+                finally
+                {
+                    _presenter.FinishSlice(slice);
+                }
+
+                return ran;
+            }
+
             try
             {
                 while (_presenter.NextSegment(slice) is { } segment)
@@ -804,16 +826,25 @@ internal static partial class VulkanVideoPresenter
                 return ran;
             }
 
-            if (_presenter.SlicesEnabled && remaining >= MinimumSliceItems)
+            var inline = slice.Items.Count;
+            if (_presenter.SlicesEnabled && remaining >= RestInlineItems + MinimumSliceItems)
             {
-                var rest = new RenderSlice();
-                rest.Items.AddRange(slice.Items.GetRange(slice.Resume, remaining));
-                _units.Insert(_unitHead, new Unit { Slice = rest });
-                _presenter.DispatchSlice(rest);
-                return ran;
+                inline = slice.Resume + RestInlineItems;
+                var chunks = (slice.Items.Count - inline + RestChunkItems - 1) / RestChunkItems;
+                var start = inline;
+                for (var chunk = 0; chunk < chunks; chunk++)
+                {
+                    var end = inline + (int)((long)(slice.Items.Count - inline) * (chunk + 1) / chunks);
+                    var rest = new RenderSlice();
+                    rest.Items.AddRange(slice.Items.GetRange(start, end - start));
+                    _units.Insert(_unitHead + chunk, new Unit { Slice = rest });
+                    _presenter.DispatchSlice(rest, urgent: true);
+                    Presenter.NoteRestChunk(rest.Items.Count);
+                    start = end;
+                }
             }
 
-            for (var position = slice.Resume; position < slice.Items.Count; position++)
+            for (var position = slice.Resume; position < inline; position++)
             {
                 RunInline(slice.Items[position], betweenItems);
                 ran++;
