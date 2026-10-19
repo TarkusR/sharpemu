@@ -288,7 +288,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_worker)
             {
                 image = _imageCache.PeekImage(imageIdentifier);
-                return image is null || (!image.Registered && !ImageDescription.IsEmptyRange(image.Description.Data)) || image.Binding.NeedsRebind;
+                return image is null || IsStale(image);
             }
 
             if (!_imageCache.TryGetImage(imageIdentifier, out var found))
@@ -298,8 +298,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             image = found;
-            return (!found.Registered && !ImageDescription.IsEmptyRange(found.Description.Data)) || found.Binding.NeedsRebind;
+            return IsStale(found);
         }
+
+        private static bool IsStale(CachedImage image) =>
+            ((!image.Registered || image.DepthOwner.IsValid) && !ImageDescription.IsEmptyRange(image.Description.Data)) || image.Binding.NeedsRebind;
 
         // Final acquisition: the view, the attachment layout and a pending DCC clear.
         internal void AcquireColorAttachment(ColorAttachment target)
