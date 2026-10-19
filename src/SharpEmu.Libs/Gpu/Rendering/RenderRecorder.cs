@@ -19,6 +19,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private readonly bool _strictDrawResources;
     private readonly RecordPool _pool;
     private readonly PendingGpuWrites? _pendingWrites;
+    private readonly bool _returnsRecords;
     private readonly HashSet<(ulong ShaderHash, ImageType ImageType, ImageViewType ViewType)> _reportedDrawImageTypeMismatches = [];
     private readonly BufferBinding[] _vertexBindings = new BufferBinding[VertexInputInfo.MaxBuffers];
     private readonly VertexBufferRange[] _vertexRanges = new VertexBufferRange[VertexInputInfo.MaxBuffers];
@@ -37,9 +38,11 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
     private readonly record struct PreparedIndexBuffer(BufferBinding Binding, ulong Size, IndexType Type);
 
-    public RenderRecorder(IRenderHost host, IShaderPipelineProvider pipelines, bool strictDrawResources, PendingGpuWrites? pendingWrites = null, RecordPool? pool = null)
+    public RenderRecorder(IRenderHost host, IShaderPipelineProvider pipelines, bool strictDrawResources, PendingGpuWrites? pendingWrites = null, RecordPool? pool = null,
+        bool returnsRecords = true)
     {
         _host = host;
+        _returnsRecords = returnsRecords;
         _pipelines = pipelines;
         _strictDrawResources = strictDrawResources;
         _pendingWrites = pendingWrites;
@@ -57,7 +60,10 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         finally
         {
             _pendingWrites?.Release(record.Sequence);
-            _pool.Return(record);
+            if (_returnsRecords)
+            {
+                _pool.Return(record);
+            }
         }
     }
 
@@ -648,7 +654,6 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             var clear = acquired.MetadataClear ? acquired.MetadataClearValue : target.Resolution.ColorClearValue;
             rendering.ColorAttachments[i] = new RenderingAttachment(
                 acquired.View,
-                acquired.Layout,
                 view.Format,
                 clear.Uint32_0,
                 clear.Uint32_1,
@@ -683,10 +688,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             }
 
             var loadState = depth.LoadState;
-            var layout = _host.SamplesDepthAttachment(in depth)
-                ? loadState.AttachmentLayout(target.Format)
-                : DepthStencilState.WritableAttachmentLayout(target.Format);
-            _host.TransitionDepthAttachment(in depth, layout, loadState.AttachmentWriteAspects(target.Format));
+            _host.TransitionDepthAttachment(in depth, loadState.AttachmentWriteAspects(target.Format));
             var view = target.Request.View;
             rendering.Width = Math.Min(rendering.Width, target.Width);
             rendering.Height = Math.Min(rendering.Height, target.Height);
@@ -694,7 +696,6 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             var aspects = ViewFormatRules.DepthAspects(target.Format);
             rendering.DepthStencilAttachment = new RenderingAttachment(
                 acquired.View,
-                layout,
                 target.Format,
                 BitConverter.SingleToUInt32Bits(depth.Target.State.DepthClearValue),
                 depth.Target.State.StencilClearValue,

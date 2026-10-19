@@ -61,6 +61,7 @@ public sealed partial class GpuCommandInterpreter
             case 0:
                 // Clearing predication reads no memory, so no GPU result can be outstanding.
                 PredicateSkip = false;
+                Interlocked.Increment(ref _predicationClears);
                 break;
             case 3:
             {
@@ -74,9 +75,11 @@ public sealed partial class GpuCommandInterpreter
                     // The results are outstanding while work is queued behind this packet, and
                     // the game asked for the packets to run unpredicated in that case.
                     PredicateSkip = false;
+                    Interlocked.Increment(ref _predicationBoolUnpredicated);
                     break;
                 }
 
+                Interlocked.Increment(ref _predicationBoolWaiting);
                 _host.FlushAndWait();
                 var value = ReadQword(address);
                 PredicateSkip = condition switch

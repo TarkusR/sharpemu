@@ -119,7 +119,7 @@ public sealed class VulkanCommandProfileTests(HeadlessVulkanFixture fixture) : I
         var submission = new SubmitBundle();
         submission.AddSignal(device.TimelineHandle, tick);
         lock (device.QueueGate)
-            Assert.True(device.TrySubmit(buffer, submission, out var submitFailure), submitFailure);
+            Assert.True(device.TrySubmit([buffer], submission, out var submitFailure), submitFailure);
         Assert.True(device.TryWaitTimeline(tick, out var waitFailure), waitFailure);
     }
 }

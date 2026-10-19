@@ -46,6 +46,19 @@ public sealed class GuestPageTracker
         });
     }
 
+    public (ulong Address, ulong Size) ExtendCpuDirtyRun(ulong vaddr, ulong size, ulong lowerBound, ulong upperBound, bool preserveHotPages, int budgetPages)
+    {
+        ValidateRange(vaddr, size);
+        var index = vaddr / BlockBytes;
+        if (budgetPages <= 0 || (vaddr + size - 1) / BlockBytes != index || Volatile.Read(ref _regions[index]) is not { } region)
+        {
+            return (vaddr, size);
+        }
+
+        using var _ = region.Lock.Hold();
+        return region.ExtendCpuDirtyRun(vaddr, size, lowerBound, upperBound, preserveHotPages, budgetPages);
+    }
+
     public bool MayHaveCpuDirtyPages(ulong vaddr, ulong size)
     {
         if (IsKnownCpuClean(vaddr, size))
@@ -347,6 +360,8 @@ public sealed class GuestPageTracker
     }
 
     // Region locks stay held across uploadFunc only for a written range, which turns GPU-dirty.
+    public long UploadBatch { get; set; } = -1;
+
     public void ForEachUploadRange(ulong vaddr, ulong size, bool isWritten, Action<ulong, ulong> rangeFunc, Action uploadFunc,
         bool preserveCpuWriteHotPages = true)
     {
@@ -386,7 +401,8 @@ public sealed class GuestPageTracker
                         address,
                         bytes,
                         recordCleared,
-                        rangeFunc);
+                        rangeFunc,
+                        UploadBatch);
                     if (!isWritten)
                     {
                         region.Lock.Exit();

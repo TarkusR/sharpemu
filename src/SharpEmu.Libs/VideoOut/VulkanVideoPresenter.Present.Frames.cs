@@ -765,7 +765,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (!string.IsNullOrWhiteSpace(dumpDir))
                 {
                     Directory.CreateDirectory(dumpDir);
-                    var seq = Interlocked.Increment(ref _guestImageDumpSequence);
+                    var seq = Interlocked.Increment(ref RecordingHost._guestImageDumpSequence);
                     var path = Path.Combine(
                         dumpDir,
                         $"present-{seq:D4}-{_extent.Width}x{_extent.Height}-{_swapchainFormat}.bgra");

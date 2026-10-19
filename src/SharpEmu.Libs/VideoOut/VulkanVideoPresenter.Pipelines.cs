@@ -22,6 +22,26 @@ internal static unsafe partial class VulkanVideoPresenter
 {
     private const string PushDescriptorExtensionName = "VK_KHR_push_descriptor";
 
+    // One created pipeline with the layout it binds and the description its rectangle-list variants derive from.
+    private sealed class RenderPipelineEntry
+    {
+        public ulong Id;
+        public Pipeline Pipeline;
+        public PipelineLayout Layout;
+        public DescriptorSetLayout SetLayout;
+        public DescriptorSetDemand Demand;
+        public bool UsesPushDescriptors;
+        public GraphicsPipelineDescription? Description;
+        public Pipeline StripVariant;
+        public Pipeline ListVariant;
+        public Pipeline RectangleVariant;
+        public ulong ProfileVertexHash;
+        public ulong ProfilePixelHash;
+        public ulong ProfileComputeHash;
+
+        public bool RectangleList => Description is { StaticParameters.Topology: PrimitiveTopology.PatchList };
+    }
+
     private sealed partial class Presenter : IShaderPipelineHost
     {
         private const string FullscreenBarycentricVertexSpirv =
@@ -35,36 +55,16 @@ internal static unsafe partial class VulkanVideoPresenter
         private static int _vertexSwizzleLines;
         private static int _vertexOutOfBoundsLines;
 
-        // One created pipeline with the layout it binds and the description its rectangle-list variants derive from.
-        private sealed class RenderPipelineEntry
-        {
-            public ulong Id;
-            public Pipeline Pipeline;
-            public PipelineLayout Layout;
-            public DescriptorSetLayout SetLayout;
-            public DescriptorSetDemand Demand;
-            public bool UsesPushDescriptors;
-            public GraphicsPipelineDescription? Description;
-            public Pipeline StripVariant;
-            public Pipeline ListVariant;
-            public Pipeline RectangleVariant;
-            public ulong ProfileVertexHash;
-            public ulong ProfilePixelHash;
-            public ulong ProfileComputeHash;
-
-            public bool RectangleList => Description is { StaticParameters.Topology: PrimitiveTopology.PatchList };
-        }
-
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
         private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, int> _shaderModuleSpirvBytes = new();
         private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte[]> _rectangleStageCode = new();
         private readonly Dictionary<ulong, string> _shaderModuleCacheIdentities = new();
         private long _pipelineCreationMilliseconds;
-        private KhrPushDescriptor _pushDescriptorApi = null!;
+        internal KhrPushDescriptor _pushDescriptorApi = null!;
         private uint _maxPushDescriptors;
         private SampleCountFlags _noAttachmentSampleCounts;
-        private DescriptorHeap _descriptorHeap = null!;
-        private SharpEmu.Libs.Gpu.Buffers.ContentUploadArena _contentUploads = null!;
+        internal DescriptorHeap _descriptorHeap = null!;
+        internal SharpEmu.Libs.Gpu.Buffers.ContentUploadArena _contentUploads = null!;
 
         uint IShaderPipelineHost.MaxPushDescriptors => _maxPushDescriptors;
 
@@ -260,7 +260,6 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
-        public void NoteKnownGpuContents(ulong address, ReadOnlySpan<uint> words) => _bufferCache.NoteKnownGpuContents(address, words);
 
         public bool CpuWriteNeedsGpuData(ulong address, ulong size) =>
             address != 0 && size != 0 && new SharpEmu.HLE.GpuMemory.GuestSpan(address, size).IsValid &&
@@ -294,27 +293,6 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var size = (ulong)destination.Length;
             CompletePendingPublicationsForResourceRead(address, size);
-            if (!_guestMemory.CanRead(address, size))
-            {
-                return false;
-            }
-
-            if (!clean && _commandThread!.TryReadShadowBefore(address, destination, _resolveWorker!.Sequence, out var shadowSequence))
-            {
-                if (_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, shadowSequence, _resolveWorker.Sequence))
-                {
-                    return false;
-                }
-
-                SharpEmu.Libs.Agc.AgcExports.NoteWorkerShadowRead();
-                return true;
-            }
-
-            if ((clean ? IsGpuOwnedForWorkerCleanRead(address, size) : IsGpuOwnedForWorkerRead(address, size)) || IsPendingForWorker(address, size))
-            {
-                return false;
-            }
-
             var worker = _resolveWorker!;
             if (!clean && IsCleanReadPage(address, size) && TryReadAliasBytes(address, destination))
             {
@@ -322,9 +300,26 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
-            if (!clean && TryReadShadowForWorker(address, destination))
+            if (!_guestMemory.CanRead(address, size))
             {
+                return false;
+            }
+
+            if (!clean && _commandThread!.TryReadShadowBefore(address, destination, worker.Sequence, out var shadowSequence, out var shadowSource))
+            {
+                if ((_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, shadowSequence, worker.Sequence)) ||
+                    _commandThread.HasPendingRangeBetween(address, size, shadowSequence, worker.Sequence))
+                {
+                    return false;
+                }
+
+                SharpEmu.Libs.Agc.AgcExports.NoteWorkerShadowRead((int)shadowSource);
                 return true;
+            }
+
+            if ((clean ? IsGpuOwnedForWorkerCleanRead(address, size) : IsGpuOwnedForWorkerRead(address, size)) || IsPendingForWorker(address, size))
+            {
+                return false;
             }
 
             if (!_commandThread!.ReadOverlayBefore(address, destination, worker.Sequence))
@@ -369,13 +364,14 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var thread = _commandThread!;
-            thread.WaitForPendingRange(address, size);
-            if (!clean && thread.TryReadShadow(address, destination, out var shadowSequence) && !NewerPendingWrite(address, size, shadowSequence))
+            if (!clean && thread.TryReadShadow(address, destination, out var shadowSequence, out var shadowSource) &&
+                !NewerPendingWrite(address, size, shadowSequence) && !thread.HasPendingRangeAfter(address, size, shadowSequence))
             {
-                Diagnostics.CommandThreadTally.NoteShadowRead();
+                Diagnostics.CommandThreadTally.NoteShadowRead((int)shadowSource);
                 return true;
             }
 
+            thread.WaitForPendingRange(address, size);
             if (IsPendingOnCommandThread(address, size) || IsGpuOwnedForResidentRead(address, size, clean) || !thread.ReadOverlay(address, destination))
             {
                 return false;
@@ -434,7 +430,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private sealed class CleanReadPages
         {
             public readonly ulong[] Tags = new ulong[CleanReadPageSlots];
-            public readonly long[] Versions = new long[CleanReadPageSlots];
             public readonly ulong[] Aliases = new ulong[CleanReadPageSlots];
             public readonly object?[] Snapshots = new object?[CleanReadPageSlots];
         }
@@ -492,7 +487,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (Reads is not { } pages ||
                 !TryGetCleanReadPage(address, size, out var page, out var slot) ||
                 pages.Tags[slot] != page + 1 ||
-                pages.Versions[slot] != _bufferCache.GpuModifiedVersion)
+                _bufferCache.MayHaveGpuDirtyPages(page, CleanReadPageBytes))
             {
                 return false;
             }
@@ -503,7 +498,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var thread = _commandThread!;
-            return !thread.HasPendingStores &&
+            return !thread.HasPendingStores(page, CleanReadPageBytes) &&
                 (_translation.PendingWrites is not { } pending || !pending.MayHavePending(page, CleanReadPageBytes)) &&
                 !thread.HasShadow(page, CleanReadPageBytes);
         }
@@ -515,7 +510,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            var version = _bufferCache.GpuModifiedVersion;
             var command = OnCommandThread;
             var worker = OnResolveWorker;
             if (!_guestMemory.CanRead(page, CleanReadPageBytes) || _bufferCache.HasGpuDirtyBytes(page, CleanReadPageBytes) ||
@@ -533,8 +527,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 pages.Aliases[slot] = 0;
                 pages.Snapshots[slot] = null;
             }
-
-            pages.Versions[slot] = version;
         }
 
         public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
@@ -823,8 +815,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private PipelineHandle RegisterPipeline(RenderPipelineEntry entry, Action? transferOwnership = null)
         {
-            entry.Id = ++_nextPipelineId;
-            _pipelineEntries.Add(entry.Id, entry);
+            entry.Id = Interlocked.Increment(ref _nextPipelineId);
+            _pipelineEntries.TryAdd(entry.Id, entry);
             transferOwnership?.Invoke();
             if (_gpuCommandProfile is not null)
             {
@@ -1006,7 +998,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // One graphics pipeline for dynamic rendering: the attachment formats travel in the create info.
-        private Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout,
+        internal Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout,
             PolygonMode polygonMode = PolygonMode.Fill, bool expandRectangles = false)
         {
             var parameters = description.StaticParameters;
@@ -1091,14 +1083,14 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                     blends[index] = new PipelineColorBlendAttachmentState
                     {
-                        ColorWriteMask = ToVkColorWriteMask(mask),
+                        ColorWriteMask = RecordingHost.ToVkColorWriteMask(mask),
                         BlendEnable = parameters.GetBlendEnable(index) && !parameters.GetBlendBypass(index),
-                        SrcColorBlendFactor = ToVkBlendFactor(parameters.GetColorSourceBlend(index)),
-                        DstColorBlendFactor = ToVkBlendFactor(parameters.GetColorDestinationBlend(index)),
-                        ColorBlendOp = ToVkBlendOp(parameters.GetColorBlendFunction(index)),
-                        SrcAlphaBlendFactor = ToVkBlendFactor(separateAlpha ? parameters.GetAlphaSourceBlend(index) : parameters.GetColorSourceBlend(index)),
-                        DstAlphaBlendFactor = ToVkBlendFactor(separateAlpha ? parameters.GetAlphaDestinationBlend(index) : parameters.GetColorDestinationBlend(index)),
-                        AlphaBlendOp = ToVkBlendOp(separateAlpha ? parameters.GetAlphaBlendFunction(index) : parameters.GetColorBlendFunction(index)),
+                        SrcColorBlendFactor = RecordingHost.ToVkBlendFactor(parameters.GetColorSourceBlend(index)),
+                        DstColorBlendFactor = RecordingHost.ToVkBlendFactor(parameters.GetColorDestinationBlend(index)),
+                        ColorBlendOp = RecordingHost.ToVkBlendOp(parameters.GetColorBlendFunction(index)),
+                        SrcAlphaBlendFactor = RecordingHost.ToVkBlendFactor(separateAlpha ? parameters.GetAlphaSourceBlend(index) : parameters.GetColorSourceBlend(index)),
+                        DstAlphaBlendFactor = RecordingHost.ToVkBlendFactor(separateAlpha ? parameters.GetAlphaDestinationBlend(index) : parameters.GetColorDestinationBlend(index)),
+                        AlphaBlendOp = RecordingHost.ToVkBlendOp(separateAlpha ? parameters.GetAlphaBlendFunction(index) : parameters.GetColorBlendFunction(index)),
                     };
                 }
 
@@ -1391,6 +1383,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 StringComparison.Ordinal);
 
         public bool TryCreateComputePipeline(ComputePipelineDescription description, out PipelineHandle handle)
+        {
+            lock (_pendingComputePipelines)
+            {
+                return TryCreateComputePipelineCore(description, out handle);
+            }
+        }
+
+        private bool TryCreateComputePipelineCore(ComputePipelineDescription description, out PipelineHandle handle)
         {
             if (!_asyncComputePipelines)
             {

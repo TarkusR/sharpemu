@@ -306,14 +306,14 @@ public sealed partial class GuestImageCache
 
     internal readonly struct RegionLockScope : IDisposable
     {
-        private readonly HLE.GpuMemory.RegionLock _lock;
+        private readonly HLE.GpuMemory.SpinReadWriteLock _lock;
 
-        public RegionLockScope(HLE.GpuMemory.RegionLock regionLock)
+        public RegionLockScope(HLE.GpuMemory.SpinReadWriteLock cacheLock)
         {
-            _lock = regionLock;
-            regionLock.Enter();
+            _lock = cacheLock;
+            cacheLock.EnterWrite();
         }
 
-        public void Dispose() => _lock.Exit();
+        public void Dispose() => _lock.ExitWrite();
     }
 }

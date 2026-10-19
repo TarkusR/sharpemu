@@ -33,7 +33,7 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
-            DestroyFeedbackSnapshotPool();
+            _recording?.DestroyFeedbackSnapshotPool();
             DestroyRenderPipelines();
             _descriptorHeap.Dispose();
             _contentUploads.Dispose();

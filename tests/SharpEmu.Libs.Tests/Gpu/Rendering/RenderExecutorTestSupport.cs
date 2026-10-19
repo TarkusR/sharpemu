@@ -121,8 +121,6 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public bool IsRecording => Recording;
 
-    public ImageLayout ColorLayout { get; set; } = ImageLayout.ColorAttachmentOptimal;
-
     public Dictionary<ulong, uint> ImageSamples { get; } = new();
 
     public Dictionary<ulong, ClearColorValue> ColorMetadataClears { get; } = new();
@@ -228,7 +226,6 @@ internal sealed class RecordingRenderHost : IRenderHost
         return new ColorAttachmentAcquisition(
             target.Image,
             new ImageView(0x1000 + target.Image.Index),
-            ColorLayout,
             ImageSamples.TryGetValue(address, out var samples) ? samples : target.Resolution.Samples,
             metadataClear,
             clearValue);
@@ -244,8 +241,8 @@ internal sealed class RecordingRenderHost : IRenderHost
             DepthMetadataClear);
     }
 
-    public void TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects) =>
-        Calls.Add($"transition_depth {depth.Image.Index} {layout} {writeAspects} loadClear={depth.LoadClear}");
+    public void TransitionDepthAttachment(in DepthAttachmentState depth, ImageAspectFlags writeAspects) =>
+        Calls.Add($"transition_depth {depth.Image.Index} {writeAspects} loadClear={depth.LoadClear}");
 
     // Marks the pages the guest wrote so the next obtain re-uploads them.
     public void WriteGuest(ulong address, ReadOnlySpan<byte> data)

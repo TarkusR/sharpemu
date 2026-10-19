@@ -160,6 +160,22 @@ public sealed class GuestPageTrackerTests : IDisposable
     }
 
     [NativePageProtectionFact]
+    public void ADirtyRunExtendsAroundTheRequestWithinTheBoundsAndTheBudget()
+    {
+        var address = Allocate(8);
+        Assert.True(_tracker.HasCpuDirtyPages(address, Page * 8));
+        _tracker.ForEachUploadRange(address + Page * 6, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+
+        Assert.Equal((address, Page * 6), _tracker.ExtendCpuDirtyRun(address + Page * 2, Page, address, address + Page * 8, false, 64));
+        Assert.Equal((address + Page, Page * 5), _tracker.ExtendCpuDirtyRun(address + Page * 2, Page, address + Page, address + Page * 8, false, 64));
+        Assert.Equal((address, Page * 3), _tracker.ExtendCpuDirtyRun(address + Page * 2, Page, address, address + Page * 8, false, 2));
+        Assert.Equal((address + Page * 7, Page), _tracker.ExtendCpuDirtyRun(address + Page * 7, Page, address + Page * 6, address + Page * 8, false, 64));
+
+        _tracker.UntrackMemory(address, Page * 8);
+        Release(address, Page * 8);
+    }
+
+    [NativePageProtectionFact]
     public void LockFreeCpuDirtyQueryAgreesWithTheLockedQuery()
     {
         var address = Allocate(2);

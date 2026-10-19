@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Rendering;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
@@ -82,6 +83,8 @@ public readonly record struct EndOfPipeWrite(
 public interface ICommandStreamHost
 {
     ICpuMemory Memory { get; }
+
+    IRenderHost? RenderHost => this as IRenderHost;
 
     bool TryRecordLodStatistics(ulong destination, uint size) => false;
 

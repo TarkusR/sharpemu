@@ -129,13 +129,13 @@ public sealed unsafe partial class GuestImageCache
             var command = _scheduler.Current;
             command.EndRendering();
             var native = new CommandBuffer(command.Handle);
-            image.Transition(ImageLayout.ColorAttachmentOptimal, AccessFlags.ColorAttachmentWriteBit,
+            image.Transition(AccessFlags.ColorAttachmentWriteBit,
                 new SubresourceRange(view.BaseLevel, 1, layer, 1), native);
             var attachment = new RenderingAttachmentInfo
             {
                 SType = StructureType.RenderingAttachmentInfo,
                 ImageView = attachmentView,
-                ImageLayout = ImageLayout.ColorAttachmentOptimal,
+                ImageLayout = ImageLayout.General,
                 LoadOp = AttachmentLoadOp.Clear,
                 StoreOp = AttachmentStoreOp.Store,
                 ClearValue = new ClearValue { Color = color },

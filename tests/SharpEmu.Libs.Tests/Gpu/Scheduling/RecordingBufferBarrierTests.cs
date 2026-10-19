@@ -47,7 +47,7 @@ public sealed class RecordingBufferBarrierTests
         using var scheduler = NewActiveScheduler(_device, _rendering);
         var recorded = new List<MemoryBarrierRequest>();
         scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
-        var promotions = RecordingBuffer.DeferredPromotions;
+        var promotions = scheduler.Current.DeferredPromotions;
 
         scheduler.Current.DeferMemoryBarrier(ComputeToAll);
         scheduler.Current.EnterCheckedWindow();
@@ -55,11 +55,11 @@ public sealed class RecordingBufferBarrierTests
         _ = scheduler.Current.Handle;
         scheduler.Current.ExitCheckedWindow();
         Assert.Empty(recorded);
-        Assert.Equal(promotions, RecordingBuffer.DeferredPromotions);
+        Assert.Equal(promotions, scheduler.Current.DeferredPromotions);
 
         _ = scheduler.Current.Handle;
         Assert.Equal([ComputeToAll], recorded);
-        Assert.Equal(promotions + 1, RecordingBuffer.DeferredPromotions);
+        Assert.Equal(promotions + 1, scheduler.Current.DeferredPromotions);
         _device.CompleteOnSubmit = true;
     }
 
@@ -70,12 +70,12 @@ public sealed class RecordingBufferBarrierTests
         _device.CompleteOnSubmit = true;
         var recorded = new List<MemoryBarrierRequest>();
         scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
-        var promotions = RecordingBuffer.DeferredPromotions;
+        var promotions = scheduler.Current.DeferredPromotions;
 
         scheduler.Current.DeferMemoryBarrier(ComputeToAll);
         _ = scheduler.Current.TransferHandle;
         Assert.Empty(recorded);
-        Assert.Equal(promotions, RecordingBuffer.DeferredPromotions);
+        Assert.Equal(promotions, scheduler.Current.DeferredPromotions);
 
         scheduler.Current.RequestMemoryBarrier(AllToCompute);
         scheduler.Current.DeferMemoryBarrier(ComputeToAll);
@@ -92,7 +92,7 @@ public sealed class RecordingBufferBarrierTests
         using var scheduler = NewActiveScheduler(_device, _rendering);
         var recorded = new List<MemoryBarrierRequest>();
         scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
-        var promotions = RecordingBuffer.DeferredPromotions;
+        var promotions = scheduler.Current.DeferredPromotions;
 
         scheduler.Current.DeferMemoryBarrier(ComputeToAll);
         scheduler.Current.RequestMemoryBarrier(AllToCompute);
@@ -101,7 +101,7 @@ public sealed class RecordingBufferBarrierTests
         scheduler.Current.ExitCheckedWindow();
 
         Assert.Equal([AllToCompute.Union(ComputeToAll)], recorded);
-        Assert.Equal(promotions + 1, RecordingBuffer.DeferredPromotions);
+        Assert.Equal(promotions + 1, scheduler.Current.DeferredPromotions);
         Assert.Equal(1L, scheduler.Current.RecordedBarriers);
         _device.CompleteOnSubmit = true;
     }

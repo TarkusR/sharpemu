@@ -21,7 +21,10 @@ internal sealed partial class RenderRecorder
         finally
         {
             _pendingWrites?.Release(record.Sequence);
-            _pool.Return(record);
+            if (_returnsRecords)
+            {
+                _pool.Return(record);
+            }
         }
     }
 

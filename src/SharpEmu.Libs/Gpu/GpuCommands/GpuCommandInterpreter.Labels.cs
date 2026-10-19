@@ -454,6 +454,7 @@ public sealed partial class GpuCommandInterpreter
                 _selectedOcclusionCounter = (int)counterId;
                 _occlusionDumpStrideBytes = 4u << (int)((eventAddress >> 9) & 0x3u);
                 _occlusionDumpInstanceMask = (uint)((eventAddress >> 11) & 0xFF_FFFFu);
+                Interlocked.Increment(ref _pixelPipeStatControls);
                 break;
             }
             case 0x3A:
@@ -468,6 +469,7 @@ public sealed partial class GpuCommandInterpreter
                 {
                     _occlusionCounterStart = resetCount;
                 }
+                Interlocked.Increment(ref _pixelPipeStatResets);
                 break;
             case 0x39:
             {
@@ -506,6 +508,7 @@ public sealed partial class GpuCommandInterpreter
                         _occlusionDumpInstanceMask, _occlusionDumpStrideBytes, _host.Memory as SharpEmu.HLE.IGuestBackedSpace, aggregate);
                 if (!aggregate)
                     _syntheticOcclusionCounters[_selectedOcclusionCounter] = (SyntheticOcclusionCounter + 1) & (readyBit - 1);
+                Interlocked.Increment(ref _occlusionWrites);
                 break;
             }
 

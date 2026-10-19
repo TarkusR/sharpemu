@@ -103,6 +103,7 @@ public sealed class RegisterBanks
             IndexTypeAndSize = IndexTypeAndSize,
             _stamps = (ulong[])_stamps.Clone(),
         };
+        SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteSnapshot();
         _contextShared = _vertexShared = _pixelShared = _computeShared = _userConfigShared = true;
         _pixelScalarsShared = _hullScalarsShared = _geometryScalarsShared = _legacyVertexScalarsShared = _exportScalarsShared = _computeScalarsShared = true;
         return snapshot;
@@ -120,6 +121,7 @@ public sealed class RegisterBanks
         if (_contextShared)
         {
             Context = Context.ShallowCopy();
+            SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContext();
             _contextShared = false;
             SetContextPartsShared(true);
         }
@@ -156,6 +158,7 @@ public sealed class RegisterBanks
             {
                 Context.ScreenViewport = Context.ScreenViewport.CopySharingViewports();
                 _screenViewportShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.ScreenViewport;
@@ -171,6 +174,7 @@ public sealed class RegisterBanks
             {
                 screenViewport.Viewports = (ViewportRegisters[])screenViewport.Viewports.Clone();
                 _viewportsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return screenViewport.Viewports;
@@ -186,6 +190,7 @@ public sealed class RegisterBanks
             {
                 Context.SampleLocations = Context.SampleLocations.Copy();
                 _sampleLocationsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.SampleLocations;
@@ -201,6 +206,7 @@ public sealed class RegisterBanks
             {
                 Context.ShaderInterface = Context.ShaderInterface.Copy();
                 _shaderInterfaceShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.ShaderInterface;
@@ -216,6 +222,7 @@ public sealed class RegisterBanks
             {
                 Context.BlendControls = (BlendRegisters[])Context.BlendControls.Clone();
                 _blendControlsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.BlendControls;
@@ -231,6 +238,7 @@ public sealed class RegisterBanks
             {
                 Context.ColorTargets = (ColorTargetWords[])Context.ColorTargets.Clone();
                 _colorTargetsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.ColorTargets;
@@ -246,6 +254,7 @@ public sealed class RegisterBanks
             {
                 Context.ColorClearWord1 = (uint[])Context.ColorClearWord1.Clone();
                 _colorClearWord1Shared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
 
             return Context.ColorClearWord1;
@@ -261,6 +270,7 @@ public sealed class RegisterBanks
             {
                 Context.UnmodeledTableRegisters = new Dictionary<uint, uint>(Context.UnmodeledTableRegisters);
                 _unmodeledShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteUnmodeledTable();
             }
 
             return Context.UnmodeledTableRegisters;
@@ -273,6 +283,7 @@ public sealed class RegisterBanks
         {
             UserConfig = UserConfig.Copy();
             _userConfigShared = false;
+            SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteUserConfig();
         }
     }
 
@@ -303,12 +314,14 @@ public sealed class RegisterBanks
             {
                 Shader.Pixel = Shader.Pixel.ShallowCopy();
                 _pixelShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteStage();
             }
 
             if (_pixelScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.SpiShaderUserDataPs0))
             {
                 Shader.Pixel.UserScalars = Shader.Pixel.UserScalars.Copy();
                 _pixelScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
         }
 
@@ -318,6 +331,7 @@ public sealed class RegisterBanks
             {
                 Shader.Vertex = Shader.Vertex.ShallowCopy();
                 _vertexShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteStage();
             }
 
             var vertex = Shader.Vertex;
@@ -325,24 +339,28 @@ public sealed class RegisterBanks
             {
                 vertex.HullUserScalars = vertex.HullUserScalars.Copy();
                 _hullScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
 
             if (_geometryScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.SpiShaderUserDataGs0))
             {
                 vertex.GeometryUserScalars = vertex.GeometryUserScalars.Copy();
                 _geometryScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
 
             if (_legacyVertexScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.SpiShaderUserDataVs0))
             {
                 vertex.LegacyVertexUserScalars = vertex.LegacyVertexUserScalars.Copy();
                 _legacyVertexScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
 
             if (_exportScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.SpiShaderUserDataEs0))
             {
                 vertex.ExportUserScalars = vertex.ExportUserScalars.Copy();
                 _exportScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
         }
 
@@ -352,12 +370,14 @@ public sealed class RegisterBanks
             {
                 Shader.Compute = Shader.Compute.ShallowCopy();
                 _computeShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteStage();
             }
 
             if (_computeScalarsShared && Overlaps(offset, last, ShaderRegisterOffset.ComputeUserData0))
             {
                 Shader.Compute.UserScalars = Shader.Compute.UserScalars.Copy();
                 _computeScalarsShared = false;
+                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteScalars();
             }
         }
     }

@@ -1061,7 +1061,8 @@ public sealed partial class ResourceMaterializationCache
     public enum MaterializeOutcome { Failed, Hit, RebaseHit, TableRefresh, Volatile, BecameVolatile, FirstSighting, Miss, Uncacheable, Count }
 
     private static readonly bool OutcomeTimingEnabled = Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE") == "1";
-    private const int OutcomeSides = 2;
+    private const int OutcomeSides = 3;
+    private static readonly string[] OutcomeSideNames = ["render", "stream", "pool"];
     private static readonly long[] _outcomeCounts = new long[OutcomeSides * (int)MaterializeOutcome.Count];
     private static readonly long[] _outcomeTicks = new long[OutcomeSides * (int)MaterializeOutcome.Count];
     private static readonly long[] _outcomeLookupTicks = new long[OutcomeSides];
@@ -1077,7 +1078,7 @@ public sealed partial class ResourceMaterializationCache
         if (_outcomeSide == 0)
         {
             var name = Thread.CurrentThread.Name;
-            _outcomeSide = name == "SharpEmu command stream" || (name is not null && name.StartsWith("SharpEmu resolve worker", StringComparison.Ordinal)) ? 2 : 1;
+            _outcomeSide = name == "SharpEmu command stream" ? 2 : name is not null && name.StartsWith("SharpEmu resolve worker", StringComparison.Ordinal) ? 3 : 1;
         }
         return _outcomeSide - 1;
     }
@@ -1133,7 +1134,7 @@ public sealed partial class ResourceMaterializationCache
                     parts.Add(FormattableString.Invariant($"{(MaterializeOutcome)index}={count}/{Ms(ticks)}ms"));
             }
 
-            lines.Add(FormattableString.Invariant($"[PERF][RESOURCE_OUTCOMES] thread={(side == 0 ? "render" : "resolve")} ") +
+            lines.Add("[PERF][RESOURCE_OUTCOMES] thread=" + OutcomeSideNames[side] + " " +
                 FormattableString.Invariant($"lookup_ms={Ms(Interlocked.Exchange(ref _outcomeLookupTicks[side], 0))} ") +
                 FormattableString.Invariant($"validated_variants={Interlocked.Exchange(ref _outcomeValidatedVariants[side], 0)} ") +
                 string.Join(" ", parts));

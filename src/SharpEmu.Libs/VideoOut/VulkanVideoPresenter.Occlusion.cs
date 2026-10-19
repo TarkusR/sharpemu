@@ -22,7 +22,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private static readonly bool OcclusionGpuDumps = !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_OCCLUSION_GPU_DUMPS"), "0", StringComparison.Ordinal);
 
-        private VulkanOcclusionQueries OcclusionQueries()
+        internal VulkanOcclusionQueries OcclusionQueries()
         {
             if (_occlusionQueries is { } existing) return existing;
             var queries = new VulkanOcclusionQueries(_vk, _device);
@@ -31,7 +31,10 @@ internal static unsafe partial class VulkanVideoPresenter
             return _occlusionQueries = queries;
         }
 
-        private void CompleteOverlappingPublications(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
+        internal bool HasOverlappingPublications(ulong address, ulong size, bool includeLabels) =>
+            _guestPublications.HasOverlap(address, size, includeLabels);
+
+        internal void CompleteOverlappingPublications(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
         {
             if (OnCommandThread)
             {
@@ -75,7 +78,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
-            EndRendering();
+            _recording?.EndRendering();
             var queries = OcclusionQueries();
             if (queries.HasGpuResults) EnsureBatchedGuestCommands();
             queries.Reset(queueId);
@@ -113,7 +116,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             try
             {
-                EndRendering();
+                _recording?.EndRendering();
                 var queries = OcclusionQueries();
                 _ = CurrentRecording();
                 if (queries.HasGpuResults)
@@ -209,16 +212,32 @@ internal static unsafe partial class VulkanVideoPresenter
                 PipelineStageFlags.AllCommandsBit, 0, 1, &barrier, 0, null, 0, null);
         }
 
+    }
+
+    private sealed partial class RecordingHost
+    {
+        private bool _occlusionCounting;
+
         private void SetOcclusionCounting(uint control)
         {
             const uint incrementDisabled = 1u;
             const uint counterZeroEnabled = 1u << 8;
             var enabled = (control & (incrementDisabled | counterZeroEnabled)) == counterZeroEnabled;
+            if (enabled && _worker && _presenter._supportsPreciseOcclusion)
+                throw Serial("occlusion counting", resumable: true);
             if (enabled != _occlusionCounting)
                 EndRendering();
-            if (enabled && _supportsPreciseOcclusion)
-                _ = OcclusionQueries();
+            if (enabled && _presenter._supportsPreciseOcclusion)
+                _ = _presenter.OcclusionQueries();
             _occlusionCounting = enabled;
+        }
+
+        private void TraceOcclusionDraw(uint? indexCount = null)
+        {
+            if (!_worker)
+            {
+                _presenter._occlusionQueries?.TraceDraw(indexCount);
+            }
         }
     }
 }

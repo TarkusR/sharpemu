@@ -82,7 +82,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Environment.GetEnvironmentVariable("SHARPEMU_LOG_VK_RESOURCES"),
                 "1",
                 StringComparison.Ordinal);
-        private static readonly bool _traceVulkanShaderEnabled =
+        internal static readonly bool _traceVulkanShaderEnabled =
             string.Equals(
                 Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"),
                 "1",
@@ -93,7 +93,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 StringComparison.Ordinal);
         private static readonly bool _traceTextureBindingsEnabled =
             Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TEXTURE_BINDINGS") is "1" or "volume";
-        private static readonly bool _traceVolumeTextureBindingsOnly =
+        internal static readonly bool _traceVolumeTextureBindingsOnly =
             Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TEXTURE_BINDINGS") == "volume";
         private static readonly uint _traceGuestImageWidth =
             uint.TryParse(
@@ -264,7 +264,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private static bool ShouldTraceVulkanResources() =>
             _traceVulkanResourcesEnabled;
 
-        private static bool ShouldTraceTextureBindings() =>
+        internal static bool ShouldTraceTextureBindings() =>
             _traceTextureBindingsEnabled;
 
         private void RecycleSubmissionUploads(SubmissionUploadResources resources)
@@ -278,7 +278,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     RecycleHostBuffer(texture.StagingBuffer, texture.StagingMemory);
                 }
 
-                ReturnTextureResource(texture);
+                Recording.ReturnTextureResource(texture);
             }
 
             if (resources.Textures.Length != 0)
@@ -292,7 +292,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             foreach (var snapshot in resources.FeedbackSnapshots)
             {
-                RetireFeedbackSnapshot(snapshot);
+                Recording.RetireFeedbackSnapshot(snapshot);
             }
 
             foreach (var (buffer, memory) in resources.OverflowBuffers ?? [])

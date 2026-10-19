@@ -392,7 +392,7 @@ public static partial class ImageRequestBuilders
     // After the lookup: a stencil association redirects to its depth owner; the view rules run on the owner.
     public static ResourceSlotIdentifier ValidateTextureOwner(GuestImageCache cache, ResourceSlotIdentifier imageIdentifier, in TextureRequestResolution resolution)
     {
-        var image = cache.GetImage(imageIdentifier);
+        var image = cache.PeekImage(imageIdentifier) ?? throw SubmissionScheduler.Fatal($"The texture owner was released: image={imageIdentifier.Index}.");
         if (image.DepthOwner.IsValid)
         {
             return image.DepthOwner;

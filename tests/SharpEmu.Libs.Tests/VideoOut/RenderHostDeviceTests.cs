@@ -38,7 +38,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     private readonly HeadlessVulkan? _vulkan;
 
     private static bool DefersGlobalBarriers =>
-        (bool)PresenterUnderTest.PresenterType.GetField("DeferGlobalBarriers", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+        (bool)PresenterUnderTest.RecordingHostType.GetField("DeferGlobalBarriers", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
 
     [Fact]
     public void GlobalBarrierEndsDynamicRendering()

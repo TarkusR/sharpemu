@@ -174,8 +174,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly CommandStreamQueue _commandStream;
         private readonly EndOfPipeEvents _endOfPipeEvents = new();
         private EndOfPipe _endOfPipe = null!;
-        private AgcExports.CommandStreamTranslation _translation = null!;
-        private ICpuMemory _guestMemory = null!;
+        internal AgcExports.CommandStreamTranslation _translation = null!;
+        internal ICpuMemory _guestMemory = null!;
 
         public CommandStreamQueue CommandStream => _commandStream;
 
@@ -184,7 +184,9 @@ internal static unsafe partial class VulkanVideoPresenter
             var (_, guest, _) = RequireGuestMemory("command stream");
             _guestMemory = guest;
             _endOfPipe = new EndOfPipe(_endOfPipeEvents, this);
+            _recording = new RecordingHost(this);
             _translation = AgcExports.CreateCommandStreamTranslation(((ICommandStreamHost)this).Memory, this);
+            CreateRenderWorkers();
         }
 
         public void EnqueueCommandStream(uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
@@ -202,7 +204,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // The command stream thread interprets the submissions; this thread runs what it hands over
         // until the budget ends or nothing is queued. Null until the first render tick.
-        private CommandThread? _commandThread;
+        internal CommandThread? _commandThread;
         private Action? _betweenCommandItems;
 
         private bool OnCommandThread => _commandThread is { IsProducerThread: true };
@@ -292,11 +294,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool ReadOnResolveWorker(ulong address, Span<byte> destination)
         {
             var size = (ulong)destination.Length;
-            if (!_guestMemory.CanRead(address, size))
-            {
-                return false;
-            }
-
             if (HasPendingMemoryPublication(address, size))
             {
                 throw new SerialResolveRequiredException("pending publication read");
@@ -307,6 +304,11 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 worker.Reads.Add(address, destination);
                 return true;
+            }
+
+            if (!_guestMemory.CanRead(address, size))
+            {
+                return false;
             }
 
             if (TryReadShadowForWorker(address, destination))
@@ -339,7 +341,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool TryReadShadowForWorker(ulong address, Span<byte> destination)
         {
             var sequence = _resolveWorker!.Sequence;
-            if (!_commandThread!.TryReadShadowBefore(address, destination, sequence, out var shadowSequence))
+            if (!_commandThread!.TryReadShadowBefore(address, destination, sequence, out var shadowSequence, out var shadowSource))
             {
                 return false;
             }
@@ -349,7 +351,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw new SerialResolveRequiredException("shadowed pending write read");
             }
 
-            AgcExports.NoteWorkerShadowRead();
+            if (_commandThread.HasPendingRangeBetween(address, (ulong)destination.Length, shadowSequence, sequence))
+            {
+                throw new SerialResolveRequiredException("shadowed pending range read");
+            }
+
+            AgcExports.NoteWorkerShadowRead((int)shadowSource);
             return true;
         }
 
@@ -372,7 +379,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (_commandThread is null)
             {
-                _commandThread = new CommandThread(_commandStream, _guestMemory, RunDeferredWork, RunCommandSlice);
+                _commandThread = new CommandThread(this, _commandStream, _guestMemory, RunDeferredWork, RunCommandSlice);
                 _betweenCommandItems = RunRelayBetweenCommandItems;
                 _translation.Sink = _commandThread;
                 _commandThread.Start();
@@ -516,17 +523,20 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (IsCleanReadPage(address, size) && TryReadAliasBytes(address, destination))
             {
+                RenderPhaseProfile.RecordCleanRead(hit: true);
                 return true;
             }
 
+            RenderPhaseProfile.RecordCleanRead(hit: false);
             var thread = _commandThread!;
-            thread.WaitForPendingRange(address, size);
-            if (thread.TryReadShadow(address, destination, out var shadowSequence) && !NewerPendingWrite(address, size, shadowSequence))
+            if (thread.TryReadShadow(address, destination, out var shadowSequence, out var shadowSource) &&
+                !NewerPendingWrite(address, size, shadowSequence) && !thread.HasPendingRangeAfter(address, size, shadowSequence))
             {
-                Diagnostics.CommandThreadTally.NoteShadowRead();
+                Diagnostics.CommandThreadTally.NoteShadowRead((int)shadowSource);
                 return true;
             }
 
+            thread.WaitForPendingRange(address, size);
             AwaitPendingGpuWrite(address, size);
             if (_bufferCache.MayHaveGpuDirtyPages(address, size) && _bufferCache.HasGpuDirtyBytes(address, size))
             {
@@ -628,7 +638,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private void BeginSubmissionContext(int queueId, ulong submissionId)
         {
             if (_occlusionQueueId != queueId)
-                EndRendering();
+                _recording?.EndRendering();
             _occlusionQueueId = queueId;
             _imageCache.SetMetadataTraceSubmission(queueId, submissionId);
             using var contextScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueContext);
@@ -707,23 +717,23 @@ internal static unsafe partial class VulkanVideoPresenter
             // Inside a rendering scope whose draws only wrote attachments, the barrier matters only
             // to what runs after the scope: everything before the scope is ordered by the barrier
             // BeginRendering records, and a draw that stores to memory ends a deferred scope first.
-            if (DeferGlobalBarriers && _renderingActive && !_renderingWritesMemory)
+            if (RecordingHost.DeferGlobalBarriers && Recording._renderingActive && !Recording._renderingWritesMemory)
             {
-                _globalBarrierAfterRendering = true;
+                Recording._globalBarrierAfterRendering = true;
                 return;
             }
 
-            EndRendering();
-            if (BatchBarriers)
+            Recording.EndRendering();
+            if (RecordingHost.BatchBarriers)
             {
-                RequestGuestMemoryBarrier(GlobalMemoryBarrier);
+                RequestGuestMemoryBarrier(RecordingHost.GlobalMemoryBarrier);
                 return;
             }
 
             RecordGlobalBarrier(BeginBatchedGuestCommands());
         }
 
-        private void RecordGlobalBarrier(CommandBuffer commandBuffer)
+        internal void RecordGlobalBarrier(CommandBuffer commandBuffer)
         {
             var barrier = new MemoryBarrier2
             {
@@ -748,7 +758,15 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
-                _commandThread!.PostRange(() => FillBuffer(address, size, value, isGds), address, isGds ? 0 : size);
+                var sequence = _commandThread!.PostRange(() => FillBuffer(address, size, value, isGds), address, isGds ? 0 : size, CommandThread.RangeKind.Fill);
+                if (!isGds && size != 0 && size <= CommandThread.SmallTransferBytes && ((address | size) & 3) == 0)
+                {
+                    var words = new uint[size / sizeof(uint)];
+                    Array.Fill(words, value);
+                    _commandThread.NoteKnownWrite(new SharpEmu.Libs.Gpu.Rendering.KnownGpuWrite(address, words, words.Length), sequence, CommandThread.ShadowSource.Fill);
+                    Diagnostics.CommandThreadTally.NoteSmallTransfer(copy: false);
+                }
+
                 return;
             }
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
@@ -762,7 +780,23 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
-                _commandThread!.PostRange(() => CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds), destination, destinationIsGds ? 0 : size);
+                uint[]? words = null;
+                if (!destinationIsGds && !sourceIsGds && size != 0 && size <= CommandThread.SmallTransferBytes && ((destination | size) & 3) == 0)
+                {
+                    var settled = new uint[size / sizeof(uint)];
+                    if (TryReadSettledSource(source, System.Runtime.InteropServices.MemoryMarshal.AsBytes(settled.AsSpan())))
+                    {
+                        words = settled;
+                    }
+                }
+
+                var sequence = _commandThread!.PostRange(() => CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds), destination, destinationIsGds ? 0 : size, CommandThread.RangeKind.Copy);
+                if (words is not null)
+                {
+                    _commandThread.NoteKnownWrite(new SharpEmu.Libs.Gpu.Rendering.KnownGpuWrite(destination, words, words.Length), sequence, CommandThread.ShadowSource.Copy);
+                    Diagnostics.CommandThreadTally.NoteSmallTransfer(copy: true);
+                }
+
                 return;
             }
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
@@ -781,6 +815,17 @@ internal static unsafe partial class VulkanVideoPresenter
         public void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) =>
             _imageCache.TraceGuestWrite($"draw-target-{disposition}", address, 1, pixelShaderAddress, vertexShaderAddress);
 
+        private bool TryReadSettledSource(ulong source, Span<byte> destination)
+        {
+            var size = (ulong)destination.Length;
+            if (_commandThread!.HasPendingRange(source, size) || HasPendingMemoryPublication(source, size) || !IsCleanReadPage(source, size))
+            {
+                return false;
+            }
+
+            return TryReadAliasBytes(source, destination);
+        }
+
         public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount)
         {
             if (OnCommandThread)
@@ -793,21 +838,12 @@ internal static unsafe partial class VulkanVideoPresenter
             EndOfPipe.ReadGdsWords(_bufferCache.GdsBuffer.Mapped, destination, wordOffset, wordCount);
         }
 
-        private static ulong EndOfPipeWriteBytes(EndOfPipeWriteKind kind) => kind switch
-        {
-            EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.WriteBack32 or EndOfPipeWriteKind.Interrupt32 or
-                EndOfPipeWriteKind.InterruptWriteBack32 or EndOfPipeWriteKind.FlipWithWrite32 or EndOfPipeWriteKind.FlipWithInterruptWriteBack32 => sizeof(uint),
-            EndOfPipeWriteKind.Write64 or EndOfPipeWriteKind.WriteBack64 or EndOfPipeWriteKind.Interrupt64 or
-                EndOfPipeWriteKind.InterruptWriteBack64 or EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack => sizeof(ulong),
-            _ => 0,
-        };
-
         public void RecordEndOfPipe(in EndOfPipeWrite write)
         {
             if (OnCommandThread)
             {
                 var queued = write;
-                _commandThread!.PostRange(() => RecordEndOfPipe(in queued), write.Destination, EndOfPipeWriteBytes(write.Kind));
+                _commandThread!.Post(() => RecordEndOfPipe(in queued));
                 return;
             }
             using var completionScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandEndOfPipe);
@@ -1100,7 +1136,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var extent = source.Backing.Extent;
                 snapshot = CreateGuestFlipSnapshot(GetPresentationSnapshotFormat(source.Backing.Format),
                     extent.Width, extent.Height, displayBuffer.Address, version);
-                source.Transition(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, null, commandBuffer);
+                source.Transition(AccessFlags.TransferReadBit, null, commandBuffer);
                 var toTransferDst = new ImageMemoryBarrier2
                 {
                     SType = StructureType.ImageMemoryBarrier2,
@@ -1124,7 +1160,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
                 {
                     _vk.CmdCopyImage(
-                        commandBuffer, source.Backing.Handle, ImageLayout.TransferSrcOptimal, snapshot.Image, ImageLayout.TransferDstOptimal, 1, &copy);
+                        commandBuffer, source.Backing.Handle, ImageLayout.General, snapshot.Image, ImageLayout.TransferDstOptimal, 1, &copy);
                 }
                 var toShaderRead = new ImageMemoryBarrier2
                 {

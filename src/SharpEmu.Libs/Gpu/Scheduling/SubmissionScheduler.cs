@@ -22,6 +22,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     }
 
     private readonly record struct TickWork(Action Callback, ulong Tick, bool MemoryPublication = false);
+    private readonly record struct ParkedWork(Action Callback, long Generation, ulong Tick = 0, bool MemoryPublication = false);
     private readonly record struct SubmissionTraceEntry(ulong Tick, uint Op, ulong SubmitId,
         uint Arg0, uint Arg1, uint Arg2, uint Arg3, ulong Arg4);
     private readonly SubmissionTraceEntry[] _submissionHistory = new SubmissionTraceEntry[32];
@@ -30,13 +31,15 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
     private readonly IGpuTickDevice _device;
     private readonly TickTimeline _timeline;
-    private readonly TickedBufferRing _ring;
     private readonly RecordingBuffer _command;
     private readonly Action<SubmitBundle>? _prepareSubmit;
     private readonly Action<ulong>? _submitted;
     private readonly Action<ulong>? _completed;
     private readonly Queue<TickWork> _pending = new();
     private readonly Queue<TickWork> _priority = new();
+    private readonly Queue<ParkedWork> _parked = new();
+    private long _cutGeneration;
+    private readonly SortedSet<long> _unjoinedCuts = new();
     private readonly object _operationLock = new();
     private readonly Thread _priorityThread;
     private bool _priorityActive;
@@ -65,7 +68,6 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         _submitted = submitted;
         _completed = completed;
         _timeline = new TickTimeline(device);
-        _ring = new TickedBufferRing(device, _timeline);
         _command = new RecordingBuffer(this, device, rendering);
         _priorityThread = new Thread(RunPriorityWorker) { IsBackground = true, Name = "SharpEmu GPU priority" };
         _priorityThread.Start();
@@ -100,6 +102,15 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     // abandons that work, which the render thread then does itself and fails on if it is real.
     [ThreadStatic]
     internal static bool ThrowOnFatal;
+
+    [ThreadStatic]
+    private static Func<string, Exception>? s_readOnlyViolation;
+
+    public static bool ReadOnlyThread => s_readOnlyViolation is not null;
+
+    public static void MarkReadOnlyThread(Func<string, Exception> violation) => s_readOnlyViolation = violation;
+
+    public static Exception ReadOnlyViolation(string operation) => s_readOnlyViolation!(operation);
 
     public sealed class AbandonedWorkException(string message) : Exception(message);
 
@@ -170,6 +181,10 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             }
 
             _state = OperationState.Draining;
+            while (_parked.Count != 0)
+            {
+                Unpark(_parked.Dequeue());
+            }
         }
 
         if (!_command.IsInvalid)
@@ -239,9 +254,11 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
     public ulong Flush() => Flush(new SubmitBundle());
 
-    public ulong Flush(SubmitBundle bundle)
+    public ulong Flush(SubmitBundle bundle) => Flush(bundle, default);
+
+    public ulong Flush(SubmitBundle bundle, ReadOnlySpan<RecordingBuffer> trailing)
     {
-        var tick = Submit(bundle);
+        var tick = Submit(bundle, trailing);
         BeginNextCommandBuffer();
         return tick;
     }
@@ -278,7 +295,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         {
             // Reuse a completed drain only while its next command buffer and callback queues stay unused.
             if (_lastMemoryDrainTick == CurrentTick && !_command.IsInvalid && !_command.HasPendingCommands &&
-                _pending.Count == 0 && _priority.Count == 0 && !_priorityActive)
+                _pending.Count == 0 && _parked.Count == 0 && _priority.Count == 0 && !_priorityActive)
             {
                 return;
             }
@@ -349,6 +366,38 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
     }
 
+    // Slices recorded ahead of the stream may still reference what a completion action destroys;
+    // while any is unjoined the action waits until the slices cut so far have been submitted.
+    public long BeginSliceCut()
+    {
+        lock (_operationLock)
+        {
+            var generation = ++_cutGeneration;
+            _unjoinedCuts.Add(generation);
+            return generation;
+        }
+    }
+
+    public void NoteSliceJoined(long generation)
+    {
+        lock (_operationLock)
+        {
+            _unjoinedCuts.Remove(generation);
+            var joined = _unjoinedCuts.Count == 0 ? _cutGeneration : _unjoinedCuts.Min - 1;
+            while (_parked.Count != 0 && _parked.Peek().Generation <= joined)
+            {
+                Unpark(_parked.Dequeue());
+            }
+        }
+    }
+
+    private void Unpark(ParkedWork parked)
+    {
+        var tick = parked.MemoryPublication ? parked.Tick : CurrentTick;
+        _pendingTailTick = _pending.Count == 0 ? tick : Math.Max(_pendingTailTick, tick);
+        _pending.Enqueue(new TickWork(parked.Callback, tick, parked.MemoryPublication));
+    }
+
     public void QueueCompletionAction(Action operation)
     {
         RequireActiveScheduler();
@@ -356,8 +405,16 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         {
             if (_state == OperationState.Open)
             {
-                _pending.Enqueue(new TickWork(operation, CurrentTick));
-                _pendingTailTick = CurrentTick;
+                if (_unjoinedCuts.Count != 0)
+                {
+                    _parked.Enqueue(new ParkedWork(operation, _cutGeneration));
+                }
+                else
+                {
+                    _pending.Enqueue(new TickWork(operation, CurrentTick));
+                    _pendingTailTick = CurrentTick;
+                }
+
                 _enqueueSequence++;
                 return;
             }
@@ -386,7 +443,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     internal bool IsLastQueuedPublication(ulong sequence, ulong dependencyTick, ulong tick)
     {
         lock (_operationLock)
-            return _enqueueSequence == sequence && _pending.Count != 0 && Math.Max(dependencyTick, _pendingTailTick) == tick;
+            return _enqueueSequence == sequence && _parked.Count == 0 && _pending.Count != 0 && Math.Max(dependencyTick, _pendingTailTick) == tick;
     }
 
     internal ulong QueueMemoryPublication(Action operation, ulong dependencyTick, out ulong sequence)
@@ -401,9 +458,17 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             if (dependencyTick > CurrentTick)
                 throw Fatal("Cannot publish memory for an unknown submission tick.");
             // Keep ready results behind earlier work without attaching them to an unused future tick.
-            var tick = _pending.Count == 0 ? dependencyTick : Math.Max(dependencyTick, _pendingTailTick);
-            _pending.Enqueue(new TickWork(operation, tick, MemoryPublication: true));
-            _pendingTailTick = tick;
+            var tick = _pending.Count == 0 && _parked.Count == 0 ? dependencyTick : Math.Max(dependencyTick, _pendingTailTick);
+            if (_parked.Count != 0)
+            {
+                _parked.Enqueue(new ParkedWork(operation, _cutGeneration, tick, MemoryPublication: true));
+            }
+            else
+            {
+                _pending.Enqueue(new TickWork(operation, tick, MemoryPublication: true));
+                _pendingTailTick = tick;
+            }
+
             sequence = ++_enqueueSequence;
             return tick;
         }
@@ -490,18 +555,25 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
     public RecordingBuffer BeginCommand()
     {
-        if (!_command.IsInvalid)
-        {
-            throw Fatal("Cannot start recording. The command buffer is already recording.");
-        }
-
-        _command.Buffer = _ring.AcquireBuffer();
-        _command.Begin();
+        _command.Acquire();
         return _command;
     }
 
-    // Add the timeline signal to a copy. Keep the caller's submission bundle unchanged.
-    public ulong Submit(SubmitBundle? bundle = null)
+    public RecordingBuffer CreateRecordingBuffer(IRenderingState rendering) => new(this, _device.CreateBufferSource(), rendering);
+
+    public void BeginRecording(RecordingBuffer buffer)
+    {
+        buffer.Bind(_context ?? throw Fatal("The scheduler requires a submission context."));
+        buffer.Acquire();
+    }
+
+    public void EndRecording(RecordingBuffer buffer) => buffer.End();
+
+    public void DiscardRecording(RecordingBuffer buffer) => buffer.Discard();
+
+    // Add the timeline signal to a copy. Keep the caller's submission bundle unchanged. Trailing
+    // buffers were ended by their recording threads and execute after the current buffer.
+    public ulong Submit(SubmitBundle? bundle = null, ReadOnlySpan<RecordingBuffer> trailing = default)
     {
         var submit = bundle == null ? new SubmitBundle() : new SubmitBundle(bundle);
         if (_command.IsInvalid)
@@ -515,8 +587,19 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             throw Fatal($"The submission exceeds its capacity: waits={submit.WaitCount} signals={submit.SignalCount}.");
         }
 
+        Span<nint> buffers = stackalloc nint[1 + trailing.Length];
+        for (var index = 0; index < trailing.Length; index++)
+        {
+            if (trailing[index].IsInvalid || !trailing[index].Ended)
+            {
+                throw Fatal("A trailing command buffer must be recorded and ended before it is submitted.");
+            }
+
+            buffers[index + 1] = trailing[index].Buffer;
+        }
+
         _command.End();
-        var buffer = _command.Buffer;
+        buffers[0] = _command.Buffer;
         bool submitted;
         string failure;
         ulong tick;
@@ -527,7 +610,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             {
                 tick = _timeline.ReserveTick();
                 submit.AddSignal(_timeline.Handle, tick);
-                submitted = _device.TrySubmit(buffer, submit, out failure);
+                submitted = _device.TrySubmit(buffers, submit, out failure);
             }
 
             if (submitted && _completed is { } completed)
@@ -537,7 +620,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             }
         }
 
-        if (MeshDrawTrace.Enabled) MeshDrawTrace.Submitted((ulong)buffer, tick, submitted, failure);
+        if (MeshDrawTrace.Enabled) MeshDrawTrace.Submitted((ulong)buffers[0], tick, submitted, failure);
         if (!submitted)
         {
             Console.Error.WriteLine($"[GPU][ERROR] submission history known_completed_tick={_timeline.CompletedTick}");
@@ -552,7 +635,12 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             _command.DebugArg0, _command.DebugArg1, _command.DebugArg2, _command.DebugArg3, _command.DebugArg4);
         _nextSubmissionHistoryIndex = (_nextSubmissionHistoryIndex + 1) % _submissionHistory.Length;
         _submissionHistoryCount = Math.Min(_submissionHistoryCount + 1, _submissionHistory.Length);
-        _command.Buffer = 0;
+        _command.Submitted(tick);
+        foreach (var recording in trailing)
+        {
+            recording.Submitted(tick);
+        }
+
         _submitted?.Invoke(tick);
         return tick;
     }

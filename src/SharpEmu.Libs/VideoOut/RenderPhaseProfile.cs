@@ -149,6 +149,9 @@ internal static class RenderPhaseProfile
         VulkanCommands,
         DispatchConsume,
         DispatchPipeline,
+        CommandPacketRead,
+        CommandPacketHandler,
+        CommandSpaceWait,
         Count,
     }
 
@@ -224,6 +227,26 @@ internal static class RenderPhaseProfile
     internal enum CommandReadKind { Header, Payload, RegisterTable, Operand32, Operand64, Other, Count }
     private static readonly long[] _commandReadCalls = new long[(int)CommandReadKind.Count];
     private static readonly long[] _commandReadBytes = new long[(int)CommandReadKind.Count];
+
+    private static long _cleanReadHits;
+    private static long _cleanReadMisses;
+
+    internal static void RecordCleanRead(bool hit)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        if (hit)
+        {
+            _cleanReadHits++;
+        }
+        else
+        {
+            _cleanReadMisses++;
+        }
+    }
 
     internal static void RecordCommandRead(CommandReadKind kind, int bytes)
     {
@@ -550,8 +573,12 @@ internal static class RenderPhaseProfile
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Rendering.PendingGpuWrites.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.CommandThreadTally.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Agc.AgcExports.TakeResolvePoolReport());
+        SharpEmu.Libs.Agc.DcbParseProfile.TryReport();
+        Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.PacketHandlerTally.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeKeptProgramsReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeFastPathReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.GpuCommands.GpuCommandInterpreter.TakePredicationReport());
+        Console.Error.WriteLine(VulkanVideoPresenter.TakeSliceReport());
         Console.Error.WriteLine(VulkanVideoPresenter.TakeStagePreparationReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.ContentUploadArena.TakeReport());
         ReportResolveWorker(seconds, frames);
@@ -575,7 +602,9 @@ internal static class RenderPhaseProfile
         }
         if (commandReads.Count != 0)
         {
-            Console.Error.WriteLine($"[PERF][COMMAND_READS] window_s={seconds:F1} {string.Join(" ", commandReads)}");
+            Console.Error.WriteLine($"[PERF][COMMAND_READS] window_s={seconds:F1} {string.Join(" ", commandReads)} " +
+                FormattableString.Invariant($"clean_hits={Interlocked.Exchange(ref _cleanReadHits, 0)} clean_misses={Interlocked.Exchange(ref _cleanReadMisses, 0)} ") +
+                FormattableString.Invariant($"gpu_version_bumps={SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeGpuVersionBumps()}"));
         }
     }
 

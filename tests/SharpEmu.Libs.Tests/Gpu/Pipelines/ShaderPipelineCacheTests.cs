@@ -621,7 +621,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
         var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
         rendering.ColorAttachments[0] = new RenderingAttachment(
-            default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
+            default, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
 
         var description = ShaderPipelineCache.BuildGraphicsDescription(
             colors, default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
@@ -641,7 +641,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
         var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
         rendering.ColorAttachments[0] = new RenderingAttachment(
-            default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
+            default, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
 
         var description = ShaderPipelineCache.BuildGraphicsDescription(
             colors, default, programs.VertexInput, null, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,

@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
@@ -119,6 +120,19 @@ public sealed partial class GpuCommandInterpreter
     private uint _occlusionDumpInstanceMask = 0xFFFF;
 
     public ulong SyntheticOcclusionCounter => _syntheticOcclusionCounters[_selectedOcclusionCounter];
+
+    private static long _occlusionWrites;
+    private static long _pixelPipeStatControls;
+    private static long _pixelPipeStatResets;
+    private static long _predicationClears;
+    private static long _predicationBoolWaiting;
+    private static long _predicationBoolUnpredicated;
+
+    public static string TakePredicationReport() =>
+        FormattableString.Invariant($"[PERF][PREDICATION] occlusion_writes={Interlocked.Exchange(ref _occlusionWrites, 0)} clears={Interlocked.Exchange(ref _predicationClears, 0)} ") +
+        FormattableString.Invariant($"bool_wait_flushes={Interlocked.Exchange(ref _predicationBoolWaiting, 0)} bool_unpredicated={Interlocked.Exchange(ref _predicationBoolUnpredicated, 0)} ") +
+        FormattableString.Invariant($"stat_control={Interlocked.Exchange(ref _pixelPipeStatControls, 0)} stat_reset={Interlocked.Exchange(ref _pixelPipeStatResets, 0)} ") +
+        FormattableString.Invariant($"count_control_writes={Interlocked.Exchange(ref global::SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterWriters.DbCountControlWrites, 0)} count_control_last=0x{Interlocked.Read(ref global::SharpEmu.Libs.Gpu.GpuCommands.Registers.RegisterWriters.DbCountControlLastValue):X}");
 
     public ulong AtomicReturnMeData { get; private set; }
 
@@ -289,7 +303,12 @@ public sealed partial class GpuCommandInterpreter
             }
 
             var packetAddress = cursor.Address + ((ulong)cursor.Offset * sizeof(uint));
-            var header = ReadDword(packetAddress, RenderPhaseProfile.CommandReadKind.Header);
+            uint header;
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
+            {
+                header = ReadDword(packetAddress, RenderPhaseProfile.CommandReadKind.Header);
+            }
+
             _packetSerial++;
             var total = cursor.DwordCount;
             var remaining = cursor.Remaining;
@@ -345,9 +364,24 @@ public sealed partial class GpuCommandInterpreter
                 throw _host.Fatal($"The packet opcode is unknown: offset=0x{offset:X5} header=0x{header:X8} opcode=0x{opcode:X2} address=0x{packetAddress:X16}.");
             }
 
-            var payload = ReadPayload(cursorIndex, packetAddress, length - 1);
+            ReadOnlySpan<uint> payload;
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
+            {
+                payload = ReadPayload(cursorIndex, packetAddress, length - 1);
+            }
+
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
-            var consumed = handler(this, in packet, payload) + 1;
+            uint consumed;
+            var handlerStarted = SharpEmu.Libs.Diagnostics.PacketHandlerTally.Enabled ? Stopwatch.GetTimestamp() : 0;
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketHandler))
+            {
+                consumed = handler(this, in packet, payload) + 1;
+            }
+
+            if (handlerStarted != 0)
+            {
+                SharpEmu.Libs.Diagnostics.PacketHandlerTally.Note(opcode, header, Stopwatch.GetTimestamp() - handlerStarted);
+            }
             if (consumed > remaining)
             {
                 throw _host.Fatal($"The handler consumed more than the buffer holds: consumed={consumed} remaining={remaining} header=0x{header:X8} address=0x{packetAddress:X16}.");

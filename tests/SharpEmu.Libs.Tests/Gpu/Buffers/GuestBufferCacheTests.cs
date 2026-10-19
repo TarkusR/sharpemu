@@ -446,10 +446,11 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(0x40UL, offset);
         Assert.Equal(buffer.CpuAddress, harness.Cache.GetBuffer(harness.Cache.FindBuffer(address, 8)).CpuAddress);
         Assert.Equal(version1, harness.ReadBack(buffer, 0x40, 0x100));
-        Assert.False(harness.Cache.HasCpuDirtyPages(address, 0x4140));
-        Assert.True(harness.Cache.HasCpuDirtyPages(address + 0x6000, 0x1000));
+        Assert.False(harness.Cache.HasCpuDirtyPages(address, 0x8000));
+        Assert.True(harness.Cache.HasCpuDirtyPages(address + 0x8000, 0x1000));
         Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
-        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address + 0x6000));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x6000));
+        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address + 0x8000));
 
         // The BDA table maps every 16 KiB page of the buffer to its device address.
         var slice = harness.ReadBack(harness.Cache.BdaPageTableBuffer, (address >> GuestBufferCache.CachingPageBits) * 8, 24);

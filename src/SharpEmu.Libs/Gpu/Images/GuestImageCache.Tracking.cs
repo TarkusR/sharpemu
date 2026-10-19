@@ -565,6 +565,11 @@ public sealed partial class GuestImageCache
 
     private void InvalidateMemoryFromGpu(ulong address, ulong size, bool publish)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("image invalidate");
+        }
+
         if (!IsValidRange(address, size))
         {
             return;

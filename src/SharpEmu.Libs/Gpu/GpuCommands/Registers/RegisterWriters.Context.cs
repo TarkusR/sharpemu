@@ -177,7 +177,11 @@ internal static partial class RegisterWriters
         }
 
         indirect[SpiVsOutConfig] = static (banks, _, value) => banks.ShaderInterfaceForWrite.VertexOutputConfiguration = value;
-        indirect[DbCountControl] = static (banks, _, value) => banks.Context.DepthCountControl = value;
+        indirect[DbCountControl] = static (banks, _, value) =>
+        {
+            banks.Context.DepthCountControl = value;
+            NoteDbCountControl(value);
+        };
         indirect[DbRenderOverride] = static (banks, _, value) => banks.Context.DepthRenderOverride = DepthRenderOverrideRegisters.Decode(value);
         indirect[SpiShaderPosFormat] = static (banks, _, value) => banks.ShaderInterfaceForWrite.PositionExportFormat = value;
         indirect[SpiShaderIdxFormat] = static (banks, _, value) => banks.ShaderInterfaceForWrite.IndexExportFormat = value;
@@ -261,6 +265,15 @@ internal static partial class RegisterWriters
     }
 
     private static uint IgnoreValues(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) => (uint)values.Length;
+
+    public static long DbCountControlWrites;
+    public static long DbCountControlLastValue;
+
+    private static void NoteDbCountControl(uint value)
+    {
+        Interlocked.Increment(ref DbCountControlWrites);
+        Interlocked.Exchange(ref DbCountControlLastValue, value);
+    }
 
     private static uint IgnoreOneValue(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         RequireOneValue(banks, in packet, offset, values);

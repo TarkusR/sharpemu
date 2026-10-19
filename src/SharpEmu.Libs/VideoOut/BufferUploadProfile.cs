@@ -121,7 +121,9 @@ internal static class BufferUploadProfile
     }
 
     internal static string TakeTotalsReport() =>
-        FormattableString.Invariant($"[PERF][BUFFER_SYNC_TOTAL] uploads={Interlocked.Exchange(ref _totalUploads, 0)} copies={Interlocked.Exchange(ref _totalCopies, 0)} bytes={Interlocked.Exchange(ref _totalBytes, 0)} range_bytes={Interlocked.Exchange(ref _totalRangeBytes, 0)}");
+        FormattableString.Invariant($"[PERF][BUFFER_SYNC_TOTAL] uploads={Interlocked.Exchange(ref _totalUploads, 0)} copies={Interlocked.Exchange(ref _totalCopies, 0)} bytes={Interlocked.Exchange(ref _totalBytes, 0)} range_bytes={Interlocked.Exchange(ref _totalRangeBytes, 0)} ") +
+        FormattableString.Invariant($"widened={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploads, 0)} widened_bytes={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploadBytes, 0)} ") +
+        FormattableString.Invariant($"hot_skipped={SharpEmu.HLE.GpuMemory.TrackedRegion.TakeHotUploadsSkipped()}");
 
     internal readonly struct Scope : IDisposable
     {

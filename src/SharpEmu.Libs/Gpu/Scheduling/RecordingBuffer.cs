@@ -34,7 +34,11 @@ public enum RecordedOperation : uint
 
 public sealed class RecordingBuffer
 {
-    private readonly IGpuTickDevice _device;
+    private static long s_promotionGeneration;
+    private static long s_recordingGeneration;
+
+    private readonly IGpuCommandBufferSource _source;
+    private readonly TickedBufferRing _ring;
     private readonly IRenderingState _rendering;
     private SubmissionContext? _context;
     private bool _handleWasRequested;
@@ -43,15 +47,15 @@ public sealed class RecordingBuffer
     private MemoryBarrierRequest _deferredBarrier;
     private bool _hasDeferredBarrier;
     private bool _checkedWindow;
-    private static long _deferredPromotions;
 
     internal nint Buffer;
 
-    internal RecordingBuffer(SubmissionScheduler owner, IGpuTickDevice device, IRenderingState rendering)
+    internal RecordingBuffer(SubmissionScheduler owner, IGpuCommandBufferSource source, IRenderingState rendering)
     {
         Owner = owner;
-        _device = device;
+        _source = source;
         _rendering = rendering;
+        _ring = new TickedBufferRing(source, owner.Timeline);
     }
 
     public SubmissionScheduler Owner { get; }
@@ -72,11 +76,15 @@ public sealed class RecordingBuffer
 
     public bool IsInvalid => Buffer == 0;
 
+    public bool Ended { get; private set; }
+
+    public long Generation { get; private set; }
+
     internal bool HasPendingCommands => _handleWasRequested || _hasPendingBarrier || _hasDeferredBarrier || _rendering.IsRendering;
 
-    // Grows whenever a deferred barrier is recorded or a buffer starts, so a caller can tell whether
+    // Changes whenever a deferred barrier is recorded or a buffer starts, so a caller can tell whether
     // the work it deferred is still outstanding.
-    public static long DeferredPromotions => Interlocked.Read(ref _deferredPromotions);
+    public long DeferredPromotions { get; private set; }
 
     public long MergedBarriers { get; private set; }
 
@@ -152,7 +160,7 @@ public sealed class RecordingBuffer
         {
             merged = merged.Union(_deferredBarrier);
             _hasDeferredBarrier = false;
-            Interlocked.Increment(ref _deferredPromotions);
+            DeferredPromotions = Interlocked.Increment(ref s_promotionGeneration);
             if (Vulkan.GpuSyncProfile.Enabled)
             {
                 Vulkan.GpuSyncProfile.CountDeferredPromotion(Vulkan.DeferredBarrierPromotion.Request);
@@ -219,7 +227,7 @@ public sealed class RecordingBuffer
 
         var request = _deferredBarrier;
         _hasDeferredBarrier = false;
-        Interlocked.Increment(ref _deferredPromotions);
+        DeferredPromotions = Interlocked.Increment(ref s_promotionGeneration);
         if (Vulkan.GpuSyncProfile.Enabled)
         {
             Vulkan.GpuSyncProfile.CountDeferredPromotion(cause);
@@ -270,6 +278,41 @@ public sealed class RecordingBuffer
 
     internal void Bind(SubmissionContext context) => _context = context;
 
+    internal void Acquire()
+    {
+        if (!IsInvalid)
+        {
+            throw SubmissionScheduler.Fatal("Cannot start recording. The command buffer is already recording.");
+        }
+
+        Buffer = _ring.AcquireBuffer();
+        Begin();
+    }
+
+    internal void Submitted(ulong tick)
+    {
+        _ring.Submitted(Buffer, tick);
+        Buffer = 0;
+        Ended = false;
+    }
+
+    internal void Discard()
+    {
+        if (IsInvalid)
+        {
+            return;
+        }
+
+        if (!Ended)
+        {
+            End();
+        }
+
+        _ring.Submitted(Buffer, 0);
+        Buffer = 0;
+        Ended = false;
+    }
+
     internal void Begin()
     {
         if (_rendering.IsRendering || IsInvalid)
@@ -277,12 +320,14 @@ public sealed class RecordingBuffer
             throw SubmissionScheduler.Fatal("Cannot start recording while rendering is active or the command buffer is missing.");
         }
 
-        _device.BeginBuffer(Buffer);
+        _source.BeginBuffer(Buffer);
+        Ended = false;
+        Generation = Interlocked.Increment(ref s_recordingGeneration);
         _handleWasRequested = false;
         _hasPendingBarrier = false;
         _hasDeferredBarrier = false;
         _checkedWindow = false;
-        Interlocked.Increment(ref _deferredPromotions);
+        DeferredPromotions = Interlocked.Increment(ref s_promotionGeneration);
         SetDebugInfo((uint)RecordedOperation.Unknown, 0);
     }
 
@@ -290,6 +335,7 @@ public sealed class RecordingBuffer
     {
         EndRendering();
         _checkedWindow = false;
-        _device.EndBuffer(Handle);
+        _source.EndBuffer(Handle);
+        Ended = true;
     }
 }

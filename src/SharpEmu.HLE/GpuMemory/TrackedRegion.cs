@@ -18,7 +18,12 @@ public sealed class TrackedRegion
     private PageMask _recentCpuUploads;
     private PageMask _repeatedCpuWrites;
     private PageMask _hotCpuWrites;
+    private PageMask _uploadedHotPages;
+    private long _uploadBatch = -1;
+    private static long _hotUploadsSkipped;
     private readonly CpuDirtySummary? _summary;
+
+    public static long TakeHotUploadsSkipped() => Interlocked.Exchange(ref _hotUploadsSkipped, 0);
     private int _cpuDirtyVersion;
 
     public int CpuDirtyVersion => Volatile.Read(ref _cpuDirtyVersion);
@@ -180,7 +185,8 @@ public sealed class TrackedRegion
         ulong address,
         ulong size,
         Action<ulong, ulong> visitCleared,
-        Action<ulong, ulong> visitUpload)
+        Action<ulong, ulong> visitUpload,
+        long uploadBatch = -1)
     {
         var (start, end) = GetPageRange(address, size);
         if (!_cpuDirty.AnyInRange(start, end))
@@ -190,6 +196,23 @@ public sealed class TrackedRegion
         }
 
         var upload = new PageMask(_cpuDirty, start, end);
+        var dedupeHotPages = preserveHotPages && uploadBatch >= 0;
+        if (dedupeHotPages)
+        {
+            if (_uploadBatch != uploadBatch)
+            {
+                _uploadedHotPages = default;
+                _uploadBatch = uploadBatch;
+            }
+
+            var alreadyUploaded = upload & _hotCpuWrites & _uploadedHotPages;
+            if (alreadyUploaded.Any)
+            {
+                upload = upload & ~alreadyUploaded;
+                Interlocked.Increment(ref _hotUploadsSkipped);
+            }
+        }
+
         var cleared = preserveHotPages ? upload & ~_hotCpuWrites : upload;
         foreach (var (runStart, runEnd) in cleared)
         {
@@ -203,7 +226,47 @@ public sealed class TrackedRegion
         {
             visitUpload(BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
         }
+
+        if (dedupeHotPages)
+        {
+            foreach (var (runStart, runEnd) in upload & _hotCpuWrites)
+            {
+                _uploadedHotPages.SetRange(runStart, runEnd);
+            }
+        }
     }
+
+    public (ulong Address, ulong Size) ExtendCpuDirtyRun(ulong address, ulong size, ulong lowerBound, ulong upperBound, bool preserveHotPages, int budgetPages)
+    {
+        var (start, end) = GetPageRange(address, size);
+        var lowPage = (int)((Math.Max(lowerBound, BaseAddress) - BaseAddress) / PageBytes);
+        var highPage = (int)((Math.Min(upperBound, BaseAddress + BlockBytes) - BaseAddress) / PageBytes);
+        var first = start;
+        while (first > lowPage && budgetPages > 0 && IsCpuUploadable(first - 1, preserveHotPages))
+        {
+            first--;
+            budgetPages--;
+        }
+
+        var last = end;
+        while (last < highPage && budgetPages > 0 && IsCpuUploadable(last, preserveHotPages))
+        {
+            last++;
+            budgetPages--;
+        }
+
+        if (first == start && last == end)
+        {
+            return (address, size);
+        }
+
+        var runAddress = Math.Max(BaseAddress + (ulong)first * PageBytes, Math.Min(address, lowerBound));
+        var runEnd = Math.Min(BaseAddress + (ulong)last * PageBytes, Math.Max(address + size, upperBound));
+        return (runAddress, runEnd - runAddress);
+    }
+
+    private bool IsCpuUploadable(int page, bool preserveHotPages) =>
+        _cpuDirty.Get(page) && !(preserveHotPages && _hotCpuWrites.Get(page));
 
     public void ResetCpuWriteHeat(ulong address, ulong size)
     {

@@ -79,7 +79,7 @@ internal sealed class FakeTickDevice : IGpuTickDevice
 
     public bool FailWait { get; set; }
 
-    public List<(nint Buffer, ulong Tick, int Waits, int Signals)> Submits { get; } = new();
+    public List<(nint Buffer, ulong Tick, int Waits, int Signals, nint[] Buffers)> Submits { get; } = new();
 
     public string[] Log
     {
@@ -137,7 +137,18 @@ internal sealed class FakeTickDevice : IGpuTickDevice
 
     public void EndBuffer(nint buffer) => Note($"end {Name(buffer)}");
 
-    public bool TrySubmit(nint buffer, SubmitBundle bundle, out string failure)
+    public IGpuCommandBufferSource CreateBufferSource() => new Source(this);
+
+    private sealed class Source(FakeTickDevice owner) : IGpuCommandBufferSource
+    {
+        public nint[] AllocateBuffers(int count) => owner.AllocateBuffers(count);
+
+        public void BeginBuffer(nint buffer) => owner.BeginBuffer(buffer);
+
+        public void EndBuffer(nint buffer) => owner.EndBuffer(buffer);
+    }
+
+    public bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure)
     {
         failure = "VK_ERROR_DEVICE_LOST";
         if (FailSubmit)
@@ -155,12 +166,13 @@ internal sealed class FakeTickDevice : IGpuTickDevice
         }
 
         Assert.NotEqual(0UL, tick);
+        var handles = buffers.ToArray();
         lock (Submits)
         {
-            Submits.Add((buffer, tick, bundle.WaitCount, bundle.SignalCount));
+            Submits.Add((handles[0], tick, bundle.WaitCount, bundle.SignalCount, handles));
         }
 
-        Note($"submit {Name(buffer)} tick={tick}");
+        Note($"submit {string.Join('+', handles.Select(Name))} tick={tick}");
         if (CompleteOnSubmit)
         {
             Complete(tick);

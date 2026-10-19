@@ -114,7 +114,7 @@ public sealed partial class GuestImageCache
 
     public GuestSpan RememberedRange(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
-        using var held = _lock.Hold();
+        using var held = _lock.Read();
         return UnionRange(request.Description.Data, _slots.TryGet(imageIdentifier)?.Description.Data ?? request.Description.Data);
     }
 

@@ -299,15 +299,15 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         var context = RequireContext();
         _guestTargets[target.Image] = GuestTargetOf(in target, context.ColorTargets[target.Slot], context.RenderTargetMaskForSlot(target.Slot));
         _colorTargets.Add(target);
-        return new ColorAttachmentAcquisition(target.Image, new ImageView(target.Image.Index), ImageLayout.General, target.Resolution.Samples, false, default);
+        return new ColorAttachmentAcquisition(target.Image, new ImageView(target.Image.Index), target.Resolution.Samples, false, default);
     }
 
     DepthAttachmentAcquisition IRenderHost.AcquireDepthAttachment(in DepthAttachmentState depth) =>
         new(new ImageView(depth.Image.Index), depth.Target.Target.Samples, false);
 
-    void IRenderHost.TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects)
+    void IRenderHost.TransitionDepthAttachment(in DepthAttachmentState depth, ImageAspectFlags writeAspects)
     {
-        _ = (layout, writeAspects);
+        _ = writeAspects;
         _depth = depth;
         _hasDepth = true;
     }

@@ -224,7 +224,6 @@ public sealed partial class GuestImageCache
                 ImageUsageFlags.ColorAttachmentBit);
             var view = image.GetOrCreateView(viewDescription);
             image.Transition(
-                ImageLayout.ColorAttachmentOptimal,
                 AccessFlags.ColorAttachmentWriteBit,
                 range,
                 command);
@@ -232,7 +231,7 @@ public sealed partial class GuestImageCache
             {
                 SType = StructureType.RenderingAttachmentInfo,
                 ImageView = view,
-                ImageLayout = ImageLayout.ColorAttachmentOptimal,
+                ImageLayout = ImageLayout.General,
                 LoadOp = AttachmentLoadOp.Clear,
                 StoreOp = AttachmentStoreOp.Store,
                 ClearValue = new ClearValue { Color = clear },
@@ -260,7 +259,7 @@ public sealed partial class GuestImageCache
         }
         else
         {
-            image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, range, command);
+            image.Transition(AccessFlags.TransferWriteBit, range, command);
             var nativeRange = new ImageSubresourceRange(
                 ImageAspectFlags.ColorBit,
                 range.BaseLevel,
@@ -273,7 +272,7 @@ public sealed partial class GuestImageCache
                 _device.Vk.CmdClearColorImage(
                     command,
                     image.Backing.Handle,
-                    ImageLayout.TransferDstOptimal,
+                    ImageLayout.General,
                     &nativeClear,
                     1,
                     &nativeRange);
@@ -398,14 +397,14 @@ public sealed partial class GuestImageCache
 
     public bool IsMetadata(ulong address)
     {
-        using var held = _lock.Hold();
+        using var held = _lock.Read();
         return _surfaceMetadata.TryGetValue(address, out var found) && !found.Invalidated && found.Kind != SurfaceMetadataKind.PendingDcc;
     }
 
     public bool IsMetadataCleared(ulong address, uint slice, out uint fillValue)
     {
         fillValue = 0;
-        using var held = _lock.Hold();
+        using var held = _lock.Read();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
             slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
         {
@@ -418,11 +417,17 @@ public sealed partial class GuestImageCache
 
     public bool IsMetadataCleared(ulong address, uint slice) => IsMetadataCleared(address, slice, out _);
 
+    public SurfaceMetadataKind? PeekSurfaceMetadataKind(ulong address)
+    {
+        using var held = _lock.Read();
+        return _surfaceMetadata.TryGetValue(address, out var found) ? found.Kind : null;
+    }
+
     // DCC metadata of a bound target, or the range of a DCC fill seen before its target: both are
     // filled on the host, which keeps them CPU-readable instead of GPU-written.
     public bool OverlapsDccMetadata(ulong address, ulong size)
     {
-        using var held = _lock.Hold();
+        using var held = _lock.Read();
         var end = address + size;
         for (var index = FirstPossibleMetadataOverlap(address); index < _surfaceMetadata.Count; index++)
         {
@@ -447,6 +452,11 @@ public sealed partial class GuestImageCache
     // A broad clear applies to CMask, FMask and HTile; DCC needs a validated fill value.
     public bool ClearMetadata(ulong address)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("metadata clear");
+        }
+
         using var held = _lock.Hold();
         if (_surfaceMetadata.ContainsKey(address)) RecordMetadataEvent("clear-request", address);
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.NativeColorClear ||
@@ -461,6 +471,11 @@ public sealed partial class GuestImageCache
 
     public bool TryAbsorbDccFill(ulong address, ulong size, uint fillValue)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("dcc fill");
+        }
+
         if (!IsValidRange(address, size))
         {
             throw SubmissionScheduler.Fatal($"The DCC fill range is invalid: address=0x{address:X16} size=0x{size:X16}.");
@@ -555,6 +570,11 @@ public sealed partial class GuestImageCache
 
     public void SynchronizeGuestDccMetadata(ulong metadataAddress, ulong sliceSize, uint baseLayer, uint layerCount)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("dcc sync");
+        }
+
         if (metadataAddress == 0 || sliceSize == 0 || layerCount == 0 ||
             (ulong)baseLayer + layerCount > (ulong.MaxValue - metadataAddress) / sliceSize)
         {
@@ -577,6 +597,11 @@ public sealed partial class GuestImageCache
 
     public bool SetMetadataSlice(ulong address, uint slice, bool isClear)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("metadata slice");
+        }
+
         using var held = _lock.Hold();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
             slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))

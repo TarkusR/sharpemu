@@ -30,9 +30,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private sealed partial class Presenter
     {
-        private LodStatisticsRecorder? _lodStatistics;
+        internal LodStatisticsRecorder? _lodStatistics;
 
-        private LodStatisticsRecorder LodStatistics() =>
+        internal LodStatisticsRecorder LodStatistics() =>
             _lodStatistics ??= new LodStatisticsRecorder(_deviceInfo, _scheduler);
 
         bool Gpu.Pipelines.IShaderPipelineHost.MipStatisticsSubgroupReduction => FragmentSubgroupArithmetic && GraphicsSubgroupOperationsEnabled;
@@ -46,7 +46,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     return false;
                 }
 
-                _commandThread!.PostRange(() => WriteBindingLodStatistics(destination, size), destination, size);
+                _commandThread!.PostRange(() => WriteBindingLodStatistics(destination, size), destination, size, CommandThread.RangeKind.Lod);
                 return true;
             }
 
@@ -57,7 +57,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (OnCommandThread)
             {
-                _commandThread!.PostRange(() => RecordLodStatistics(destination, size), destination, size);
+                _commandThread!.PostRange(() => RecordLodStatistics(destination, size), destination, size, CommandThread.RangeKind.Lod);
                 return true;
             }
 
@@ -67,7 +67,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RecordLodStatistics(ulong destination, uint size)
         {
-            EndRendering();
+            Recording.EndRendering();
             EnsureBatchedGuestCommands();
             LodStatistics().Record(destination, size);
         }
@@ -98,7 +98,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void WriteMipStatisticsFields(uint[] shaderData, BindingLayout layout, ShaderResourceInfo info, uint[][] images, uint[]? statistics)
+        internal void WriteMipStatisticsFields(uint[] shaderData, BindingLayout layout, ShaderResourceInfo info, uint[][] images, uint[]? statistics)
         {
             for (var index = 0; index < layout.MipStatisticsCount; index++)
             {
@@ -111,7 +111,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private DescriptorBufferInfo MipStatisticsDescriptor()
+        internal DescriptorBufferInfo MipStatisticsDescriptor()
         {
             var counters = LodStatistics().Counters;
             return new DescriptorBufferInfo { Buffer = counters.Handle, Offset = 0, Range = counters.Size };

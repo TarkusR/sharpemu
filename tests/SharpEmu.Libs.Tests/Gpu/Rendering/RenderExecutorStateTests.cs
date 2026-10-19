@@ -340,13 +340,12 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.Equal(rendering, Assert.Single(_pipelines.PipelineRenderings));
         Assert.Equal((64u, 64u, 1u, 1u, 1u), (rendering.Width, rendering.Height, rendering.Layers, rendering.ColorAttachmentCount, rendering.Samples));
         var color = rendering.ColorAttachments[0];
-        Assert.Equal((new ImageView(0x1001), ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, false), (color.View, color.Layout, color.Format, color.IsClear));
+        Assert.Equal((new ImageView(0x1001), Format.R8G8B8A8Unorm, false), (color.View, color.Format, color.IsClear));
         var depth = rendering.DepthStencilAttachment;
         Assert.Equal((new ImageView(0x2002), Format.D32Sfloat, true, false, false, false), (depth.View, depth.Format, depth.HasDepth, depth.DepthClear, depth.HasStencil, depth.StencilClear));
-        Assert.Equal(ImageLayout.DepthAttachmentOptimal, depth.Layout);
         Assert.Equal(Format.D32Sfloat, rendering.DepthFormat);
         Assert.Equal(Format.Undefined, rendering.StencilFormat);
-        Assert.Contains($"transition_depth 2 {ImageLayout.DepthAttachmentOptimal} {ImageAspectFlags.DepthBit} loadClear=False", _host.Calls);
+        Assert.Contains($"transition_depth 2 {ImageAspectFlags.DepthBit} loadClear=False", _host.Calls);
     }
 
     [Theory]
@@ -381,20 +380,18 @@ public sealed class RenderExecutorStateTests : IDisposable
 
         var depth = _host.BegunRenderings[0].DepthStencilAttachment;
         Assert.True(depth.DepthClear);
-        Assert.Equal(ImageLayout.DepthAttachmentOptimal, depth.Layout);
         Assert.True(_host.DynamicStates[0].DepthWriteEnabled);
-        Assert.Contains($"transition_depth 2 {ImageLayout.DepthAttachmentOptimal} {ImageAspectFlags.DepthBit} loadClear=True", _host.Calls);
+        Assert.Contains($"transition_depth 2 {ImageAspectFlags.DepthBit} loadClear=True", _host.Calls);
     }
 
     [Fact]
-    public void Attachments_AReadOnlyDepthTargetUsesTheReadOnlyLayout()
+    public void Attachments_AReadOnlyDepthTargetWritesNoAspect()
     {
         var banks = Banks(withDepth: true);
         banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, depthWrite: false);
         _executor.DrawIndexed(1, banks, Indexed(3));
 
-        Assert.Equal(ImageLayout.DepthReadOnlyOptimal, _host.BegunRenderings[0].DepthStencilAttachment.Layout);
-        Assert.Contains($"transition_depth 2 {ImageLayout.DepthReadOnlyOptimal} {ImageAspectFlags.None} loadClear=False", _host.Calls);
+        Assert.Contains($"transition_depth 2 {ImageAspectFlags.None} loadClear=False", _host.Calls);
     }
 
     [Fact]

@@ -566,7 +566,9 @@ internal sealed class LoggingTickDevice : IGpuTickDevice
 
     public void EndBuffer(nint buffer) => _inner.EndBuffer(buffer);
 
-    public bool TrySubmit(nint buffer, SubmitBundle bundle, out string failure)
+    public IGpuCommandBufferSource CreateBufferSource() => _inner.CreateBufferSource();
+
+    public bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure)
     {
         for (var i = 0; i < bundle.SignalCount; i++)
         {
@@ -576,7 +578,7 @@ internal sealed class LoggingTickDevice : IGpuTickDevice
             }
         }
 
-        return _inner.TrySubmit(buffer, bundle, out failure);
+        return _inner.TrySubmit(buffers, bundle, out failure);
     }
 
     public void Dispose() => _inner.Dispose();

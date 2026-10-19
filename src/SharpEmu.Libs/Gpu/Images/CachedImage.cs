@@ -603,14 +603,23 @@ public sealed unsafe partial class CachedImage : IDisposable
                 $"exists={image.Exists} formatValid={formatCompatible} usageValid={usageValid} rangesValid={rangesValid} mappingValid={mappingValid} typeValid={typeValid} aspectValid={aspectValid}.");
         }
 
-        foreach (var cached in Views)
+        lock (Views)
         {
-            if (cached.Description.Equals(normalized))
+            foreach (var cached in Views)
             {
-                return cached.View;
+                if (cached.Description.Equals(normalized))
+                {
+                    return cached.View;
+                }
             }
-        }
 
+            return CreateView(in requested, in normalized, isStorage);
+        }
+    }
+
+    private ImageView CreateView(in ImageViewDescription requested, in ImageViewDescription normalized, bool isStorage)
+    {
+        var image = Backing;
         var minLod = new ImageViewMinLodCreateInfoEXT
         {
             SType = StructureType.ImageViewMinLodCreateInfoExt,

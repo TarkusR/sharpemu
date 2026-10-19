@@ -19,7 +19,6 @@ public readonly record struct RenderHostLimits(uint MaxFramebufferWidth, uint Ma
 public readonly record struct ColorAttachmentAcquisition(
     ResourceSlotIdentifier Image,
     ImageView View,
-    ImageLayout Layout,
     uint Samples,
     bool MetadataClear,
     ClearColorValue MetadataClearValue);
@@ -115,13 +114,13 @@ public interface IRenderHost
 
     void ResetBindings();
 
-    // Finds the image again when it changed, makes the view, sets the layout and resolves a metadata clear.
+    // Finds the image again when it changed, makes the view and resolves a metadata clear.
     ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target);
 
-    // Makes the view and consumes the metadata clear state; the layout follows in a second call.
+    // Makes the view and consumes the metadata clear state; the transition follows in a second call.
     DepthAttachmentAcquisition AcquireDepthAttachment(in DepthAttachmentState depth);
 
-    void TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects);
+    void TransitionDepthAttachment(in DepthAttachmentState depth, ImageAspectFlags writeAspects);
 
     BufferBinding NullBuffer { get; }
 
@@ -161,9 +160,6 @@ public interface IRenderHost
     void BeginRendering(in RenderingState state);
 
     void EndRendering();
-
-    // Whether a texture bound for the draw being prepared reads the depth attachment's subresources.
-    bool SamplesDepthAttachment(in DepthAttachmentState depth) => true;
 
     // The next draw stores to buffers or storage images; called before its BeginRendering.
     void PrepareMemoryWritingDraw() { }

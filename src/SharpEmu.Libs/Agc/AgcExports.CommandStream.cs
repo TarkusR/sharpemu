@@ -179,7 +179,7 @@ public static partial class AgcExports
             _host = host;
             _context = new CpuContext(memory, Generation.Gen5);
             _gpuState = _submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState());
-            if (host is IRenderHost renderHost && host is IShaderPipelineHost pipelineHost)
+            if (host.RenderHost is { } renderHost && host is IShaderPipelineHost pipelineHost)
             {
                 _pipelines = new ShaderPipelineCache(_context, pipelineHost, GuestGpu.Current, CreateShaderHeaderRegistry(_context));
                 var pool = new RecordPool();
@@ -242,7 +242,7 @@ public static partial class AgcExports
             {
                 _sink = value;
                 _resolvePool?.Dispose();
-                _resolvePool = value is not null && _executor is not null && _host is IRenderHost renderHost && _host.ResolveWorkerCount > 0
+                _resolvePool = value is not null && _executor is not null && _host.RenderHost is { } renderHost && _host.ResolveWorkerCount > 0
                     ? new ResolvePool(this, renderHost, _host.ResolveWorkerCount)
                     : null;
             }
@@ -288,19 +288,53 @@ public static partial class AgcExports
 
         public void RunDeferred(DeferredWork work)
         {
+            if (work is DeferredDraw deferred)
+            {
+                JoinDeferredDraw(deferred);
+                return;
+            }
+
+            RunDeferred(work, _recorder!);
+        }
+
+        internal void RunDeferred(DeferredWork work, RenderRecorder recorder)
+        {
             switch (work)
             {
                 case ResolvedDrawWork draw:
-                    _recorder!.Record(draw.Record);
+                    recorder.Record(draw.Record);
                     break;
                 case ResolvedDispatchWork dispatch:
-                    _recorder!.Record(dispatch.Record);
+                    recorder.Record(dispatch.Record);
                     break;
                 case DeferredDraw deferred:
-                    JoinDeferredDraw(deferred);
+                    recorder.Record(TakeWorkerResolvedDraw(deferred));
                     break;
                 default:
                     throw _host.Fatal($"The deferred work is unknown: {work.GetType().Name}.");
+            }
+        }
+
+        // A recorder for another recording thread: it neither releases pending writes nor returns the
+        // records; CompleteDeferred does both once the work is joined in stream order.
+        internal RenderRecorder CreateWorkerRecorder(IRenderHost host) =>
+            new(host, _pipelines ?? throw _host.Fatal("The translation has no pipelines."), RenderExecutor.DefaultStrictDrawResources, pendingWrites: null, _pool, returnsRecords: false);
+
+        internal void CompleteDeferred(DeferredWork work)
+        {
+            switch (work)
+            {
+                case ResolvedDrawWork draw:
+                    _executor!.PendingWrites.Release(draw.Record.Sequence);
+                    _pool!.Return(draw.Record);
+                    break;
+                case ResolvedDispatchWork dispatch:
+                    _executor!.PendingWrites.Release(dispatch.Record.Sequence);
+                    _pool!.Return(dispatch.Record);
+                    break;
+                case DeferredDraw deferred:
+                    CompleteDeferredDraw(deferred);
+                    break;
             }
         }
 
@@ -317,7 +351,9 @@ public static partial class AgcExports
             state.SawIndexedDraw |= indexed;
             if (_resolvePool is { } pool && Producing && _executor.DrawHasTargets(banks) && DrawKnownNotToWrite(banks))
             {
+                var deferStarted = DcbParseProfile.Begin();
                 DeferDraw(pool, submitId, banks, indexed, in indexedArguments, in autoArguments);
+                DcbParseProfile.RecordDraw(deferStarted);
                 state.CurrentIndexSnapshot = null;
                 state.CurrentVertexSnapshot = null;
                 return true;

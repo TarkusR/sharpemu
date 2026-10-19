@@ -48,9 +48,19 @@ public static partial class AgcExports
     private static long _deferredSerialTicks;
     private static long _workerShadowReads;
     private static long _deferredHeld;
+    private static long _deferredSpilled;
+    private static long _recordWaits;
+    private static long _recordWaitTicks;
+    private static long _poolAllocated;
     private static readonly ConcurrentDictionary<string, long> _deferredSerialReasons = new();
 
-    internal static void NoteWorkerShadowRead() => Interlocked.Increment(ref _workerShadowReads);
+    private static readonly long[] _workerShadowSources = new long[3];
+
+    internal static void NoteWorkerShadowRead(int source)
+    {
+        Interlocked.Increment(ref _workerShadowReads);
+        Interlocked.Increment(ref _workerShadowSources[source]);
+    }
 
     public static string TakeResolvePoolReport()
     {
@@ -62,7 +72,10 @@ public static partial class AgcExports
 
         return FormattableString.Invariant($"[PERF][RESOLVE_POOL] deferred={Interlocked.Exchange(ref _deferredDraws, 0)} held={Interlocked.Exchange(ref _deferredHeld, 0)} valid={Interlocked.Exchange(ref _deferredValid, 0)} invalid={Interlocked.Exchange(ref _deferredInvalid, 0)} ") +
             FormattableString.Invariant($"join_wait_ms={Interlocked.Exchange(ref _deferredJoinWaitTicks, 0) * 1000.0 / Stopwatch.Frequency:F1} serial_ms={Interlocked.Exchange(ref _deferredSerialTicks, 0) * 1000.0 / Stopwatch.Frequency:F1} ") +
-            FormattableString.Invariant($"shadow_reads={Interlocked.Exchange(ref _workerShadowReads, 0)} ") +
+            FormattableString.Invariant($"shadow_reads={Interlocked.Exchange(ref _workerShadowReads, 0)} spilled={Interlocked.Exchange(ref _deferredSpilled, 0)} ") +
+            FormattableString.Invariant($"shadow_sources=dispatch:{Interlocked.Exchange(ref _workerShadowSources[0], 0)},fill:{Interlocked.Exchange(ref _workerShadowSources[1], 0)},copy:{Interlocked.Exchange(ref _workerShadowSources[2], 0)} ") +
+            FormattableString.Invariant($"record_waits={Interlocked.Exchange(ref _recordWaits, 0)} record_wait_ms={Interlocked.Exchange(ref _recordWaitTicks, 0) * 1000.0 / Stopwatch.Frequency:F1} ") +
+            FormattableString.Invariant($"alloc_mb={Interlocked.Exchange(ref _poolAllocated, 0) / 1048576.0:F0} ") +
             "serial=" + string.Join(",", reasons.OrderByDescending(reason => reason.Value)
                 .Select(reason => reason.Key.Replace(' ', '_') + ":" + reason.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
     }
@@ -112,9 +125,8 @@ public static partial class AgcExports
             pool.Dispatch(work);
         }
 
-        private void JoinDeferredDraw(DeferredDraw deferred)
+        private static void WaitResolved(DeferredDraw deferred)
         {
-            var waitStarted = Stopwatch.GetTimestamp();
             var spinner = new SpinWait();
             while (!deferred.Done.IsSet && spinner.Count < 200)
             {
@@ -122,6 +134,50 @@ public static partial class AgcExports
             }
 
             deferred.Done.Wait();
+        }
+
+        // On a render worker recording a slice: the worker's result when it still holds, otherwise the
+        // render thread takes the draw in order through JoinDeferredDraw.
+        private ResolvedDraw TakeWorkerResolvedDraw(DeferredDraw deferred)
+        {
+            if (!deferred.Done.IsSet)
+            {
+                var started = Stopwatch.GetTimestamp();
+                WaitResolved(deferred);
+                Interlocked.Increment(ref _recordWaits);
+                Interlocked.Add(ref _recordWaitTicks, Stopwatch.GetTimestamp() - started);
+            }
+
+            if (deferred.Failure is { } failure)
+            {
+                throw new InvalidOperationException("A resolve worker failed.", failure);
+            }
+
+            if (deferred.SerialReason is not null || deferred.Record is null || !_host.ValidateWorkerReads(deferred.Reads))
+            {
+                throw new SerialRequiredException("unresolved draw", resumable: true);
+            }
+
+            return deferred.Record;
+        }
+
+        // At the stream position of a slice segment: whether a worker-resolved draw it recorded still holds.
+        internal bool ValidateDeferred(DeferredWork work) => work is not DeferredDraw deferred || _host.ValidateWorkerReads(deferred.Reads);
+
+        private void CompleteDeferredDraw(DeferredDraw deferred)
+        {
+            var record = deferred.Record!;
+            _executor!.PendingWrites.Release(record.Sequence);
+            _pool!.Return(record);
+            Interlocked.Increment(ref _deferredValid);
+            deferred.Reset();
+            _spareDeferred.Enqueue(deferred);
+        }
+
+        private void JoinDeferredDraw(DeferredDraw deferred)
+        {
+            var waitStarted = Stopwatch.GetTimestamp();
+            WaitResolved(deferred);
             Interlocked.Add(ref _deferredJoinWaitTicks, Stopwatch.GetTimestamp() - waitStarted);
             if (deferred.Failure is { } failure)
             {
@@ -158,7 +214,7 @@ public static partial class AgcExports
         {
             var started = Stopwatch.GetTimestamp();
             var sink = _joinSink ??= new CapturingSink();
-            var executor = _joinExecutor ??= new RenderExecutor((IRenderHost)_host, _pipelines!, sink, _executor!.PendingWrites, _pool);
+            var executor = _joinExecutor ??= new RenderExecutor(_host.RenderHost!, _pipelines!, sink, _executor!.PendingWrites, _pool);
             sink.Sequence = deferred.Sequence;
             sink.Draw = null;
             if (deferred.Indexed)
@@ -218,10 +274,31 @@ public static partial class AgcExports
                 }
             }
 
+            private const int SpillQueueLength = 8;
+
+            // One shader pair keeps one worker while that worker keeps up; a run of its draws spills to
+            // the least loaded worker rather than wait in line.
             public void Dispatch(DeferredDraw work)
             {
                 var shader = work.Banks.Shader;
-                var route = (uint)HashCode.Combine(shader.Vertex.ExportAddress, shader.Pixel.Address) % (uint)_workers.Length;
+                var route = (int)((uint)HashCode.Combine(shader.Vertex.ExportAddress, shader.Pixel.Address) % (uint)_workers.Length);
+                if (_workers[route].Queue.Count > SpillQueueLength)
+                {
+                    var preferred = route;
+                    for (var index = 0; index < _workers.Length; index++)
+                    {
+                        if (_workers[index].Queue.Count < _workers[route].Queue.Count)
+                        {
+                            route = index;
+                        }
+                    }
+
+                    if (route != preferred)
+                    {
+                        Interlocked.Increment(ref _deferredSpilled);
+                    }
+                }
+
                 Interlocked.Increment(ref _pending);
                 _workers[route].Queue.Add(work);
             }
@@ -253,7 +330,13 @@ public static partial class AgcExports
                 RenderPhaseProfile.AttachResolveWorker();
                 foreach (var work in worker.Queue.GetConsumingEnumerable())
                 {
+                    var allocated = RenderPhaseProfile.Enabled ? GC.GetAllocatedBytesForCurrentThread() : 0;
                     Resolve(worker, work);
+                    if (allocated != 0)
+                    {
+                        Interlocked.Add(ref _poolAllocated, GC.GetAllocatedBytesForCurrentThread() - allocated);
+                    }
+
                     if (Interlocked.Decrement(ref _pending) == 0)
                     {
                         lock (_drained)

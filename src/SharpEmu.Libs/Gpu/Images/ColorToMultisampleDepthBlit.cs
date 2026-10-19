@@ -13,7 +13,7 @@ namespace SharpEmu.Libs.Gpu.Images;
 // Writes each channel of a single-sample color image into one sample of a multisample depth image.
 public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
 {
-    public const ImageLayout DestinationLayout = ImageLayout.DepthStencilAttachmentOptimal;
+    public const ImageLayout DestinationLayout = ImageLayout.General;
     private const uint SetsPerPool = 64;
 
     private readonly record struct PipelineKey(uint Samples, Format Format);
@@ -260,8 +260,8 @@ public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
 
         var vk = _device.Vk;
         var command = new CommandBuffer(_scheduler.Current.Handle);
-        source.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
-        destination.Transition(DestinationLayout, AccessFlags.DepthStencilAttachmentWriteBit, null, command);
+        source.Transition(AccessFlags.ShaderReadBit, null, command);
+        destination.Transition(AccessFlags.DepthStencilAttachmentWriteBit, null, command);
 
         var cached = GetPipeline(new PipelineKey(destinationInfo.Samples, destinationInfo.PixelFormat));
         var extent = new Extent2D(destinationInfo.Extent.Width, destinationInfo.Extent.Height);
@@ -279,7 +279,7 @@ public sealed unsafe class ColorToMultisampleDepthBlit : IDisposable
         _scheduler.QueueCompletionAction(() => vk.DestroyFramebuffer(_device.Device, framebuffer, null));
 
         var set = _pools.Allocate(_descriptorLayout);
-        var imageInfo = new DescriptorImageInfo { ImageView = sourceView, ImageLayout = ImageLayout.ShaderReadOnlyOptimal };
+        var imageInfo = new DescriptorImageInfo { ImageView = sourceView, ImageLayout = ImageLayout.General };
         var write = new WriteDescriptorSet
         {
             SType = StructureType.WriteDescriptorSet,

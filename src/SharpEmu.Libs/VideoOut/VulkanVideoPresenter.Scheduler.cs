@@ -26,34 +26,22 @@ internal static unsafe partial class VulkanVideoPresenter
 
         internal GpuWorkerRelay Relay => _relay;
         private readonly SubmissionContext _submissionContext = new();
-        private SubmissionScheduler _scheduler = null!;
-        private VulkanCommandProfile? _gpuCommandProfile;
-        private VulkanOcclusionQueries? _occlusionQueries;
-        private bool _supportsPreciseOcclusion;
-        private bool _occlusionCounting;
-        private int _occlusionQueueId;
-        private GpuDeviceInfo _deviceInfo = null!;
-        private GuestBufferCache _bufferCache = null!;
-        private GuestImageCache _imageCache = null!;
-        private SamplerStore _samplerStore = null!;
+        internal SubmissionScheduler _scheduler = null!;
+        internal VulkanCommandProfile? _gpuCommandProfile;
+        internal VulkanOcclusionQueries? _occlusionQueries;
+        internal bool _supportsPreciseOcclusion;
+        internal int _occlusionQueueId;
+        internal GpuDeviceInfo _deviceInfo = null!;
+        internal GuestBufferCache _bufferCache = null!;
+        internal GuestImageCache _imageCache = null!;
+        internal SamplerStore _samplerStore = null!;
 
-        bool IRenderingState.IsRendering => _renderingActive;
+        bool IRenderingState.IsRendering => _recording?._renderingActive ?? false;
 
-        void IRenderingState.EndRendering()
-        {
-            EndRendering();
-        }
+        void IRenderingState.EndRendering() => _recording?.EndRendering();
 
-        bool IRenderingState.TryDeferUntilRenderingEnds(PipelineStageFlags sourceStages, PipelineStageFlags destinationStages, List<ImageMemoryBarrier2> barriers)
-        {
-            if (!_renderingActive)
-            {
-                return false;
-            }
-
-            _barriersAfterRendering.Add((sourceStages, destinationStages, barriers.ToArray()));
-            return true;
-        }
+        bool IRenderingState.TryDeferUntilRenderingEnds(PipelineStageFlags sourceStages, PipelineStageFlags destinationStages, List<ImageMemoryBarrier2> barriers) =>
+            _recording?.TryDeferUntilRenderingEnds(sourceStages, destinationStages, barriers) ?? false;
 
         internal static void WakeRenderThread()
         {
@@ -78,7 +66,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ => WakeRenderThread());
         }
 
-        private void RecordRequestedMemoryBarrier(nint handle, MemoryBarrierRequest request)
+        internal void RecordRequestedMemoryBarrier(nint handle, MemoryBarrierRequest request)
         {
             var barrier = new MemoryBarrier2
             {
@@ -149,6 +137,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 var outcome = _commandStream.DrainForShutdown(cancelBlockedOnNoProgress: true);
                 FlushBatchedGuestCommands();
+                StopRenderWorkers();
                 Console.Error.WriteLine(
                     $"[LOADER][PERF] command_stream submissions={_commandStream.SubmissionsStarted} " +
                     $"slices={_commandStream.SlicesRun} blocked_retries={_commandStream.BlockedRetries} " +
@@ -183,7 +172,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private CommandBuffer CurrentRecordingBuffer()
+        internal CommandBuffer CurrentRecordingBuffer()
         {
             if (!_scheduler.Active)
             {
@@ -193,7 +182,7 @@ internal static unsafe partial class VulkanVideoPresenter
             return new CommandBuffer(_scheduler.Current.Handle);
         }
 
-        private RecordingBuffer CurrentRecording()
+        internal RecordingBuffer CurrentRecording()
         {
             if (!_scheduler.Active)
             {

@@ -916,6 +916,11 @@ public sealed unsafe partial class GuestImageCache
     // Clears the one image that owns exactly this range; false when no single owner or clear value fits.
     public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("image clear");
+        }
+
         var command = _scheduler.Current;
         if (command.IsInvalid || !IsValidRange(address, size))
         {
@@ -1002,13 +1007,13 @@ public sealed unsafe partial class GuestImageCache
 
         command.EndRendering();
         var native = new CommandBuffer(command.Handle);
-        image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, native);
+        image.Transition(AccessFlags.TransferWriteBit, null, native);
         var range = new ImageSubresourceRange(aspect, 0, Vk.RemainingMipLevels, 0, image.Backing.Layers);
         if (aspect == ImageAspectFlags.ColorBit)
         {
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
             {
-                _device.Vk.CmdClearColorImage(native, image.Backing.Handle, ImageLayout.TransferDstOptimal, &colorClear, 1, &range);
+                _device.Vk.CmdClearColorImage(native, image.Backing.Handle, ImageLayout.General, &colorClear, 1, &range);
             }
         }
         else
@@ -1016,7 +1021,7 @@ public sealed unsafe partial class GuestImageCache
             var clear = new ClearDepthStencilValue(depthClear, stencilClear);
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
             {
-                _device.Vk.CmdClearDepthStencilImage(native, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+                _device.Vk.CmdClearDepthStencilImage(native, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
             }
         }
 

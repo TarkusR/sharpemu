@@ -20,7 +20,7 @@ public readonly record struct DownloadPiece(GpuBuffer Buffer, ulong SourceOffset
 public readonly record struct OverlapSpan(int First, int Last, ulong Begin, ulong End, bool HasStreamLeap);
 
 // Guest memory mirrored in device buffers: upload on use, download on CPU fault, page table for BDA.
-public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
+public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDisposable
 {
     public const int CachingPageBits = 14;
     public const ulong CachingPageSize = 1UL << CachingPageBits;
@@ -135,7 +135,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public GpuBuffer GetBuffer(ResourceSlotIdentifier bufferIdentifier) => _registry.GetBuffer(bufferIdentifier);
 
-    public GpuRingBuffer GetUtilityBuffer(GpuBufferUsage usage) => usage switch
+    public GpuRingBuffer GetUtilityBuffer(GpuBufferUsage usage) => SubmissionScheduler.ReadOnlyThread ? throw SubmissionScheduler.ReadOnlyViolation("utility buffer") : usage switch
     {
         GpuBufferUsage.Upload => _staging,
         GpuBufferUsage.Stream => _stream,
@@ -228,8 +228,13 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false,
-        ResourceSlotIdentifier bufferIdentifier = default, ulong traceShaderHash = 0)
+        ResourceSlotIdentifier bufferIdentifier = default, ulong traceShaderHash = 0, bool allowStream = true)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("buffer obtain");
+        }
+
         CompleteGuestPublications?.Invoke(guestAddress, size, isWritten ? PublicationAccess.Write : PublicationAccess.OverlaidRead);
         if (isWritten && ImageClearTrace.Enabled) ImageCache?.TraceGuestWrite("shader-buffer-write", guestAddress, size, shaderHash: traceShaderHash);
         if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-obtain", guestAddress, size, $"written={isWritten} texel={isTexelBuffer} hash=0x{traceShaderHash:X16}", remember: true);
@@ -256,7 +261,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             }
         }
 
-        if (!isWritten &&
+        if (!isWritten && allowStream &&
             _tracker.HasCpuDirtyPages(guestAddress, size) &&
             !(_tracker.MayHaveGpuDirtyPages(guestAddress, size) && _tracker.HasGpuDirtyPages(guestAddress, size)) &&
             (size <= CachingPageSize || (!isTexelBuffer && _tracker.IsCpuWriteHotRange(guestAddress, size))))
@@ -312,7 +317,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                     _gpuModifiedRanges.Add(guestAddress, size);
                 }
 
-                Interlocked.Increment(ref _gpuModifiedVersion);
+                BumpGpuModifiedVersion();
             }
 
             NoteHotWindowWrite(guestAddress, size);
@@ -339,6 +344,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return ObtainBuffer(guestAddress, size, isWritten: true).Buffer;
     }
 
+    private const int UploadRunBudgetPages = 256;
+    public static long WidenedUploads;
+    public static long WidenedUploadBytes;
     private const int StreamUseSlots = 1024;
     internal const int StreamUsesBeforeClean = 3;
     private readonly (ulong Address, ulong Size, int Uses)[] _streamUses = new (ulong, ulong, int)[StreamUseSlots];
@@ -541,7 +549,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 _gpuModifiedRanges.Remove(guestAddress, size);
             }
 
-            Interlocked.Increment(ref _gpuModifiedVersion);
+            BumpGpuModifiedVersion();
             ClearGpuDirtyPagesOfRemovedRange(guestAddress, size);
         }
     }
@@ -584,6 +592,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void FillDccMetadata(ulong guestAddress, ulong size, uint value)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("dcc metadata fill");
+        }
+
         if (guestAddress == 0 || (guestAddress & 3) != 0 || size == 0 || (size & 3) != 0 || size > ulong.MaxValue - guestAddress ||
             HasGpuDirtyBytes(guestAddress, size))
         {
@@ -646,6 +659,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("host copy");
+        }
+
         if (destination == 0 || source == 0 || sourceWords == 0 || words == 0 || ((destination | source) & 3) != 0 ||
             words > MaxHostCopyWords || sourceWords > MaxHostCopyWords)
         {
@@ -807,6 +825,16 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public long GpuModifiedVersion => Volatile.Read(ref _gpuModifiedVersion);
 
+    private static long _gpuVersionBumps;
+
+    private void BumpGpuModifiedVersion()
+    {
+        Interlocked.Increment(ref _gpuModifiedVersion);
+        Interlocked.Increment(ref _gpuVersionBumps);
+    }
+
+    public static long TakeGpuVersionBumps() => Interlocked.Exchange(ref _gpuVersionBumps, 0);
+
     public long RegistrationSerial => _registry.RegistrationSerial;
 
     public bool HasCpuDirtyPages(ulong guestAddress, ulong size) => _tracker.HasCpuDirtyPages(guestAddress, size);
@@ -866,6 +894,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void PrepareBda(IReadOnlyList<GuestSpan> spans, ulong mapping)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("bda");
+        }
+
         var traceAddress = GuestGpuMemoryHook.TraceAddress;
         var traceCovered = false;
         if (traceAddress != 0)
@@ -1159,6 +1192,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void SynchronizeBuffersInRange(ulong guestAddress, ulong size)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("buffer sync");
+        }
+
         var end = guestAddress + size;
         var index = _registry.FindFirstOverlappingIndex(guestAddress);
         for (; index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < end; index++)
@@ -1802,7 +1840,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                         _gpuModifiedRanges.Remove(copies[index].Address, copies[index].Size);
                     }
 
-                    Interlocked.Increment(ref _gpuModifiedVersion);
+                    BumpGpuModifiedVersion();
                 }
             }
 
@@ -2062,7 +2100,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                     _gpuModifiedRanges.Remove(copy.Address, copy.Size);
                 }
 
-                Interlocked.Increment(ref _gpuModifiedVersion);
+                BumpGpuModifiedVersion();
             }
 
             return;
@@ -2104,7 +2142,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 _gpuModifiedRanges.Remove(copy.Address, copy.Size);
             }
 
-            Interlocked.Increment(ref _gpuModifiedVersion);
+            BumpGpuModifiedVersion();
         }
     }
 
@@ -2116,6 +2154,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void NoteKnownGpuContents(ulong address, ReadOnlySpan<uint> words)
     {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("known contents");
+        }
+
         var bytes = MemoryMarshal.AsBytes(words);
         var size = (ulong)bytes.Length;
         if (size == 0)
@@ -2379,6 +2422,20 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             if (BufferUploadProfile.Enabled)
                 BufferUploadProfile.Record(guestAddress, size, 0, 0, 0, System.Diagnostics.Stopwatch.GetTimestamp() - startedAt);
             return SynchronizeTexelFromImage(buffer, guestAddress, size);
+        }
+
+        _tracker.UploadBatch = (long)_scheduler.CurrentTick;
+        if (!isWritten && !isTexelBuffer)
+        {
+            var (runAddress, runSize) = _tracker.ExtendCpuDirtyRun(
+                guestAddress, size, buffer.CpuAddress, buffer.CpuAddress + buffer.Size, preserveCpuWriteHotPages, UploadRunBudgetPages);
+            if (runSize != size && _backing.IsBackedRange(runAddress, runSize))
+            {
+                Interlocked.Increment(ref WidenedUploads);
+                Interlocked.Add(ref WidenedUploadBytes, (long)(runSize - size));
+                guestAddress = runAddress;
+                size = runSize;
+            }
         }
 
         var collector = _uploadCollector;

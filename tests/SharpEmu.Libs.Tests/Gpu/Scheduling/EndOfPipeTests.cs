@@ -107,7 +107,7 @@ public sealed class EndOfPipeTests
         var eop = NewEndOfPipe();
         var recorded = new List<MemoryBarrierRequest>();
         scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
-        var promotions = RecordingBuffer.DeferredPromotions;
+        var promotions = scheduler.Current.DeferredPromotions;
         var buffer = scheduler.Current;
         buffer.DeferMemoryBarrier(new MemoryBarrierRequest(
             PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.AllCommandsBit, AccessFlags.ShaderWriteBit, AccessFlags.MemoryReadBit));
@@ -117,7 +117,7 @@ public sealed class EndOfPipeTests
         eop.QueueInterruptOnCompletion(buffer, 6, 7);
 
         Assert.Empty(recorded);
-        Assert.Equal(promotions, RecordingBuffer.DeferredPromotions);
+        Assert.Equal(promotions, scheduler.Current.DeferredPromotions);
     }
 
     [Fact]

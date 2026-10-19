@@ -3,6 +3,7 @@
 
 namespace SharpEmu.Libs.VideoOut;
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
@@ -20,17 +21,26 @@ internal static partial class VulkanVideoPresenter
         // The thread runs this far ahead of the render thread at most. Operand reads only drain the
         // queue when a queued write targets them, so the depth mostly costs memory; too shallow and the
         // two threads take turns waiting on each other (128 did, with draws resolving on the pool).
-        private const int MaxOutstanding = 512;
+        private const int MaxOutstanding = 1024;
         private const int ShadowSweepCount = 64;
+        private const int StorePageShift = 12;
 
-        private enum Kind : byte
+        internal enum Kind : byte
         {
             Deferred,
             Call,
             Write,
         }
 
-        private sealed class Item
+        internal enum RangeKind : byte
+        {
+            None,
+            Fill,
+            Copy,
+            Lod,
+        }
+
+        internal sealed class Item
         {
             public Kind Kind;
             public bool IsDraw;
@@ -40,10 +50,18 @@ internal static partial class VulkanVideoPresenter
             public byte[]? Data;
             // The guest range a queued fill or copy writes; zero for other items.
             public ulong RangeSize;
+            public RangeKind Range;
             public long Sequence;
             public bool Sync;
             public volatile bool Done;
             public Exception? Failure;
+        }
+
+        internal enum ShadowSource : byte
+        {
+            Dispatch,
+            Fill,
+            Copy,
         }
 
         private sealed class Shadow
@@ -52,10 +70,25 @@ internal static partial class VulkanVideoPresenter
             public int Length;
             public long Sequence;
             public KnownGpuWrite Known = null!;
+            public ShadowSource Source;
         }
 
+        private sealed class Unit
+        {
+            public Item? Item;
+            public RenderSlice? Slice;
+        }
+
+        private const int SliceItems = 256;
+        private const int MinimumSliceItems = 8;
+        internal const ulong SmallTransferBytes = 64;
+
+        private readonly Presenter _presenter;
         private readonly CommandStreamQueue _queue;
         private readonly ICpuMemory _memory;
+        private readonly List<Unit> _units = new();
+        private int _unitHead;
+        private RenderSlice? _cutting;
         private readonly Action<AgcExports.DeferredWork> _runDeferred;
         private readonly Func<SliceResult> _runSlice;
         private readonly Thread _thread;
@@ -78,6 +111,7 @@ internal static partial class VulkanVideoPresenter
         // this thread see them over guest memory.
         private readonly object _writeLock = new();
         private readonly Queue<Item> _pendingWrites = new();
+        private readonly ConcurrentDictionary<ulong, int> _pendingStorePages = new();
         private volatile int _pendingWriteCount;
 
         // The destinations of queued fills and copies; a read on this thread that overlaps one waits
@@ -91,8 +125,9 @@ internal static partial class VulkanVideoPresenter
 
         private static readonly long RetryTicks = CommandStreamQueue.AllBlockedRetryMilliseconds * Stopwatch.Frequency / 1000L;
 
-        public CommandThread(CommandStreamQueue queue, ICpuMemory memory, Action<AgcExports.DeferredWork> runDeferred, Func<SliceResult> runSlice)
+        public CommandThread(Presenter presenter, CommandStreamQueue queue, ICpuMemory memory, Action<AgcExports.DeferredWork> runDeferred, Func<SliceResult> runSlice)
         {
+            _presenter = presenter;
             _queue = queue;
             _memory = memory;
             _runDeferred = runDeferred;
@@ -112,7 +147,37 @@ internal static partial class VulkanVideoPresenter
 
         public long ShadowGeneration => Volatile.Read(ref _shadowGeneration);
 
-        public bool HasPendingStores => _pendingWriteCount != 0;
+        // Whether a queued store of the stream lands on a page of the range.
+        public bool HasPendingStores(ulong address, ulong size)
+        {
+            if (_pendingWriteCount == 0)
+            {
+                return false;
+            }
+
+            var last = (address + size - 1) >> StorePageShift;
+            for (var page = address >> StorePageShift; page <= last; page++)
+            {
+                if (_pendingStorePages.ContainsKey(page))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void NotePendingStorePages(ulong address, int length, int delta)
+        {
+            var last = (address + (ulong)length - 1) >> StorePageShift;
+            for (var page = address >> StorePageShift; page <= last; page++)
+            {
+                if (_pendingStorePages.AddOrUpdate(page, delta, (_, count) => count + delta) == 0)
+                {
+                    _pendingStorePages.TryRemove(new KeyValuePair<ulong, int>(page, 0));
+                }
+            }
+        }
 
         // Read by the render loop before it waits, so a queued item wakes it.
         public bool ConsumerIdle
@@ -153,6 +218,7 @@ internal static partial class VulkanVideoPresenter
             lock (_writeLock)
             {
                 _pendingWrites.Enqueue(item);
+                NotePendingStorePages(address, item.Data.Length, 1);
                 _pendingWriteCount = _pendingWrites.Count;
             }
 
@@ -160,9 +226,9 @@ internal static partial class VulkanVideoPresenter
         }
 
         // A fill or copy the render thread runs in order; reads of its destination wait for it.
-        public void PostRange(Action action, ulong address, ulong size)
+        public long PostRange(Action action, ulong address, ulong size, RangeKind kind)
         {
-            var item = new Item { Kind = Kind.Call, Action = action, Address = address, RangeSize = size };
+            var item = new Item { Kind = Kind.Call, Action = action, Address = address, RangeSize = size, Range = kind };
             if (size != 0)
             {
                 lock (_writeLock)
@@ -173,24 +239,42 @@ internal static partial class VulkanVideoPresenter
             }
 
             Enqueue(item);
+            return item.Sequence;
         }
 
         // Runs every queued item when one of them is a fill or copy into this range.
         public void WaitForPendingRange(ulong address, ulong size)
         {
-            if (_pendingRangeCount != 0 && OverlapsPendingRange(address, size))
+            if (_pendingRangeCount == 0 || !TryFindPendingRange(address, size, out var pending))
             {
-                Run(static () => { });
+                return;
+            }
+
+            var started = Diagnostics.CommandThreadTally.Enabled ? Stopwatch.GetTimestamp() : 0;
+            Run(static () => { });
+            if (started != 0)
+            {
+                Diagnostics.CommandThreadTally.NoteRangeWait(Stopwatch.GetTimestamp() - started, RangeBucket(pending));
             }
         }
 
-        private bool OverlapsPendingRange(ulong address, ulong size)
+        public bool HasPendingRange(ulong address, ulong size) => _pendingRangeCount != 0 && TryFindPendingRange(address, size, out _);
+
+        public bool HasPendingRangeAfter(ulong address, ulong size, long afterSequence) => HasPendingRangeBetween(address, size, afterSequence, long.MaxValue);
+
+        public bool HasPendingRangeBetween(ulong address, ulong size, long afterSequence, long beforeSequence)
         {
+            if (_pendingRangeCount == 0)
+            {
+                return false;
+            }
+
             lock (_writeLock)
             {
                 foreach (var pending in _pendingRanges)
                 {
-                    if (address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                    if (pending.Sequence > afterSequence && pending.Sequence < beforeSequence &&
+                        address < pending.Address + pending.RangeSize && pending.Address < address + size)
                     {
                         return true;
                     }
@@ -200,7 +284,34 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
-        public void NoteKnownWrite(KnownGpuWrite known, long sequence)
+        private static int RangeBucket(Item pending) => pending.Range switch
+        {
+            RangeKind.Fill => pending.RangeSize <= SmallTransferBytes ? 0 : 1,
+            RangeKind.Copy => pending.RangeSize <= SmallTransferBytes ? 2 : 3,
+            _ => 4,
+        };
+
+        private bool TryFindPendingRange(ulong address, ulong size, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Item? found)
+        {
+            lock (_writeLock)
+            {
+                foreach (var pending in _pendingRanges)
+                {
+                    if (address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                    {
+                        found = pending;
+                        return true;
+                    }
+                }
+
+                found = null;
+                return false;
+            }
+        }
+
+        public void NoteKnownWrite(KnownGpuWrite known, long sequence) => NoteKnownWrite(known, sequence, ShadowSource.Dispatch);
+
+        public void NoteKnownWrite(KnownGpuWrite known, long sequence, ShadowSource source)
         {
             lock (_writeLock)
             {
@@ -209,7 +320,7 @@ internal static partial class VulkanVideoPresenter
                     SweepShadows();
                 }
 
-                _shadows.Add(new Shadow { Address = known.Address, Length = known.ByteCount, Sequence = sequence, Known = known });
+                _shadows.Add(new Shadow { Address = known.Address, Length = known.ByteCount, Sequence = sequence, Known = known, Source = source });
                 _shadowSnapshot = _shadows.ToArray();
             }
 
@@ -253,14 +364,15 @@ internal static partial class VulkanVideoPresenter
             return false;
         }
 
-        public bool TryReadShadow(ulong address, Span<byte> destination, out long sequence) =>
-            TryReadShadowBefore(address, destination, long.MaxValue, out sequence);
+        public bool TryReadShadow(ulong address, Span<byte> destination, out long sequence, out ShadowSource source) =>
+            TryReadShadowBefore(address, destination, long.MaxValue, out sequence, out source);
 
         // The newest known write before the stream position that covers the range, with the stores
         // between the two applied.
-        public bool TryReadShadowBefore(ulong address, Span<byte> destination, long beforeSequence, out long sequence)
+        public bool TryReadShadowBefore(ulong address, Span<byte> destination, long beforeSequence, out long sequence, out ShadowSource source)
         {
             sequence = 0;
+            source = ShadowSource.Dispatch;
             if (!HasShadowBefore(address, (ulong)destination.Length, beforeSequence))
             {
                 return false;
@@ -285,6 +397,7 @@ internal static partial class VulkanVideoPresenter
                     }
 
                     sequence = shadow.Sequence;
+                    source = shadow.Source;
                     ApplyPendingStoresLocked(address, destination, shadow.Sequence, beforeSequence);
                     return true;
                 }
@@ -297,7 +410,7 @@ internal static partial class VulkanVideoPresenter
         public bool ReadOverlay(ulong address, Span<byte> destination)
         {
             WaitForPendingRange(address, (ulong)destination.Length);
-            if (_pendingWriteCount == 0)
+            if (!HasPendingStores(address, (ulong)destination.Length))
             {
                 return _memory.TryRead(address, destination);
             }
@@ -318,12 +431,11 @@ internal static partial class VulkanVideoPresenter
         // none of the later ones. A queued fill or copy before it into the range cannot be read ahead.
         public bool ReadOverlayBefore(ulong address, Span<byte> destination, long sequence)
         {
-            if (_pendingRangeCount == 0 && _pendingWriteCount == 0)
+            var size = (ulong)destination.Length;
+            if (_pendingRangeCount == 0 && !HasPendingStores(address, size))
             {
                 return _memory.TryRead(address, destination);
             }
-
-            var size = (ulong)destination.Length;
             lock (_writeLock)
             {
                 foreach (var pending in _pendingRanges)
@@ -393,7 +505,10 @@ internal static partial class VulkanVideoPresenter
             var started = Diagnostics.CommandThreadTally.Enabled ? Stopwatch.GetTimestamp() : 0;
             try
             {
-                WaitForSpaceCore();
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandSpaceWait))
+                {
+                    WaitForSpaceCore();
+                }
             }
             finally
             {
@@ -508,70 +623,243 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
-        // The consumer side, on the render thread. Runs queued items until the deadline or until
-        // none is left; returns how many ran.
+        // The consumer side, on the render thread. Draws and dispatches are cut into slices that the
+        // render workers record ahead; everything is completed in stream order, slices by joining
+        // them, other items by running them here. Runs until the deadline or until nothing is left;
+        // returns how many items completed.
         public int RunBatch(long deadline, int maxItems, Action betweenItems)
         {
-            if (_drainIndex == _draining.Count)
+            var ran = 0;
+            for (;;)
             {
-                _draining.Clear();
-                _drainIndex = 0;
-                lock (_lock)
+                FillUnits(maxItems);
+                if (_unitHead == _units.Count)
                 {
-                    (_incoming, _draining) = (_draining, _incoming);
+                    _units.Clear();
+                    _unitHead = 0;
+                    if (_cutting is null)
+                    {
+                        ThrowIfFailed();
+                        return ran;
+                    }
+
+                    FlushCutting();
+                    continue;
                 }
 
-                if (_draining.Count == 0)
+                var unit = _units[_unitHead++];
+                if (unit.Slice is { } slice)
                 {
-                    ThrowIfFailed();
-                    return 0;
+                    ran += JoinSlice(slice, betweenItems);
+                }
+                else
+                {
+                    var item = unit.Item!;
+                    Execute(item);
+                    CompleteItem(item);
+                    betweenItems();
+                    ran++;
+                }
+
+                if (ran >= maxItems || ((ran & 31) == 0 && ran != 0 && Stopwatch.GetTimestamp() >= deadline))
+                {
+                    return ran;
+                }
+            }
+        }
+
+        private void FillUnits(int maxItems)
+        {
+            var slicing = _presenter.SlicesEnabled;
+            var slicesAhead = 0;
+            for (var index = _unitHead; index < _units.Count; index++)
+            {
+                if (_units[index].Slice is not null)
+                {
+                    slicesAhead++;
                 }
             }
 
-            var ran = 0;
-            while (_drainIndex < _draining.Count)
+            var limit = slicing ? 2 * _presenter.WorkerCount : 0;
+            var pulled = 0;
+            while (slicesAhead <= limit && pulled < maxItems)
             {
-                var item = _draining[_drainIndex];
-                _draining[_drainIndex++] = null!;
-                Execute(item);
-                ran++;
-                Volatile.Write(ref _executed, item.Sequence);
-                var outstanding = Interlocked.Decrement(ref _outstanding);
-                // One pulse per wait: the producer sets its flag again if it keeps waiting.
-                var wakeForSync = item.Sync && _waitingForSync;
-                var wakeForSpace = _waitingForSpace && outstanding < MaxOutstanding / 2;
-                var wakeForSequence = item.Sequence >= Volatile.Read(ref _waitingForSequence);
-                if (wakeForSync || wakeForSpace || wakeForSequence)
-                {
-                    if (wakeForSync)
-                    {
-                        _waitingForSync = false;
-                    }
-
-                    if (wakeForSpace)
-                    {
-                        _waitingForSpace = false;
-                    }
-
-                    if (wakeForSequence)
-                    {
-                        Volatile.Write(ref _waitingForSequence, long.MaxValue);
-                    }
-
-                    lock (_lock)
-                    {
-                        Monitor.PulseAll(_lock);
-                    }
-                }
-
-                betweenItems();
-                if (ran >= maxItems || ((ran & 31) == 0 && Stopwatch.GetTimestamp() >= deadline))
+                if (_drainIndex == _draining.Count && !RefillDraining())
                 {
                     break;
                 }
+
+                var item = _draining[_drainIndex];
+                _draining[_drainIndex++] = null!;
+                pulled++;
+                if (slicing && item.Kind == Kind.Deferred)
+                {
+                    (_cutting ??= new RenderSlice()).Items.Add(item);
+                    if (_cutting.Items.Count >= SliceItems)
+                    {
+                        CloseSlice();
+                        slicesAhead++;
+                    }
+
+                    continue;
+                }
+
+                if (_cutting is not null && FlushCutting())
+                {
+                    slicesAhead++;
+                }
+
+                _units.Add(new Unit { Item = item });
+            }
+        }
+
+        private bool RefillDraining()
+        {
+            _draining.Clear();
+            _drainIndex = 0;
+            lock (_lock)
+            {
+                (_incoming, _draining) = (_draining, _incoming);
+            }
+
+            return _draining.Count != 0;
+        }
+
+        private bool FlushCutting()
+        {
+            var slice = _cutting!;
+            if (slice.Items.Count >= MinimumSliceItems)
+            {
+                CloseSlice();
+                return true;
+            }
+
+            _cutting = null;
+            foreach (var item in slice.Items)
+            {
+                _units.Add(new Unit { Item = item });
+            }
+
+            Interlocked.Add(ref _serialItems, slice.Items.Count);
+            return false;
+        }
+
+        private void CloseSlice()
+        {
+            var slice = _cutting!;
+            _cutting = null;
+            _units.Add(new Unit { Slice = slice });
+            _presenter.DispatchSlice(slice);
+        }
+
+        private int JoinSlice(RenderSlice slice, Action betweenItems)
+        {
+            var ran = 0;
+            if (!slice.Dispatched)
+            {
+                _presenter.DispatchSlice(slice);
+            }
+
+            try
+            {
+                while (_presenter.NextSegment(slice) is { } segment)
+                {
+                    var end = segment.First + segment.Count;
+                    if (_presenter.JoinSegment(slice, segment))
+                    {
+                        for (var position = segment.First; position < end; position++)
+                        {
+                            var item = slice.Items[position];
+                            _presenter._translation.CompleteDeferred(item.Work!);
+                            CompleteItem(item);
+                            ran++;
+                        }
+
+                        betweenItems();
+                    }
+                    else
+                    {
+                        for (var position = segment.First; position < end; position++)
+                        {
+                            RunInline(slice.Items[position], betweenItems);
+                            ran++;
+                        }
+                    }
+
+                    if (segment.SerialReason is not null)
+                    {
+                        RunInline(slice.Items[end], betweenItems);
+                        ran++;
+                    }
+                }
+            }
+            finally
+            {
+                _presenter.FinishSlice(slice);
+            }
+
+            var remaining = slice.Items.Count - slice.Resume;
+            if (remaining == 0)
+            {
+                return ran;
+            }
+
+            if (_presenter.SlicesEnabled && remaining >= MinimumSliceItems)
+            {
+                var rest = new RenderSlice();
+                rest.Items.AddRange(slice.Items.GetRange(slice.Resume, remaining));
+                _units.Insert(_unitHead, new Unit { Slice = rest });
+                _presenter.DispatchSlice(rest);
+                return ran;
+            }
+
+            for (var position = slice.Resume; position < slice.Items.Count; position++)
+            {
+                RunInline(slice.Items[position], betweenItems);
+                ran++;
             }
 
             return ran;
+        }
+
+        private void RunInline(Item item, Action betweenItems)
+        {
+            Execute(item);
+            CompleteItem(item);
+            betweenItems();
+            Interlocked.Increment(ref _serialItems);
+        }
+
+        private void CompleteItem(Item item)
+        {
+            Volatile.Write(ref _executed, item.Sequence);
+            var outstanding = Interlocked.Decrement(ref _outstanding);
+            // One pulse per wait: the producer sets its flag again if it keeps waiting.
+            var wakeForSync = item.Sync && _waitingForSync;
+            var wakeForSpace = _waitingForSpace && outstanding < MaxOutstanding / 2;
+            var wakeForSequence = item.Sequence >= Volatile.Read(ref _waitingForSequence);
+            if (wakeForSync || wakeForSpace || wakeForSequence)
+            {
+                if (wakeForSync)
+                {
+                    _waitingForSync = false;
+                }
+
+                if (wakeForSpace)
+                {
+                    _waitingForSpace = false;
+                }
+
+                if (wakeForSequence)
+                {
+                    Volatile.Write(ref _waitingForSequence, long.MaxValue);
+                }
+
+                lock (_lock)
+                {
+                    Monitor.PulseAll(_lock);
+                }
+            }
         }
 
         private void Execute(Item item)
@@ -635,6 +923,7 @@ internal static partial class VulkanVideoPresenter
                 }
 
                 _pendingWrites.Dequeue();
+                NotePendingStorePages(item.Address, item.Data!.Length, -1);
                 _pendingWriteCount = _pendingWrites.Count;
                 if (!written)
                 {
@@ -679,11 +968,15 @@ internal static partial class VulkanVideoPresenter
                 while (!_stopping)
                 {
                     var started = tally ? Stopwatch.GetTimestamp() : 0;
+                    var allocated = tally ? GC.GetAllocatedBytesForCurrentThread() : 0;
                     var result = _runSlice();
                     if (tally)
                     {
-                        Diagnostics.CommandThreadTally.NoteSlice(Stopwatch.GetTimestamp() - started);
-                        started = Stopwatch.GetTimestamp();
+                        var now = Stopwatch.GetTimestamp();
+                        Diagnostics.CommandThreadTally.NoteSlice(now - started);
+                        Diagnostics.CommandThreadTally.NoteAllocated(GC.GetAllocatedBytesForCurrentThread() - allocated);
+                        DcbParseProfile.RecordParse(0, now - started, false);
+                        started = now;
                     }
 
                     switch (result)
