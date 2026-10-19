@@ -281,7 +281,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool TryFindStagePreparation(StagePreparationSet set, ResourceSnapshot snapshot, ulong shaderBase, out StagePreparationMemo memo)
         {
             if (set.Last is { } last && last.ShaderBase == shaderBase &&
-                SameSnapshotArrays(snapshot, last.Images, last.Samplers, last.Buffers, last.Ranges) && IsFreshStagePreparation(last))
+                ReferenceEquals(last.Images, snapshot.Images) && ReferenceEquals(last.Samplers, snapshot.Samplers) && IsFreshStagePreparation(last))
             {
                 memo = last;
                 Interlocked.Increment(ref _stageMemoHits);
@@ -304,10 +304,6 @@ internal static unsafe partial class VulkanVideoPresenter
             memo = null!;
             return false;
         }
-
-        private static bool SameSnapshotArrays(ResourceSnapshot snapshot, uint[][] images, uint[][] samplers, uint[][] buffers, DeviceAddressRange[] ranges) =>
-            ReferenceEquals(images, snapshot.Images) && ReferenceEquals(samplers, snapshot.Samplers) &&
-            ReferenceEquals(buffers, snapshot.Buffers) && ReferenceEquals(ranges, snapshot.DeviceAddressRanges);
 
         private bool IsFreshStagePreparation(StagePreparationMemo memo)
         {
@@ -385,7 +381,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
             FindDeviceAddressBuffers(prepared);
             var spans = GuestGpuMemoryHook.Current?.SpanVersion ?? 0;
-            if (memo.Spans == spans)
+            var sameBuffers = memo.Spans == spans && SameWords(memo.Buffers, stage.Resources.Buffers);
+            if (sameBuffers)
             {
                 var buffers = prepared.Resources.Info.Buffers;
                 for (var index = 0; index < memo.Sources.Length; index++)
@@ -397,8 +394,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            var serial = _bufferCache.RegistrationSerial;
-            if (memo.RegistrationSerial != serial || memo.Spans != spans || !ReferenceEquals(memo.Buffers, stage.Resources.Buffers))
+            if (!sameBuffers || memo.RegistrationSerial != _bufferCache.RegistrationSerial)
             {
                 FindBuffers(prepared);
                 prepared.BufferSources.CopyTo(memo.Sources, 0);
@@ -861,7 +857,8 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 foreach (var set in foundSets)
                 {
-                    if (ReferenceEquals(set.Ranges, ranges) && set.Serial == serial && set.Spans == spans)
+                    if (set.Ranges is { } known && set.Serial == serial && set.Spans == spans &&
+                        (ReferenceEquals(known, ranges) || known.AsSpan().SequenceEqual(ranges)))
                     {
                         found = true;
                         break;
