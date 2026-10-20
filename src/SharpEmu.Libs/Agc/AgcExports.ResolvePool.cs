@@ -37,7 +37,6 @@ public static partial class AgcExports
 
         public void Reset()
         {
-            Banks = null!;
             Record = null;
             SerialReason = null;
             Failure = null;
@@ -120,7 +119,7 @@ public static partial class AgcExports
         private void DeferDraw(ResolvePool pool, ulong submitId, RegisterBanks banks, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
         {
             var work = _spareDeferred.TryDequeue(out var spare) ? spare : new DeferredDraw();
-            work.Banks = banks.Snapshot();
+            work.Banks = banks.Snapshot(work.Banks);
             work.SubmitId = submitId;
             work.Indexed = indexed;
             work.IndexedArguments = indexedArguments;

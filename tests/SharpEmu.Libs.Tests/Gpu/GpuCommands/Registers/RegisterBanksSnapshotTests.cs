@@ -330,6 +330,55 @@ public sealed class RegisterBanksSnapshotTests
     }
 
     [Fact]
+    public void ASnapshotIntoAnOldShellTakesTheLiveBanksAndStaysUnchanged()
+    {
+        var other = NewBanks();
+        WriteContext(other, DbDepthControl, 0x0000_0000);
+        WriteShader(other, SpiShaderUserDataPs0, 99);
+        var shell = other.Snapshot();
+        var banks = NewBanks();
+        WriteContext(banks, DbDepthControl, 0x0000_0006);
+        WriteShader(banks, SpiShaderUserDataPs0, 11);
+        WriteShader(banks, SpiShaderPgmLoPs, 0x1000);
+        WriteContext(banks, PaClViewportXScale, Float(2f));
+
+        var snapshot = banks.Snapshot(shell);
+        var fresh = Describe(banks.Snapshot().Context) + Describe(banks.Shader);
+        WriteContext(banks, DbDepthControl, 0x0000_0000);
+        WriteShader(banks, SpiShaderUserDataPs0, 21);
+        WriteShader(banks, SpiShaderPgmLoPs, 0x5000);
+        WriteContext(banks, PaClViewportXScale, Float(4f));
+
+        Assert.Same(shell, snapshot);
+        Assert.Equal(fresh, Describe(snapshot.Context) + Describe(snapshot.Shader));
+        Assert.True(snapshot.Context.DepthTarget.DepthTestEnabled);
+        Assert.Equal(11u, snapshot.Shader.Pixel.UserScalars.Values[0]);
+        Assert.Equal(0x1000ul << 8, snapshot.Shader.Pixel.Address);
+        Assert.Equal(2f, snapshot.Context.ScreenViewport.Primary.XScale);
+        Assert.True(banks.Stamp(RegisterStamp.ShaderPrograms) > snapshot.Stamp(RegisterStamp.ShaderPrograms));
+        Assert.Equal(99u, other.Shader.Pixel.UserScalars.Values[0]);
+        Assert.False(other.Context.DepthTarget.DepthTestEnabled);
+    }
+
+    [Fact]
+    public void ASnapshotIntoAShellAllocatesNothing()
+    {
+        var banks = NewBanks();
+        var shell = banks.Snapshot();
+        var allocated = AllocationMeasurement.SteadyState(
+            () => banks.Snapshot(shell),
+            () =>
+            {
+                for (var index = 0; index < 64; index++)
+                {
+                    shell = banks.Snapshot(shell);
+                }
+            });
+
+        Assert.Equal(0, allocated);
+    }
+
+    [Fact]
     public void ASnapshotAndTheWritesOfADrawAllocateLittle()
     {
         var banks = NewBanks();
@@ -341,7 +390,7 @@ public sealed class RegisterBanksSnapshotTests
         var snapshots = new RegisterBanks[64];
         void Draw(int index)
         {
-            snapshots[index] = banks.Snapshot();
+            snapshots[index] = banks.Snapshot(snapshots[index]);
             userData[0] = (uint)index;
             depth[0] = (uint)index & 6;
             blend[0] = (uint)index;
@@ -363,6 +412,6 @@ public sealed class RegisterBanksSnapshotTests
                 }
             });
 
-        Assert.True(allocated / snapshots.Length <= 1700, $"bytes per draw={allocated / snapshots.Length}");
+        Assert.True(allocated / snapshots.Length <= 1400, $"bytes per draw={allocated / snapshots.Length}");
     }
 }

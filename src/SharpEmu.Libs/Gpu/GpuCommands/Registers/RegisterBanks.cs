@@ -31,7 +31,7 @@ public sealed class RegisterBanks
         UserConfig = userConfig;
     }
 
-    public Func<string, Exception> Fatal { get; }
+    public Func<string, Exception> Fatal { get; private set; }
 
     public ContextRegisters Context { get; private set; }
 
@@ -94,15 +94,33 @@ public sealed class RegisterBanks
 
     // A read-only copy that shares every part with the live banks until they next write it: a
     // deferred draw takes one per draw, and between draws only a few parts change.
-    public RegisterBanks Snapshot()
+    public RegisterBanks Snapshot() => Snapshot(null);
+
+    public RegisterBanks Snapshot(RegisterBanks? shell)
     {
-        var snapshot = new RegisterBanks(Fatal, Context, Shader.ShareStages(), UserConfig)
+        RegisterBanks snapshot;
+        if (shell is null)
         {
-            CompositeDepthSizeXy = CompositeDepthSizeXy,
-            UserDataMarker = UserDataMarker,
-            IndexTypeAndSize = IndexTypeAndSize,
-            _stamps = _stamps,
-        };
+            snapshot = new RegisterBanks(Fatal, Context, Shader.ShareStages(), UserConfig);
+        }
+        else
+        {
+            snapshot = shell;
+            snapshot.Fatal = Fatal;
+            snapshot.Shader.ShareStagesOf(Shader);
+            snapshot.UserConfig = UserConfig;
+            snapshot._savedContext = null;
+            snapshot._savedCompositeDepthSizeXy = null;
+            snapshot._userConfigShared = snapshot._vertexShared = snapshot._pixelShared = snapshot._computeShared = false;
+            snapshot._pixelScalarsShared = snapshot._hullScalarsShared = snapshot._geometryScalarsShared = false;
+            snapshot._legacyVertexScalarsShared = snapshot._exportScalarsShared = snapshot._computeScalarsShared = false;
+            snapshot.OwnContext(Context);
+        }
+
+        snapshot.CompositeDepthSizeXy = CompositeDepthSizeXy;
+        snapshot.UserDataMarker = UserDataMarker;
+        snapshot.IndexTypeAndSize = IndexTypeAndSize;
+        snapshot._stamps = _stamps;
         SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteSnapshot();
         _contextShared = _vertexShared = _pixelShared = _computeShared = _userConfigShared = true;
         _pixelScalarsShared = _hullScalarsShared = _geometryScalarsShared = _legacyVertexScalarsShared = _exportScalarsShared = _computeScalarsShared = true;

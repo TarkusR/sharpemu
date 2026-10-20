@@ -307,6 +307,13 @@ public sealed class ShaderProgramRegisters
     // A bank holding the same stage objects, for a snapshot that shares them.
     public ShaderProgramRegisters ShareStages() => (ShaderProgramRegisters)MemberwiseClone();
 
+    public void ShareStagesOf(ShaderProgramRegisters source)
+    {
+        Vertex = source.Vertex;
+        Pixel = source.Pixel;
+        Compute = source.Compute;
+    }
+
     public VertexStageRegisters Vertex = new();
     public PixelStageRegisters Pixel = new();
     public ComputeStageRegisters Compute = new();
