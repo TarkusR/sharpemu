@@ -4,6 +4,7 @@
 using SharpEmu.Libs.VideoOut;
 using System.Numerics;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Logging;
 using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
@@ -24,6 +25,9 @@ public unsafe class GpuBuffer : IDisposable
 
     private const AccessFlags MemoryAccess = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit;
     private const AccessFlags HostAccess = AccessFlags.HostReadBit | AccessFlags.HostWriteBit;
+
+    private static readonly SharpEmuLogger Log = SharpEmuLog.For("GPU");
+    private static readonly int[] _loggedMemoryTypes = new int[(int)GpuBufferUsage.HostCachedStream + 1];
 
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
@@ -120,6 +124,7 @@ public unsafe class GpuBuffer : IDisposable
         _allocationSize = _slab?.Size ?? requirements.Size;
         var properties = device.GetMemoryTypeFlags(allocateInfo.MemoryTypeIndex);
         IsCoherent = (properties & MemoryPropertyFlags.HostCoherentBit) != 0;
+        NotePlacement(usage, allocateInfo.MemoryTypeIndex, properties);
         if (_slab is null && (properties & MemoryPropertyFlags.HostVisibleBit) != 0)
         {
             void* pointer;
@@ -366,13 +371,26 @@ public unsafe class GpuBuffer : IDisposable
             ? PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit
             : PipelineStageFlags.AllCommandsBit;
 
-    private static IEnumerable<uint> RankMemoryTypes(GpuDeviceInfo device, uint typeBits, GpuBufferUsage usage)
+    private static void NotePlacement(GpuBufferUsage usage, uint memoryType, MemoryPropertyFlags properties)
+    {
+        var bit = 1 << (int)memoryType;
+        ref var logged = ref _loggedMemoryTypes[(int)usage];
+        if ((Volatile.Read(ref logged) & bit) != 0 || (Interlocked.Or(ref logged, bit) & bit) != 0)
+        {
+            return;
+        }
+
+        Log.Info(FormattableString.Invariant($"{usage} buffers use memory type {memoryType}: {properties}"));
+    }
+
+    internal static IEnumerable<uint> RankMemoryTypes(GpuDeviceInfo device, uint typeBits, GpuBufferUsage usage)
     {
         var (required, preferred, avoided) = usage switch
         {
             GpuBufferUsage.DeviceLocal => (MemoryPropertyFlags.None, MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.None),
             GpuBufferUsage.Upload => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit, MemoryPropertyFlags.DeviceLocalBit),
             GpuBufferUsage.Download => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.HostCachedBit, MemoryPropertyFlags.DeviceLocalBit),
+            GpuBufferUsage.HostCachedStream => (MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCachedBit, MemoryPropertyFlags.HostCoherentBit, MemoryPropertyFlags.DeviceLocalBit),
             _ => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.None),
         };
         var candidates = new List<(int Score, uint Index)>();
@@ -384,6 +402,11 @@ public unsafe class GpuBuffer : IDisposable
                 var score = BitOperations.PopCount((uint)(flags & preferred)) - BitOperations.PopCount((uint)(flags & avoided));
                 candidates.Add((score, index));
             }
+        }
+
+        if (candidates.Count == 0 && usage == GpuBufferUsage.HostCachedStream)
+        {
+            return RankMemoryTypes(device, typeBits, GpuBufferUsage.Upload);
         }
 
         return candidates.OrderByDescending(candidate => candidate.Score).ThenBy(candidate => candidate.Index).Select(candidate => candidate.Index);

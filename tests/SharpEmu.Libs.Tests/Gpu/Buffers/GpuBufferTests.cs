@@ -54,6 +54,37 @@ public sealed class GpuBufferTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void HostCachedStream_PrefersCachedHostMemoryAndFallsBackToUploadRanking()
+    {
+        if (_vulkan is null) return;
+        var info = _vulkan.DeviceInfo;
+        var allTypes = info.MemoryTypeCount >= 32 ? uint.MaxValue : (1u << (int)info.MemoryTypeCount) - 1;
+        var cachedTypes = 0u;
+        for (var index = 0; index < info.MemoryTypeCount; index++)
+        {
+            if ((info.GetMemoryTypeFlags((uint)index) & (MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCachedBit)) ==
+                (MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCachedBit))
+            {
+                cachedTypes |= 1u << index;
+            }
+        }
+
+        var ranked = GpuBuffer.RankMemoryTypes(info, allTypes, GpuBufferUsage.HostCachedStream).ToArray();
+        Assert.NotEmpty(ranked);
+        Assert.NotEqual(MemoryPropertyFlags.None, info.GetMemoryTypeFlags(ranked[0]) & MemoryPropertyFlags.HostVisibleBit);
+        if (cachedTypes != 0)
+        {
+            Assert.All(ranked, index => Assert.NotEqual(0u, cachedTypes & (1u << (int)index)));
+        }
+
+        var uncachedTypes = allTypes & ~cachedTypes;
+        Assert.Equal(
+            GpuBuffer.RankMemoryTypes(info, uncachedTypes, GpuBufferUsage.Upload),
+            GpuBuffer.RankMemoryTypes(info, uncachedTypes, GpuBufferUsage.HostCachedStream));
+        Assert.Equal(GpuBufferUsage.Stream, GpuMemoryPlacement.StreamRing);
+    }
+
+    [Fact]
     public void SlabBuffers_ShareAChunkAndRecycleZeroedOnlyAfterForeignReads()
     {
         if (_vulkan is null) return;

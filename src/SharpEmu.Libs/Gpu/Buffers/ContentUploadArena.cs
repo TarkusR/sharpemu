@@ -41,8 +41,8 @@ public sealed class ContentUploadArena : IDisposable
         _scheduler = scheduler;
         _arenas =
         [
-            new Arena(new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AddressedFlags, ArenaBytes)),
-            new Arena(new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AddressedFlags, ArenaBytes)),
+            new Arena(new GpuBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 0, GpuBuffer.AddressedFlags, ArenaBytes)),
+            new Arena(new GpuBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 0, GpuBuffer.AddressedFlags, ArenaBytes)),
         ];
     }
 
