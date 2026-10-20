@@ -38,13 +38,20 @@ internal sealed class SliceHazards
 
     // The barriers the access needs against this slice's earlier accesses of the image; empty on the
     // first access. The returned list is reused by the next call.
-    public List<ImageMemoryBarrier2> Transition(CachedImage image, AccessFlags access, PipelineStageFlags stage, out PipelineStageFlags sourceStages)
+    public List<ImageMemoryBarrier2> Transition(CachedImage image, AccessFlags access, PipelineStageFlags stage, out PipelineStageFlags sourceStages, bool guest = false)
     {
         _barriers.Clear();
         sourceStages = 0;
-        var next = new ImageAccessState(stage, access, ImageLayout.General);
+        var next = new ImageAccessState(stage, access, ImageLayout.General, guest);
         if (_states.TryGetValue(image, out var state))
         {
+            if (state.RepeatsGuestStorageAccess(access, guest))
+            {
+                ImageAccessState.BarriersElided.Increment();
+                _states[image] = state with { Stage = state.Stage | stage };
+                return _barriers;
+            }
+
             var repeatedWrite = (state.Access & WriteAccess) != 0;
             if (state.Access != access || repeatedWrite)
             {
@@ -60,6 +67,7 @@ internal sealed class SliceHazards
                     Image = image.Backing.Handle,
                     SubresourceRange = new ImageSubresourceRange(ViewFormatRules.FullAspects(image.Backing.Format), 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers),
                 });
+                ImageAccessState.Barriers.Increment();
                 sourceStages = state.Stage;
             }
         }

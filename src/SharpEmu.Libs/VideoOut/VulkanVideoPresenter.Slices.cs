@@ -73,6 +73,7 @@ internal static unsafe partial class VulkanVideoPresenter
         FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)} ") +
         FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
         FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
+        FormattableString.Invariant($"image_barriers={ImageAccessState.Barriers.Take()}/elided:{ImageAccessState.BarriersElided.Take()} ") +
         FormattableString.Invariant($"relay_in_wait={_relayInWait.Take()}/{_relayInWaitTicks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms ") +
         FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +
         FormattableString.Invariant($"worker_busy_ms={Interlocked.Exchange(ref _workerBusyTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} worker_items={Interlocked.Exchange(ref _workerItems, 0)} inline_ms={Interlocked.Exchange(ref _inlineTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
@@ -984,16 +985,16 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private readonly record struct SliceUseEntry(ulong Address, ulong Size, bool Written, bool Texel, bool InvalidateImages, BufferSnapshot Snapshot, GpuBuffer Buffer);
 
-        private void TransitionImage(CachedImage image, AccessFlags access, SubresourceRange? range, CommandBuffer command)
+        private void TransitionImage(CachedImage image, AccessFlags access, SubresourceRange? range, CommandBuffer command, bool guest = false)
         {
             if (!_worker)
             {
-                image.Transition(access, range, command);
+                image.Transition(access, range, command, guest);
                 return;
             }
 
             var stage = SliceHazards.StagesOf(access);
-            var barriers = _hazards!.Transition(image, access, stage, out var sourceStages);
+            var barriers = _hazards!.Transition(image, access, stage, out var sourceStages, guest);
             if (barriers.Count == 0)
             {
                 return;

@@ -36,7 +36,7 @@ public sealed unsafe partial class CachedImage
     private static readonly List<ImageMemoryBarrier2> NoBarriers = [];
 
     // Barriers for the requested state; a repeated write always gets a barrier.
-    public (List<ImageMemoryBarrier2> Barriers, PipelineStageFlags SourceStages) GetBarriers(AccessFlags access, PipelineStageFlags stage, SubresourceRange? range)
+    public (List<ImageMemoryBarrier2> Barriers, PipelineStageFlags SourceStages) GetBarriers(AccessFlags access, PipelineStageFlags stage, SubresourceRange? range, bool guest = false)
     {
         List<ImageMemoryBarrier2>? barriers = null;
         PipelineStageFlags sourceStages = 0;
@@ -94,12 +94,20 @@ public sealed unsafe partial class CachedImage
                     }
 
                     var state = states[index];
+                    if (state.RepeatsGuestStorageAccess(access, guest))
+                    {
+                        ImageAccessState.BarriersElided.Increment();
+                        states[index] = state with { Stage = state.Stage | stage };
+                        continue;
+                    }
+
                     var repeatedWrite = (state.Access & WriteAccess) != 0;
                     if (state.Layout != ReadyLayout || state.Access != access || repeatedWrite)
                     {
                         (barriers ??= []).Add(MakeBarrier(state, access, level, 1, layer, 1));
+                        ImageAccessState.Barriers.Increment();
                         sourceStages |= state.Stage;
-                        states[index] = new ImageAccessState(stage, access, ReadyLayout);
+                        states[index] = new ImageAccessState(stage, access, ReadyLayout, guest);
                     }
                 }
             }
@@ -112,6 +120,13 @@ public sealed unsafe partial class CachedImage
         else
         {
             var state = Backing.State;
+            if (state.RepeatsGuestStorageAccess(access, guest))
+            {
+                ImageAccessState.BarriersElided.Increment();
+                Backing.State = state with { Stage = state.Stage | stage };
+                return (NoBarriers, sourceStages);
+            }
+
             var repeatedWrite = (state.Access & WriteAccess) != 0;
             if (state.Layout == ReadyLayout && state.Access == access && !repeatedWrite)
             {
@@ -119,14 +134,15 @@ public sealed unsafe partial class CachedImage
             }
 
             (barriers ??= []).Add(MakeBarrier(state, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
+            ImageAccessState.Barriers.Increment();
             sourceStages |= state.Stage;
         }
 
-        Backing.State = new ImageAccessState(stage, access, ReadyLayout);
+        Backing.State = new ImageAccessState(stage, access, ReadyLayout, guest);
         return (barriers ?? NoBarriers, sourceStages);
     }
 
-    public void Transition(AccessFlags access, SubresourceRange? range, CommandBuffer command)
+    public void Transition(AccessFlags access, SubresourceRange? range, CommandBuffer command, bool guest = false)
     {
         PipelineStageFlags stage = 0;
         if ((access & TransferAccess) != 0)
@@ -139,7 +155,7 @@ public sealed unsafe partial class CachedImage
             stage |= PipelineStageFlags.AllGraphicsBit | PipelineStageFlags.ComputeShaderBit;
         }
 
-        var (barriers, sourceStages) = GetBarriers(access, stage, range);
+        var (barriers, sourceStages) = GetBarriers(access, stage, range, guest);
         if (barriers.Count == 0)
         {
             return;

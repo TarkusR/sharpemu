@@ -204,6 +204,45 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
     }
 
     [Fact]
+    public void Barriers_RepeatedGuestStorageWritesNeedNoBarrierButEveryOtherWriteKeepsOne()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64));
+        const AccessFlags Storage = ImageAccessState.GuestStorageAccess;
+
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null, guest: true).Barriers);
+        Assert.Empty(image.GetBarriers(Storage, PipelineStageFlags.FragmentShaderBit, null, guest: true).Barriers);
+        Assert.Equal(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.FragmentShaderBit, image.Backing.State.Stage);
+
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null).Barriers);
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null, guest: true).Barriers);
+
+        var (afterTransfer, transferStages) = image.GetBarriers(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, null);
+        Assert.Single(afterTransfer);
+        Assert.Equal(PipelineStageFlags.ComputeShaderBit, transferStages);
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null, guest: true).Barriers);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void Barriers_RepeatedGuestStorageWritesNeedNoBarrierPerSubresource()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64, levels: 2));
+        const AccessFlags Storage = ImageAccessState.GuestStorageAccess;
+        var level = new SubresourceRange(1, 1, 0, 1);
+
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, level, guest: true).Barriers);
+        Assert.Empty(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, level, guest: true).Barriers);
+        var (whole, _) = image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null, guest: true);
+        var other = Assert.Single(whole);
+        Assert.Equal(0u, other.SubresourceRange.BaseMipLevel);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
     public void Barriers_IgnoreLayerWindowsOnVolumes()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

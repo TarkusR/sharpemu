@@ -54,6 +54,24 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void SliceHazards_RepeatedGuestStorageWritesNeedNoBarrier()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(CachedImageTests.Color2D(16, 16));
+        var hazards = new SliceHazards();
+        const AccessFlags Storage = ImageAccessState.GuestStorageAccess;
+
+        Assert.Empty(hazards.Transition(image, Storage, PipelineStageFlags.ComputeShaderBit, out _, guest: true));
+        Assert.Empty(hazards.Transition(image, Storage, PipelineStageFlags.FragmentShaderBit, out _, guest: true));
+        Assert.Single(hazards.Transition(image, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, out var readStages));
+        Assert.Equal(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.FragmentShaderBit, readStages);
+
+        Assert.Single(hazards.Transition(image, Storage, PipelineStageFlags.ComputeShaderBit, out _));
+        Assert.Single(hazards.Transition(image, Storage, PipelineStageFlags.ComputeShaderBit, out _, guest: true));
+    }
+
+    [Fact]
     public void SliceHazards_StagesFollowTheAccess()
     {
         Assert.Equal(PipelineStageFlags.TransferBit, SliceHazards.StagesOf(AccessFlags.TransferWriteBit));

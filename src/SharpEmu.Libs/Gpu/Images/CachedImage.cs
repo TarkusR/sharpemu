@@ -3,6 +3,7 @@
 
 using System.IO.Hashing;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -10,9 +11,17 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
-public readonly record struct ImageAccessState(PipelineStageFlags Stage, AccessFlags Access, ImageLayout Layout)
+public readonly record struct ImageAccessState(PipelineStageFlags Stage, AccessFlags Access, ImageLayout Layout, bool Guest = false)
 {
+    public const AccessFlags GuestStorageAccess = AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit;
+
     public static ImageAccessState Initial => new(PipelineStageFlags.AllCommandsBit, AccessFlags.None, ImageLayout.Undefined);
+
+    public static readonly ThreadCounter Barriers = new();
+    public static readonly ThreadCounter BarriersElided = new();
+
+    public bool RepeatsGuestStorageAccess(AccessFlags access, bool guest) =>
+        guest && Guest && access == GuestStorageAccess && Access == access && Layout == ImageLayout.General;
 }
 
 public struct ImageUses

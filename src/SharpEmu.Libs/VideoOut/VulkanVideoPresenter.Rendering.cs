@@ -721,7 +721,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 else if (storage)
                 {
-                    TransitionImage(image, AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit, range, command);
+                    TransitionImage(image, ImageAccessState.GuestStorageAccess, range, command, guest: true);
                 }
                 else
                 {
