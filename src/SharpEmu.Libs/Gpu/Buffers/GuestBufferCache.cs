@@ -1437,15 +1437,27 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         if (!_relay.IsGpuQueueThread && AsyncReadback is { } readback && GuestReadsAwaitOffQueue)
         {
+            var slotWaits = 0;
             for (var attempt = 0; ; attempt++)
             {
                 var allowPending = attempt < MaxAsyncReadbackAttempts;
-                var markHot = attempt == 0 && !isWrite;
+                var markHot = attempt == 0 && slotWaits == 0 && !isWrite;
+                var waitForSlot = slotWaits < MaxReadbackSlotWaits;
                 PendingDownload? pending = null;
+                var slotsBusy = false;
                 if (!_relay.TryRunOnGpuQueue(() =>
-                        pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending, markHot)))
+                        pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending, markHot, waitForSlot, out slotsBusy)))
                 {
                     return AwaitShutdown();
+                }
+
+                if (slotsBusy)
+                {
+                    Interlocked.Increment(ref ReadbacksSlotWaits);
+                    slotWaits++;
+                    attempt--;
+                    readback.WaitForFreeSlot(1);
+                    continue;
                 }
 
                 if (pending is null)
@@ -1472,7 +1484,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             {
                 if (!onQueue || isWrite || !TryUseEagerReadback(guestAddress, size))
                 {
-                    _ = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending: false, markHot: onQueue);
+                    _ = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending: false, markHot: onQueue, waitForSlot: false, out _);
                 }
             }))
         {
@@ -1486,6 +1498,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private const long HotWindowLifetime = 512;
     private const int MaxEagerReadbacks = 4;
     private const int MaxAsyncReadbackAttempts = 4;
+    private const int MaxReadbackSlotWaits = 64;
     private const int EagerStrikeLimit = 3;
     private const long EagerMuteBatches = 4096;
     private readonly Dictionary<ulong, HotWindow> _hotWindows = new();
@@ -1650,7 +1663,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return EagerStart.Nothing;
         }
 
-        if (!TryBeginDownloadAsync(copies, out var ticket, out var writeTicks))
+        if (!TryBeginDownloadAsync(copies, out var ticket, out var writeTicks, out _))
         {
             return EagerStart.Deferred;
         }
@@ -1790,8 +1803,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     private PendingDownload? BeginReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source,
-        bool allowPending, bool markHot = false)
+        bool allowPending, bool markHot, bool waitForSlot, out bool slotsBusy)
     {
+        slotsBusy = false;
         if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("cpu-synchronize", guestAddress, size, $"write={isWrite} source={source}");
         using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
         using var foreignRead = _device.Slabs.BeginForeignRead();
@@ -1811,7 +1825,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             NoteHotReadback(guestAddress, size);
         }
-        if (copies.Count != 0 && allowPending && TryBeginDownloadAsync(copies, out var ticket, out var writeTicks))
+        var busy = false;
+        if (copies.Count != 0 && allowPending && TryBeginDownloadAsync(copies, out var ticket, out var writeTicks, out busy))
         {
             foreach (var copy in copies)
             {
@@ -1831,6 +1846,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 Source = source,
                 Started = readbackStarted,
             };
+        }
+
+        if (busy && waitForSlot)
+        {
+            slotsBusy = true;
+            return null;
         }
 
         if (copies.Count != 0)
@@ -2240,12 +2261,14 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     public static long ReadbacksNoWriter;
     public static long ReadbacksTooLarge;
     public static long ReadbacksBusy;
+    public static long ReadbacksSlotWaits;
     public static long ReadbacksSynchronous;
 
-    private bool TryBeginDownloadAsync(List<DownloadPiece> copies, out VulkanAsyncReadback.Ticket ticket, out ulong[] writeTicks)
+    private bool TryBeginDownloadAsync(List<DownloadPiece> copies, out VulkanAsyncReadback.Ticket ticket, out ulong[] writeTicks, out bool busy)
     {
         ticket = null!;
         writeTicks = [];
+        busy = false;
         if (AsyncReadback is not { } readback || copies.Count == 0)
         {
             return false;
@@ -2292,6 +2315,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         if (!readback.TryBegin(pieces, waitTick, out var started) || started is null)
         {
             Interlocked.Increment(ref ReadbacksBusy);
+            busy = true;
             return false;
         }
 
