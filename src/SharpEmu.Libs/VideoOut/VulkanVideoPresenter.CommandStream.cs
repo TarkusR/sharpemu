@@ -229,6 +229,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         int ICommandStreamHost.ResolveWorkerCount => ResolveWorkerCount;
 
+        PendingCommandSignal ICommandStreamHost.CommandSignal => _relay.CommandSignal;
+
         void ICommandStreamHost.BeginWorkerResolve(long sequence, ResolveReadLog reads)
         {
             var worker = _resolveWorker ??= new ResolveWorkerState();
