@@ -1235,7 +1235,13 @@ public static partial class ResourceMaterializer
             return false;
         }
 
-        return inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(baseAddress + aligned, out word);
+        var address = baseAddress + aligned;
+        if (inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(address, out word))
+        {
+            return true;
+        }
+
+        return inputs.ReadMemory is not null && inputs.ReadMemory(address, out word);
     }
 
     // Enumerates every material key that can pass the table's bounds and reads the
