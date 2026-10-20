@@ -53,15 +53,21 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly AvlSpanSet _gpuModifiedRanges = new();
     private readonly ReaderWriterLockSlim _gpuModifiedGate = new(LockRecursionPolicy.NoRecursion);
 
+    private SpanSnapshot _gpuModifiedSnapshot = SpanSnapshot.Empty;
+
     private GpuModifiedWrite WriteGpuModified()
     {
         _gpuModifiedGate.EnterWriteLock();
-        return new GpuModifiedWrite(_gpuModifiedGate);
+        return new GpuModifiedWrite(this);
     }
 
-    private readonly ref struct GpuModifiedWrite(ReaderWriterLockSlim gate)
+    private readonly ref struct GpuModifiedWrite(GuestBufferCache cache)
     {
-        public void Dispose() => gate.ExitWriteLock();
+        public void Dispose()
+        {
+            Volatile.Write(ref cache._gpuModifiedSnapshot, cache._gpuModifiedRanges.Snapshot());
+            cache._gpuModifiedGate.ExitWriteLock();
+        }
     }
     private const int ObtainMemoSlots = 4096;
     private readonly ObtainMemo[] _obtainMemos = new ObtainMemo[ObtainMemoSlots];
@@ -859,15 +865,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     public bool HasGpuDirtyBytes(ulong guestAddress, ulong size)
     {
-        _gpuModifiedGate.EnterReadLock();
-        try
+        if (size == 0 || guestAddress + size < guestAddress)
         {
-            return _gpuModifiedRanges.Overlaps(guestAddress, size);
+            Environment.FailFast($"The address range is invalid: 0x{guestAddress:X16}, 0x{size:X16}.");
         }
-        finally
-        {
-            _gpuModifiedGate.ExitReadLock();
-        }
+
+        return Volatile.Read(ref _gpuModifiedSnapshot).Overlaps(guestAddress, size);
     }
 
     public bool EverGpuWritten(ulong guestAddress, ulong size) => _tracker.MayHaveGpuWrittenPages(guestAddress, size);

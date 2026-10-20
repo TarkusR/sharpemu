@@ -81,6 +81,14 @@ public sealed class AvlSpanSet
         return false;
     }
 
+    public SpanSnapshot Snapshot()
+    {
+        var starts = new List<ulong>();
+        var ends = new List<ulong>();
+        Collect(_root, starts, ends);
+        return new SpanSnapshot([.. starts], [.. ends]);
+    }
+
     public List<GuestSpan> GetOverlappingRanges(ulong address, ulong size)
     {
         ValidateRange(address, size);
@@ -107,6 +115,15 @@ public sealed class AvlSpanSet
         var size = Math.Min(end, node.End) - overlapStart;
         result.Add(new GuestSpan(overlapStart, size));
         VisitOverlaps(node.Right, start, end, result);
+    }
+
+    private static void Collect(Node? node, List<ulong> starts, List<ulong> ends)
+    {
+        if (node is null) return;
+        Collect(node.Left, starts, ends);
+        starts.Add(node.Start);
+        ends.Add(node.End);
+        Collect(node.Right, starts, ends);
     }
 
     private Node? FindAtOrBelow(ulong address)

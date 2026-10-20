@@ -708,6 +708,59 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void HasGpuDirtyBytes_StaysExactForReadersWhileRangesChange()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 0x100, isWritten: true);
+            buffer.Fill(offset, 0x100, 1);
+        });
+        using var stop = new ManualResetEventSlim();
+        var wrong = 0;
+        var readers = Enumerable.Range(0, 4).Select(_ => new Thread(() =>
+        {
+            while (!stop.IsSet)
+            {
+                if (!harness.Cache.HasGpuDirtyBytes(address + 0x80, 8) || harness.Cache.HasGpuDirtyBytes(address + 0x30000, 0x1000) ||
+                    harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x100))
+                {
+                    Interlocked.Increment(ref wrong);
+                }
+            }
+        })).ToArray();
+        foreach (var reader in readers)
+        {
+            reader.Start();
+        }
+
+        for (var round = 0; round < 50; round++)
+        {
+            var moving = address + 0x10000 + (ulong)(round % 4) * 0x1000;
+            harness.Worker.Run(() =>
+            {
+                var (buffer, offset) = harness.Cache.ObtainBuffer(moving, 0x40, isWritten: true);
+                buffer.Fill(offset, 0x40, (uint)round);
+            });
+            Assert.True(harness.Cache.HasGpuDirtyBytes(moving, 0x40));
+            Assert.True(harness.Store.DownloadToCpu(moving, 8));
+            Assert.False(harness.Cache.HasGpuDirtyBytes(moving, 0x40));
+        }
+
+        stop.Set();
+        foreach (var reader in readers)
+        {
+            reader.Join();
+        }
+
+        Assert.Equal(0, wrong);
+        Assert.True(harness.Cache.HasGpuDirtyBytes(address, 0x100));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void WriteFault_OnAGpuDirtyPageDownloadsThenReleasesTheWrite()
     {
         if (_vulkan is null) return;
