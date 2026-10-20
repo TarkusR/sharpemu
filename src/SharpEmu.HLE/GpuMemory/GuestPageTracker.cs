@@ -266,7 +266,7 @@ public sealed class GuestPageTracker
             if (Volatile.Read(ref _regions[index]) is { } region)
             {
                 tracked = true;
-                if (region.IsCpuDirtyThroughout(offset, bytes))
+                if (region.IsCpuWritableThroughout(offset, bytes))
                 {
                     remaining -= bytes;
                     offset = 0;
@@ -324,6 +324,43 @@ public sealed class GuestPageTracker
                                 region.MarkCpuWrite(region.BaseAddress + start, length);
                             }
                         }
+                    }
+                }
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return tracked;
+    }
+
+    public bool MarkCpuWriteKeepingProtection(ulong vaddr, ulong size, out bool needsGpuFlush)
+    {
+        RejectUploadCallbackReentry();
+        ValidateRange(vaddr, size);
+        var tracked = false;
+        needsGpuFlush = false;
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is { } region)
+            {
+                tracked = true;
+                if (!region.IsCpuDirtyThroughout(offset, bytes))
+                {
+                    using var _ = region.Lock.Hold();
+                    if (region.IsModified(WriteOrigin.Gpu, offset, bytes))
+                    {
+                        needsGpuFlush = true;
+                    }
+                    else
+                    {
+                        region.MarkCpuWriteKeepingProtection(region.BaseAddress + offset, bytes);
                     }
                 }
             }

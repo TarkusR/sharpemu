@@ -697,6 +697,49 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void EmulatorWrite_KeepsTheWriteWatchAndTheNextObtainUploadsTheBytes()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var (buffer, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x4100, isWritten: false));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
+
+        var written = Pattern(0x40, 5);
+        harness.Write(address + 0x80, written);
+        Assert.True(harness.Store.NoteEmulatorWrite(address + 0x80, 0x40));
+
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
+        Assert.True(harness.Cache.HasCpuDirtyPages(address, Page));
+        var (again, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x4100, isWritten: false));
+        Assert.Same(buffer, again);
+        Assert.Equal(written, harness.ReadBack(buffer, 0x80, 0x40));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
+        Assert.False(harness.Store.NoteEmulatorWrite(0x40_0000, 8));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void EmulatorWrite_OverAGpuDirtyPageDownloadsItFirst()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 0x40, isWritten: true);
+            buffer.Fill(offset, 0x40, 0xCAFEF00D);
+        });
+
+        Assert.True(harness.Store.NoteEmulatorWrite(address + 8, 8));
+
+        Assert.False(harness.Cache.HasGpuDirtyPages(address, Page));
+        Assert.True(harness.Cache.HasCpuDirtyPages(address, Page));
+        Assert.Equal(0xCAFEF00Du, BitConverter.ToUInt32(harness.Read(address + 0x3C, 4)));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void UnalignedReadbackAcrossDownloadBatchesPreservesAdjacentGuestBytes()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

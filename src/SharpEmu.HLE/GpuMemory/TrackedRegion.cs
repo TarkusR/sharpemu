@@ -14,6 +14,8 @@ public sealed class TrackedRegion
     private PageMask _gpuDirty;
     private PageMask _gpuEver;
     private PageMask _writable;
+    private PageMask _protectedWhileDirty;
+    private PageMask _publishedCpuDirty;
     private PageMask _readable;
     private PageMask _recentCpuUploads;
     private PageMask _repeatedCpuWrites;
@@ -41,6 +43,7 @@ public sealed class TrackedRegion
         _summary = summary;
         BaseAddress = baseAddress;
         _cpuDirty.Fill();
+        _publishedCpuDirty.Fill();
         _writable.Fill();
         _readable.Fill();
         _summary?.Set(BaseAddress / BlockBytes, dirty: true);
@@ -63,12 +66,16 @@ public sealed class TrackedRegion
         return _gpuEver.AnyInRange(start, end);
     }
 
-    public bool IsCpuDirtyThroughout(ulong offset, ulong size)
+    public bool IsCpuDirtyThroughout(ulong offset, ulong size) => AllSet(_cpuDirty, offset, size);
+
+    public bool IsCpuWritableThroughout(ulong offset, ulong size) => AllSet(_writable, offset, size);
+
+    private bool AllSet(in PageMask mask, ulong offset, ulong size)
     {
         var (start, end) = GetPageRange(BaseAddress + offset, size);
         for (var page = start; page < end; page++)
         {
-            if (!_cpuDirty.Get(page))
+            if (!mask.Get(page))
             {
                 return false;
             }
@@ -141,6 +148,23 @@ public sealed class TrackedRegion
         ChangeState(WriteOrigin.Cpu, enable: true, address, size);
     }
 
+    public void MarkCpuWriteKeepingProtection(ulong address, ulong size)
+    {
+        var (start, end) = GetPageRange(address, size);
+        if (new PageMask(_gpuDirty, start, end).Any)
+        {
+            PageGuard.OnFatal("Cannot mark GPU-dirty pages as CPU-dirty.");
+        }
+
+        foreach (var (runStart, runEnd) in new PageMask(~_cpuDirty, start, end))
+        {
+            _protectedWhileDirty.SetRange(runStart, runEnd);
+        }
+
+        _cpuDirty.SetRange(start, end);
+        UpdateCpuProtection();
+    }
+
     public void ChangeState(WriteOrigin side, bool enable, ulong address, ulong size)
     {
         var (start, end) = GetPageRange(address, size);
@@ -155,6 +179,11 @@ public sealed class TrackedRegion
         }
 
         ref var bits = ref GetDirtyMask(side);
+        if (enable && side == WriteOrigin.Cpu)
+        {
+            _protectedWhileDirty.UnsetRange(start, end);
+        }
+
         if (enable && side == WriteOrigin.Gpu)
         {
             bits.SetRangeAndClear(start, end, ref _recentCpuUploads, ref _repeatedCpuWrites, ref _hotCpuWrites);
@@ -171,7 +200,7 @@ public sealed class TrackedRegion
 
         if (side == WriteOrigin.Cpu)
         {
-            UpdateCpuProtection(track: !enable);
+            UpdateCpuProtection();
         }
         else
         {
@@ -191,7 +220,7 @@ public sealed class TrackedRegion
         var (start, end) = GetPageRange(address, size);
         if (!_cpuDirty.AnyInRange(start, end))
         {
-            UpdateCpuProtection(track: true);
+            UpdateCpuProtection();
             return;
         }
 
@@ -221,7 +250,7 @@ public sealed class TrackedRegion
             _recentCpuUploads.SetRange(runStart, runEnd);
         }
 
-        UpdateCpuProtection(track: true);
+        UpdateCpuProtection();
         foreach (var (runStart, runEnd) in upload)
         {
             visitUpload(BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
@@ -292,7 +321,7 @@ public sealed class TrackedRegion
             GetDirtyMask(side).UnsetRange(start, end);
             if (side == WriteOrigin.Cpu)
             {
-                UpdateCpuProtection(track: true);
+                UpdateCpuProtection();
             }
             else
             {
@@ -309,29 +338,34 @@ public sealed class TrackedRegion
     private ref PageMask GetDirtyMask(WriteOrigin side) => ref side == WriteOrigin.Cpu ? ref _cpuDirty : ref _gpuDirty;
 
     // Every change to the CPU-dirty mask ends here, so it also publishes the block summary.
-    private void UpdateCpuProtection(bool track)
+    private void UpdateCpuProtection()
     {
+        _protectedWhileDirty = _protectedWhileDirty & _cpuDirty;
         _summary?.Set(BaseAddress / BlockBytes, _cpuDirty.Any);
-        if (_summary is not null && (_cpuDirty & ~_writable).Any)
+        var changed = _cpuDirty ^ _publishedCpuDirty;
+        if (changed.Any)
         {
-            _summary.NoteDirtied();
+            if (_summary is not null && (_cpuDirty & changed).Any)
+            {
+                _summary.NoteDirtied();
+            }
+
+            _publishedCpuDirty = _cpuDirty;
+            Interlocked.Increment(ref _cpuDirtyVersion);
         }
 
-        var mask = _cpuDirty ^ _writable;
-        _writable = _cpuDirty;
-        if (mask.None)
+        var writable = _cpuDirty & ~_protectedWhileDirty;
+        var protect = _writable & ~writable;
+        var release = writable & ~_writable;
+        _writable = writable;
+        if (protect.Any)
         {
-            return;
+            _pages.AddWatchMask(BaseAddress, protect, blockReads: false);
         }
 
-        Interlocked.Increment(ref _cpuDirtyVersion);
-        if (track)
+        if (release.Any)
         {
-            _pages.AddWatchMask(BaseAddress, mask, blockReads: false);
-        }
-        else
-        {
-            _pages.RemoveWatchMask(BaseAddress, mask, blockReads: false);
+            _pages.RemoveWatchMask(BaseAddress, release, blockReads: false);
         }
     }
 
