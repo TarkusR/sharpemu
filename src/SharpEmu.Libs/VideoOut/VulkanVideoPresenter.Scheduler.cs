@@ -81,7 +81,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 DstAccessMask = VulkanSynchronization.Access(request.DestinationAccess),
             };
             VulkanSynchronization.PipelineBarrier(_vk, new CommandBuffer(handle), request.SourceStages, request.DestinationStages,
-                0, 1, &barrier, 0, null, 0, null);
+                0, 1, &barrier, 0, null, 0, null, BarrierSource.Requested);
         }
 
         // Both stores share the manager's page guard and read guest memory through its address space.

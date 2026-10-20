@@ -308,6 +308,16 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
     }
 
+    public void EndRendering(Vulkan.ScopeBreak reason)
+    {
+        if (Active && !_command.IsInvalid && _rendering.IsRendering)
+        {
+            Vulkan.BarrierTally.CountScopeBreak(reason);
+        }
+
+        EndRendering();
+    }
+
     public bool TryDeferUntilRenderingEnds(PipelineStageFlags sourceStages, PipelineStageFlags destinationStages, List<ImageMemoryBarrier2> barriers) =>
         Active && !_command.IsInvalid && _rendering.IsRendering &&
         _rendering.TryDeferUntilRenderingEnds(sourceStages, destinationStages, barriers);

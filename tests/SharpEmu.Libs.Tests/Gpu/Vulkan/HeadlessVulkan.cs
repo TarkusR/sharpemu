@@ -564,7 +564,7 @@ internal sealed class LoggingTickDevice : IGpuTickDevice
 
     public void BeginBuffer(nint buffer) => _inner.BeginBuffer(buffer);
 
-    public void EndBuffer(nint buffer) => _inner.EndBuffer(buffer);
+    public void EndBuffer(nint buffer, bool hostRead) => _inner.EndBuffer(buffer, hostRead);
 
     public IGpuCommandBufferSource CreateBufferSource() => _inner.CreateBufferSource();
 

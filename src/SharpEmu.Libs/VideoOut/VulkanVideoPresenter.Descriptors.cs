@@ -1731,10 +1731,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     if (descriptors.GlobalDataShare.Buffer.Handle != 0)
                     {
                         // The host and every earlier queue write to the data share complete before the shader reads it.
-                        EndRendering();
+                        EndRendering(ScopeBreak.GlobalDataShare);
                         command = BeginBatchedGuestCommands();
                         var barrier = GlobalDataShareBarrier.Make(descriptors.GlobalDataShare.Buffer);
-                        VulkanSynchronization.PipelineBarrier(_vk,command, GlobalDataShareBarrier.SourceStages, DescriptorWriter.PipelineStageFlag(stageFlag), 0, 0, null, 1, &barrier, 0, null);
+                        VulkanSynchronization.PipelineBarrier(_vk,command, GlobalDataShareBarrier.SourceStages, DescriptorWriter.PipelineStageFlag(stageFlag), 0, 0, null, 1, &barrier, 0, null, BarrierSource.GlobalDataShare);
                     }
 
                     if (!stage.TexturesKept || !KeepsTextureSet(stage))

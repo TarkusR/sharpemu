@@ -104,6 +104,11 @@ public sealed unsafe partial class CachedImage
                     var repeatedWrite = (state.Access & WriteAccess) != 0;
                     if (state.Layout != ReadyLayout || state.Access != access || repeatedWrite)
                     {
+                        if (GpuSyncProfile.Enabled)
+                        {
+                            BarrierTally.CountAvoidableImageBarrier(in state, access);
+                        }
+
                         (barriers ??= []).Add(MakeBarrier(state, access, level, 1, layer, 1));
                         ImageAccessState.Barriers.Increment();
                         sourceStages |= state.Stage;
@@ -131,6 +136,11 @@ public sealed unsafe partial class CachedImage
             if (state.Layout == ReadyLayout && state.Access == access && !repeatedWrite)
             {
                 return (NoBarriers, sourceStages);
+            }
+
+            if (GpuSyncProfile.Enabled)
+            {
+                BarrierTally.CountAvoidableImageBarrier(in state, access);
             }
 
             (barriers ??= []).Add(MakeBarrier(state, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
@@ -170,7 +180,7 @@ public sealed unsafe partial class CachedImage
             return;
         }
 
-        _scheduler.EndRendering();
+        _scheduler.EndRendering(ScopeBreak.Image);
         RecordBarriers(command, sourceStages, stage, null, barriers);
     }
 
@@ -201,7 +211,7 @@ public sealed unsafe partial class CachedImage
         {
             VulkanSynchronization.PipelineBarrier(_device.Vk,
                 command, sourceStages == 0 ? PipelineStageFlags.TopOfPipeBit : sourceStages, destinationStages, DependencyFlags.ByRegionBit,
-                0, null, bufferBarrier == null ? 0u : 1u, bufferBarrier, (uint)images.Length, imagePointer);
+                0, null, bufferBarrier == null ? 0u : 1u, bufferBarrier, (uint)images.Length, imagePointer, BarrierSource.Image);
         }
     }
 

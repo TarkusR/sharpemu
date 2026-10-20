@@ -1054,6 +1054,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
     private CommandBuffer _sweepBarrierBuffer;
 
+    internal long UploadsRecorded { get; private set; }
+
+    internal long UploadBarrierPairs { get; private set; }
+
     private void OpenSweepBarrier(CommandBuffer native)
     {
         if (_sweepBarrierBuffer.Handle == native.Handle)
@@ -1063,6 +1067,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         CloseSweepBarrier();
         _sweepBarrierBuffer = native;
+        UploadBarrierPairs++;
         RecordSweepBarrier(native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit,
             AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit | AccessFlags2.TransferReadBit | AccessFlags2.TransferWriteBit,
             AccessFlags2.TransferWriteBit);
@@ -1091,7 +1096,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             SrcAccessMask = sourceAccess,
             DstAccessMask = destinationAccess,
         };
-        VulkanSynchronization.PipelineBarrier(_device.Vk, native, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null);
+        VulkanSynchronization.PipelineBarrier(_device.Vk, native, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null, BarrierSource.Sweep);
     }
 
     private long _bdaSweepEpoch = -1;
@@ -3096,15 +3101,17 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             Offset = 0,
             Size = buffer.Size,
         };
+        UploadsRecorded++;
         if (sweep)
         {
             OpenSweepBarrier(native);
         }
         else
         {
+            UploadBarrierPairs++;
             VulkanSynchronization.PipelineBarrier(vk,
                 native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
-                0, null, 1, &before, 0, null);
+                0, null, 1, &before, 0, null, BarrierSource.Upload);
         }
 
         fixed (BufferCopy* pointer = regions)
@@ -3122,7 +3129,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             after.DstAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit;
             VulkanSynchronization.PipelineBarrier(vk,
                 native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
-                0, null, 1, &after, 0, null);
+                0, null, 1, &after, 0, null, BarrierSource.Upload);
         }
     }
 

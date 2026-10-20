@@ -135,7 +135,17 @@ internal sealed class FakeTickDevice : IGpuTickDevice
 
     public void BeginBuffer(nint buffer) => Note($"begin {Name(buffer)}");
 
-    public void EndBuffer(nint buffer) => Note($"end {Name(buffer)}");
+    public int HostReadBarriers;
+
+    public void EndBuffer(nint buffer, bool hostRead)
+    {
+        if (hostRead)
+        {
+            Interlocked.Increment(ref HostReadBarriers);
+        }
+
+        Note($"end {Name(buffer)}");
+    }
 
     public IGpuCommandBufferSource CreateBufferSource() => new Source(this);
 
@@ -145,7 +155,7 @@ internal sealed class FakeTickDevice : IGpuTickDevice
 
         public void BeginBuffer(nint buffer) => owner.BeginBuffer(buffer);
 
-        public void EndBuffer(nint buffer) => owner.EndBuffer(buffer);
+        public void EndBuffer(nint buffer, bool hostRead) => owner.EndBuffer(buffer, hostRead);
     }
 
     public bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure)

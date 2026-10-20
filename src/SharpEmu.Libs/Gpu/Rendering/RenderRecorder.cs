@@ -587,7 +587,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         {
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("write-barrier", $"sourceStages={record.WriteStages}");
             _inPlace.Valid = false;
-            _host.EndRendering();
+            _host.EndRendering(Vulkan.ScopeBreak.StoringDraw);
             _host.ShaderWriteBarrier(record.WriteStages);
         }
         else

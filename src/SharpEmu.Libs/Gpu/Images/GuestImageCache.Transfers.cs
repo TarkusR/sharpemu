@@ -892,7 +892,7 @@ public sealed unsafe partial class GuestImageCache
             Size = range.Size,
         };
         _scheduler.EndRendering();
-        VulkanSynchronization.PipelineBarrier(_device.Vk,new CommandBuffer(_scheduler.Current.Handle), PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0, 0, null, 1, &barrier, 0, null);
+        VulkanSynchronization.PipelineBarrier(_device.Vk,new CommandBuffer(_scheduler.Current.Handle), PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0, 0, null, 1, &barrier, 0, null, BarrierSource.Download);
         var backing = _backing;
         var landingDecided = LandingDecidedForTest;
         _scheduler.QueuePriorityCompletionAction(() =>

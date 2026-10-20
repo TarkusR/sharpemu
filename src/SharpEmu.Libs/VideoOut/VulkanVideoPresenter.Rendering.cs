@@ -1192,13 +1192,24 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _presenter._occlusionQueries?.End(command);
             }
+
+            if (GpuSyncProfile.Enabled && _barriersAfterRendering.Count != 0)
+            {
+                BarrierTally.ScopeEnds.Increment();
+                BarrierTally.ScopeEndCalls.Add(_barriersAfterRendering.Count);
+                foreach (var (_, _, barriers) in _barriersAfterRendering)
+                {
+                    BarrierTally.ScopeEndImages.Add(barriers.Length);
+                }
+            }
+
             foreach (var (sourceStages, destinationStages, barriers) in _barriersAfterRendering)
             {
                 fixed (ImageMemoryBarrier2* pointer = barriers)
                 {
                     VulkanSynchronization.PipelineBarrier(_vk,
                         command, sourceStages, destinationStages, DependencyFlags.ByRegionBit,
-                        0, null, 0, null, (uint)barriers.Length, pointer);
+                        0, null, 0, null, (uint)barriers.Length, pointer, BarrierSource.ScopeEnd);
                 }
             }
 
@@ -1207,17 +1218,30 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _globalBarrierAfterRendering = false;
                 _presenter.RecordGlobalBarrier(command);
+                CurrentRecording().NoteFullBarrierRecorded();
             }
 
             _renderingWritesMemory = false;
         }
+
+        internal void EndRendering(ScopeBreak reason)
+        {
+            if (_renderingActive)
+            {
+                BarrierTally.CountScopeBreak(reason);
+            }
+
+            EndRendering();
+        }
+
+        void IRenderHost.EndRendering(ScopeBreak reason) => EndRendering(reason);
 
         void IRenderHost.PrepareMemoryWritingDraw()
         {
             // The store must not move ahead of a cache flush deferred inside this scope.
             if (_globalBarrierAfterRendering)
             {
-                EndRendering();
+                EndRendering(ScopeBreak.DeferredFlush);
             }
 
             _nextDrawWritesMemory = true;
@@ -1446,7 +1470,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Offset = offset,
                 Size = 3u * sizeof(uint),
             };
-            VulkanSynchronization.PipelineBarrier(_vk,command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.DrawIndirectBit, 0, 0, null, 1, &barrier, 0, null);
+            VulkanSynchronization.PipelineBarrier(_vk,command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.DrawIndirectBit, 0, 0, null, 1, &barrier, 0, null, BarrierSource.IndirectDispatch);
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
             {
                 _vk.CmdDispatchIndirect(command, buffer, offset);
@@ -1480,7 +1504,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SrcAccessMask = VulkanSynchronization.Access(sourceAccess),
                 DstAccessMask = VulkanSynchronization.Access(destinationAccess),
             };
-            VulkanSynchronization.PipelineBarrier(_vk,command, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null);
+            VulkanSynchronization.PipelineBarrier(_vk,command, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null, BarrierSource.Requested);
         }
 
         public void ShaderWriteBarrier(PipelineStageFlags sourceStages) =>

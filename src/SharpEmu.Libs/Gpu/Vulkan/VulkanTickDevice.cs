@@ -64,18 +64,22 @@ internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDispo
         _profile?.BeginBuffer(new CommandBuffer(buffer));
     }
 
-    public void EndBuffer(nint buffer)
+    public void EndBuffer(nint buffer, bool hostRead)
     {
         var command = new CommandBuffer(buffer);
         _profile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Tail);
-        var hostRead = new MemoryBarrier2
+        if (hostRead)
         {
-            SType = StructureType.MemoryBarrier2,
-            SrcAccessMask = AccessFlags2.MemoryWriteBit,
-            DstAccessMask = AccessFlags2.HostReadBit,
-        };
-        VulkanSynchronization.PipelineBarrier(_vk, command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0,
-            1, &hostRead, 0, null, 0, null);
+            var barrier = new MemoryBarrier2
+            {
+                SType = StructureType.MemoryBarrier2,
+                SrcAccessMask = AccessFlags2.MemoryWriteBit,
+                DstAccessMask = AccessFlags2.HostReadBit,
+            };
+            VulkanSynchronization.PipelineBarrier(_vk, command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0,
+                1, &barrier, 0, null, 0, null, BarrierSource.HostRead);
+        }
+
         VulkanTickDevice.RequireSuccess(_vk.EndCommandBuffer(command), "vkEndCommandBuffer(scheduler)");
     }
 
@@ -306,7 +310,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
 
     public void BeginBuffer(nint buffer) => _pool.BeginBuffer(buffer);
 
-    public void EndBuffer(nint buffer) => _pool.EndBuffer(buffer);
+    public void EndBuffer(nint buffer, bool hostRead) => _pool.EndBuffer(buffer, hostRead);
 
     public IGpuCommandBufferSource CreateBufferSource()
     {

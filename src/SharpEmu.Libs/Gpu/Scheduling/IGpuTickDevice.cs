@@ -9,7 +9,7 @@ public interface IGpuCommandBufferSource
 
     void BeginBuffer(nint buffer);
 
-    void EndBuffer(nint buffer);
+    void EndBuffer(nint buffer, bool hostRead);
 }
 
 // Provide the scheduler with one timeline semaphore, one queue, its own command pool and further

@@ -315,7 +315,7 @@ public unsafe class GpuBuffer : IDisposable
         before[1] = CreateBarrier(destinationOffset, size, destinationBefore, AccessFlags.TransferWriteBit);
         VulkanSynchronization.PipelineBarrier(vk,
             native, GetAccessStage(sourceBefore | destinationBefore), PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
-            0, null, 2, before, 0, null);
+            0, null, 2, before, 0, null, BarrierSource.Copy);
         var copy = new BufferCopy(sourceOffset, destinationOffset, size);
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
         {
@@ -326,7 +326,7 @@ public unsafe class GpuBuffer : IDisposable
         after[1] = CreateBarrier(destinationOffset, size, AccessFlags.TransferWriteBit, destinationAfter);
         VulkanSynchronization.PipelineBarrier(vk,
             native, PipelineStageFlags.TransferBit, GetAccessStage(sourceAfter | destinationAfter), DependencyFlags.ByRegionBit,
-            0, null, 2, after, 0, null);
+            0, null, 2, after, 0, null, BarrierSource.Copy);
     }
 
     public sealed class CopyRun
@@ -434,7 +434,7 @@ public unsafe class GpuBuffer : IDisposable
 
                 VulkanSynchronization.PipelineBarrier(vk,
                     native, GetAccessStage(_sourceBefore | _destinationBefore), PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
-                    0, null, (uint)count * 2, barriers, 0, null);
+                    0, null, (uint)count * 2, barriers, 0, null, BarrierSource.CopyRun);
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
                 {
                     for (var first = 0; first < count;)
@@ -463,7 +463,7 @@ public unsafe class GpuBuffer : IDisposable
 
                 VulkanSynchronization.PipelineBarrier(vk,
                     native, PipelineStageFlags.TransferBit, GetAccessStage(_sourceAfter | _destinationAfter), DependencyFlags.ByRegionBit,
-                    0, null, (uint)count * 2, barriers, 0, null);
+                    0, null, (uint)count * 2, barriers, 0, null, BarrierSource.CopyRun);
             }
 
             _runs.Increment();
@@ -499,7 +499,7 @@ public unsafe class GpuBuffer : IDisposable
         var before = CreateBarrier(offset, size, MemoryAccess, AccessFlags.TransferWriteBit);
         VulkanSynchronization.PipelineBarrier(vk,
             native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
-            0, null, 1, &before, 0, null);
+            0, null, 1, &before, 0, null, BarrierSource.Fill);
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
         {
             vk.CmdFillBuffer(native, Handle, offset, size, value);
@@ -507,7 +507,7 @@ public unsafe class GpuBuffer : IDisposable
         var after = CreateBarrier(offset, size, AccessFlags.TransferWriteBit, MemoryAccess);
         VulkanSynchronization.PipelineBarrier(vk,
             native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
-            0, null, 1, &after, 0, null);
+            0, null, 1, &after, 0, null, BarrierSource.Fill);
     }
 
     private int _foreignReads;

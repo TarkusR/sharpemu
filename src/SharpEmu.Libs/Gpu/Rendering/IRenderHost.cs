@@ -172,6 +172,8 @@ public interface IRenderHost
 
     void EndRendering();
 
+    void EndRendering(Vulkan.ScopeBreak reason) => EndRendering();
+
     // The next draw stores to buffers or storage images; called before its BeginRendering.
     void PrepareMemoryWritingDraw() { }
 

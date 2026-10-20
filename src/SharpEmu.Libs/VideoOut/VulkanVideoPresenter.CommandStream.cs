@@ -742,7 +742,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            Recording.EndRendering();
+            Recording.EndRendering(ScopeBreak.GuestFlush);
             if (RecordingHost.BatchBarriers)
             {
                 RequestGuestMemoryBarrier(RecordingHost.GlobalMemoryBarrier);
@@ -770,7 +770,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 0,
                 null,
                 0,
-                null);
+                null, BarrierSource.Global);
         }
 
         public void FillBuffer(ulong address, ulong size, uint value, bool isGds)

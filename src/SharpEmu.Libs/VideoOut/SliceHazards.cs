@@ -55,6 +55,11 @@ internal sealed class SliceHazards
             var repeatedWrite = (state.Access & WriteAccess) != 0;
             if (state.Access != access || repeatedWrite)
             {
+                if (GpuSyncProfile.Enabled)
+                {
+                    BarrierTally.CountAvoidableImageBarrier(in state, access);
+                }
+
                 _barriers.Add(new ImageMemoryBarrier2
                 {
                     SType = StructureType.ImageMemoryBarrier2,

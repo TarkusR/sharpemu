@@ -652,6 +652,8 @@ internal static unsafe partial class VulkanVideoPresenter
             Recording.EndRendering();
             EnsureBatchedGuestCommands();
             RequestGuestMemoryBarrier(RecordingHost.GlobalMemoryBarrier);
+            var uploadsBefore = _bufferCache.UploadsRecorded;
+            var pairsBefore = _bufferCache.UploadBarrierPairs;
             if (requests.NeedsBdaSweep && requests.BdaSpans is { } spans)
             {
                 _bufferCache.PrepareBda(spans, requests.BdaMapping);
@@ -665,6 +667,12 @@ internal static unsafe partial class VulkanVideoPresenter
             foreach (var use in requests.Buffers)
             {
                 _bufferCache.ApplySliceUse(in use);
+            }
+
+            if (GpuSyncProfile.Enabled)
+            {
+                BarrierTally.PrologueUploads.Add(_bufferCache.UploadsRecorded - uploadsBefore);
+                BarrierTally.PrologueUploadPairs.Add(_bufferCache.UploadBarrierPairs - pairsBefore);
             }
 
             foreach (var use in requests.Images)
@@ -777,7 +785,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            EndRendering();
+            EndRendering(ScopeBreak.GuestFlush);
             if (BatchBarriers)
             {
                 RequestGuestMemoryBarrier(GlobalMemoryBarrier);
@@ -1015,10 +1023,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            EndRendering();
+            EndRendering(ScopeBreak.SliceImage);
             fixed (ImageMemoryBarrier2* pointer = CollectionsMarshal.AsSpan(barriers))
             {
-                VulkanSynchronization.PipelineBarrier(_vk, command, source, stage, DependencyFlags.ByRegionBit, 0, null, 0, null, (uint)barriers.Count, pointer);
+                VulkanSynchronization.PipelineBarrier(_vk, command, source, stage, DependencyFlags.ByRegionBit, 0, null, 0, null, (uint)barriers.Count, pointer, BarrierSource.SliceImage);
             }
         }
 

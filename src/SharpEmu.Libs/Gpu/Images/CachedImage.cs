@@ -15,6 +15,13 @@ public readonly record struct ImageAccessState(PipelineStageFlags Stage, AccessF
 {
     public const AccessFlags GuestStorageAccess = AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit;
 
+    public const AccessFlags AttachmentAccess =
+        AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit |
+        AccessFlags.DepthStencilAttachmentReadBit | AccessFlags.DepthStencilAttachmentWriteBit;
+
+    private const AccessFlags WriteAccess = AccessFlags.TransferWriteBit | AccessFlags.ShaderWriteBit | AccessFlags.MemoryWriteBit |
+                                            AccessFlags.HostWriteBit | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit;
+
     public static ImageAccessState Initial => new(PipelineStageFlags.AllCommandsBit, AccessFlags.None, ImageLayout.Undefined);
 
     public static readonly ThreadCounter Barriers = new();
@@ -22,6 +29,14 @@ public readonly record struct ImageAccessState(PipelineStageFlags Stage, AccessF
 
     public bool RepeatsGuestStorageAccess(AccessFlags access, bool guest) =>
         guest && Guest && access == GuestStorageAccess && Access == access && Layout == ImageLayout.General;
+
+    public static bool OnlyReadsOutsideAttachments(AccessFlags access) => (access & (WriteAccess | AttachmentAccess)) == 0;
+
+    public bool ReadsAfterRead(AccessFlags access) =>
+        Layout == ImageLayout.General && OnlyReadsOutsideAttachments(Access) && OnlyReadsOutsideAttachments(access);
+
+    public bool RepeatsAttachmentAccess(AccessFlags access) =>
+        Layout == ImageLayout.General && Access == access && access != 0 && (access & ~AttachmentAccess) == 0;
 }
 
 public struct ImageUses

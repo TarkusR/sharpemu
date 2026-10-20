@@ -21,11 +21,13 @@ internal static unsafe class VulkanSynchronization
         uint bufferMemoryBarrierCount,
         BufferMemoryBarrier2* bufferMemoryBarriers,
         uint imageMemoryBarrierCount,
-        ImageMemoryBarrier2* imageMemoryBarriers)
+        ImageMemoryBarrier2* imageMemoryBarriers,
+        BarrierSource source = BarrierSource.Other)
     {
         if (GpuSyncProfile.Enabled)
         {
             GpuSyncProfile.CountBarrier(sourceStages, destinationStages, memoryBarrierCount, bufferMemoryBarrierCount, imageMemoryBarrierCount);
+            BarrierTally.Count(source, sourceStages, destinationStages);
         }
 
         var sourceStages2 = (PipelineStageFlags2)(ulong)sourceStages;
