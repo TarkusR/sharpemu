@@ -29,7 +29,55 @@ public sealed class GuestPageTracker
     private readonly object _regionGate = new();
     private readonly CpuDirtySummary _cpuDirtySummary = new();
 
+    private readonly object _pendingGpuGate = new();
+    private readonly object _applyGpuGate = new();
+    private List<TrackedRegion> _pendingGpuProtections = [];
+    private List<TrackedRegion> _applyingGpuProtections = [];
+
     public GuestPageTracker(PageGuard pages) => _pages = pages;
+
+    public bool DefersGpuWriteProtection { get; set; }
+
+    internal void QueueGpuProtection(TrackedRegion region)
+    {
+        lock (_pendingGpuGate)
+        {
+            _pendingGpuProtections.Add(region);
+        }
+    }
+
+    public void ApplyPendingGpuProtections()
+    {
+        lock (_applyGpuGate)
+        {
+            List<TrackedRegion> regions;
+            lock (_pendingGpuGate)
+            {
+                if (_pendingGpuProtections.Count == 0)
+                {
+                    return;
+                }
+
+                regions = _pendingGpuProtections;
+                _pendingGpuProtections = _applyingGpuProtections;
+                _applyingGpuProtections = regions;
+            }
+
+            foreach (var region in regions)
+            {
+                if (region.Lock.IsHeldByCurrentThread)
+                {
+                    region.ApplyGpuProtection();
+                    continue;
+                }
+
+                using var _ = region.Lock.Hold();
+                region.ApplyGpuProtection();
+            }
+
+            regions.Clear();
+        }
+    }
 
     public bool HasCpuDirtyPages(ulong vaddr, ulong size)
     {
@@ -214,6 +262,7 @@ public sealed class GuestPageTracker
     public void UntrackMemory(ulong vaddr, ulong size)
     {
         RejectUploadCallbackReentry();
+        ApplyPendingGpuProtections();
         var regions = AcquireRegionLocks(vaddr, size);
         try
         {
@@ -891,7 +940,7 @@ public sealed class GuestPageTracker
                 return existing;
             }
 
-            var created = new TrackedRegion(_pages, index * BlockBytes, _cpuDirtySummary);
+            var created = new TrackedRegion(_pages, index * BlockBytes, _cpuDirtySummary, this);
             Volatile.Write(ref _regions[index], created);
             Interlocked.Or(ref _presentRegions[index / 64], 1L << (int)(index % 64));
             return created;

@@ -61,9 +61,15 @@ internal static unsafe partial class VulkanVideoPresenter
             _scheduler = new SubmissionScheduler(
                 tickDevice,
                 this,
-                PrepareGuestSubmission,
+                PrepareSubmission,
                 CompleteGuestSubmission,
                 _ => WakeRenderThread());
+        }
+
+        private void PrepareSubmission(SubmitBundle bundle)
+        {
+            _bufferCache?.ApplyPendingGpuProtections();
+            PrepareGuestSubmission(bundle);
         }
 
         internal void RecordRequestedMemoryBarrier(nint handle, MemoryBarrierRequest request)
@@ -100,6 +106,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 skipGpuSlots: access == GuestBufferCache.PublicationAccess.OverlaidRead);
             _bufferCache.OverlayGuestPublications = OverlayPendingDumps;
             _bufferCache.StreamOffsetAlignment = Math.Max(_bufferCache.StreamOffsetAlignment, GuestStorageBufferOffsetAlignment);
+            _bufferCache.DefersGpuWriteProtection = true;
             if (_readbackQueueFamilyIndex is { } readbackFamily)
             {
                 _bufferCache.AsyncReadback = new Gpu.Vulkan.VulkanAsyncReadback(_deviceInfo, _scheduler, _readbackQueue, readbackFamily);

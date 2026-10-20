@@ -123,6 +123,14 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     // Arguments: buffer, offset of the guest address in that buffer, guest address, size.
     internal Action<GpuBuffer, ulong, ulong, ulong>? OverlayGuestPublications { get; set; }
 
+    public bool DefersGpuWriteProtection
+    {
+        get => _tracker.DefersGpuWriteProtection;
+        set => _tracker.DefersGpuWriteProtection = value;
+    }
+
+    public void ApplyPendingGpuProtections() => _tracker.ApplyPendingGpuProtections();
+
     public GpuBuffer GdsBuffer => _gds;
 
     public GpuBuffer BdaPageTableBuffer => _bdaPageTable;
@@ -1453,6 +1461,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
 
         _disposed = true;
+        _tracker.ApplyPendingGpuProtections();
         _registry.Dispose();
         _deviceRing.Dispose();
         _download.Dispose();

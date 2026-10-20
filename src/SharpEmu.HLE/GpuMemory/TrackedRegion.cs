@@ -24,6 +24,8 @@ public sealed class TrackedRegion
     private long _uploadBatch = -1;
     private static long _hotUploadsSkipped;
     private readonly CpuDirtySummary? _summary;
+    private readonly GuestPageTracker? _owner;
+    private bool _gpuProtectionQueued;
 
     public static long TakeHotUploadsSkipped() => Interlocked.Exchange(ref _hotUploadsSkipped, 0);
     private int _cpuDirtyVersion;
@@ -32,8 +34,9 @@ public sealed class TrackedRegion
 
     public PageMask CpuDirtyPages(in PageMask pages) => _cpuDirty & pages;
 
-    public TrackedRegion(PageGuard pages, ulong baseAddress, CpuDirtySummary? summary = null)
+    public TrackedRegion(PageGuard pages, ulong baseAddress, CpuDirtySummary? summary = null, GuestPageTracker? owner = null)
     {
+        _owner = owner;
         if (baseAddress % BlockBytes != 0)
         {
             PageGuard.OnFatal("Cannot create the tracking region with these parameters.");
@@ -204,7 +207,7 @@ public sealed class TrackedRegion
         }
         else
         {
-            UpdateGpuProtection(track: enable);
+            UpdateGpuProtection();
         }
     }
 
@@ -359,7 +362,7 @@ public sealed class TrackedRegion
             }
             else
             {
-                UpdateGpuProtection(track: false);
+                UpdateGpuProtection();
             }
         }
 
@@ -403,24 +406,45 @@ public sealed class TrackedRegion
         }
     }
 
-    private void UpdateGpuProtection(bool track)
+    private void UpdateGpuProtection()
     {
-        var readable = ~_gpuDirty;
-        var mask = readable ^ _readable;
-        _readable = readable;
-        if (mask.None)
+        var release = ~_gpuDirty & ~_readable;
+        if (release.Any)
+        {
+            _readable = _readable ^ release;
+            _pages.RemoveWatchMask(BaseAddress, release, blockReads: true);
+        }
+
+        if ((_readable & _gpuDirty).None)
         {
             return;
         }
 
-        if (track)
+        if (_owner is { DefersGpuWriteProtection: true } owner)
         {
-            _pages.AddWatchMask(BaseAddress, mask, blockReads: true);
+            if (!_gpuProtectionQueued)
+            {
+                _gpuProtectionQueued = true;
+                owner.QueueGpuProtection(this);
+            }
+
+            return;
         }
-        else
+
+        ApplyGpuProtection();
+    }
+
+    public void ApplyGpuProtection()
+    {
+        _gpuProtectionQueued = false;
+        var block = _readable & _gpuDirty;
+        if (block.None)
         {
-            _pages.RemoveWatchMask(BaseAddress, mask, blockReads: true);
+            return;
         }
+
+        _readable = _readable ^ block;
+        _pages.AddWatchMask(BaseAddress, block, blockReads: true);
     }
 
     private (int Start, int End) GetPageRange(ulong address, ulong size)

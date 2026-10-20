@@ -1199,6 +1199,41 @@ public sealed class GuestPageTrackerTests : IDisposable
     }
 
     [NativePageProtectionFact]
+    public void DeferredGpuWriteProtectionAppliesAtTheFlushAndReleasesImmediately()
+    {
+        var address = Allocate(3);
+        _tracker.DefersGpuWriteProtection = true;
+        _tracker.ForEachUploadRange(address, Page, true, NoRange, NoUpload);
+        _tracker.ForEachUploadRange(address + Page, Page, true, NoRange, NoUpload);
+        Assert.True(_tracker.HasGpuDirtyPages(address, Page * 2));
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address));
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page));
+
+        _tracker.ForEachDownloadRange(address + Page, Page, clear: true, null, NoRange);
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page));
+        ResetLog();
+        _tracker.ApplyPendingGpuProtections();
+        Assert.Equal(new[] { (address, Page, GuestPageProtection.None) }, _space.Protects);
+        Assert.Equal(HostPageProtection.NoAccess, Protection(address));
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page));
+        ResetLog();
+        _tracker.ApplyPendingGpuProtections();
+        Assert.Empty(_space.Protects);
+
+        _tracker.ClearGpuDirtyPages(address, Page);
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address));
+        _tracker.ForEachUploadRange(address + Page * 2, Page, true, NoRange, NoUpload);
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page * 2));
+        _tracker.ClearGpuDirtyPages(address + Page * 2, Page);
+        _tracker.ForEachUploadRange(address + Page * 2, Page, true, NoRange, NoUpload);
+        _tracker.ClearGpuDirtyPages(address + Page * 2, Page);
+        _tracker.UntrackMemory(address, Page * 3);
+        Assert.True(IsWritable(address));
+        Assert.True(IsWritable(address + Page * 2));
+        Release(address, Page * 3);
+    }
+
+    [NativePageProtectionFact]
     public void UploadOfACleanRangeAllocatesNothingAndStillRunsTheUploadCallback()
     {
         var address = Allocate(2);
