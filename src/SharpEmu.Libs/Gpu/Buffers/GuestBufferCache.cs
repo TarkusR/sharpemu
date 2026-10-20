@@ -1556,7 +1556,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 var gpuWaitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 readback.Wait(pending.Ticket);
                 NoteGuestReadback(pending, completedAtBegin, frameAtBegin, beginStarted - beginPosted, beginEnded - beginStarted,
-                    System.Diagnostics.Stopwatch.GetTimestamp() - gpuWaitStarted);
+                    System.Diagnostics.Stopwatch.GetTimestamp() - gpuWaitStarted, beginStarted);
                 var complete = false;
                 var completePosted = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (!_relay.TryRunOnGpuQueue(() => complete = CompleteReadMemoryOnGpu(pending, consumed: true)))
@@ -2413,12 +2413,39 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     public FrameTickLedger FrameTicks { get; } = new();
 
-    private void NoteGuestReadback(PendingDownload pending, ulong completedAtBegin, long frameAtBegin, long queueTicks, long beginTicks, long gpuWaitTicks)
+    public static readonly ThreadCounter WriterHeldReads = new();
+    public static readonly ThreadCounter WriterHeldTicks = new();
+    public static readonly ThreadCounter WriterSubmittedByRead = new();
+    public static readonly ThreadCounter WriterAgeTicks = new();
+    public static readonly ThreadCounter WriterSinceSubmitTicks = new();
+    public static readonly ThreadCounter WriterTimedReads = new();
+
+    private void NoteGuestReadback(PendingDownload pending, ulong completedAtBegin, long frameAtBegin, long queueTicks, long beginTicks, long gpuWaitTicks, long beginStarted)
     {
         var waitTick = 0UL;
         foreach (var tick in pending.WriteTicks)
         {
             waitTick = Math.Max(waitTick, tick);
+        }
+
+        var reservedAt = _scheduler.ReservedAt(waitTick);
+        var submittedAt = _scheduler.SubmittedAt(waitTick);
+        if (reservedAt != 0 && submittedAt != 0)
+        {
+            var done = System.Diagnostics.Stopwatch.GetTimestamp();
+            WriterTimedReads.Increment();
+            WriterAgeTicks.Add(beginStarted - reservedAt);
+            WriterSinceSubmitTicks.Add(done - Math.Max(submittedAt, beginStarted));
+            if (submittedAt > reservedAt)
+            {
+                WriterHeldReads.Increment();
+                WriterHeldTicks.Add(submittedAt - reservedAt);
+            }
+
+            if (submittedAt >= beginStarted)
+            {
+                WriterSubmittedByRead.Increment();
+            }
         }
 
         GuestReadbacks.Increment();

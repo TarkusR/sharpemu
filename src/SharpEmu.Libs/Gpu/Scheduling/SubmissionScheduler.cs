@@ -60,6 +60,57 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     private readonly List<ulong> _deferredTicks = new();
     private static long _deferredSubmissions;
     private static long _batchedSubmissions;
+    private const int TickLedgerSize = 4096;
+    private readonly ulong[] _ledgerTicks = new ulong[TickLedgerSize];
+    private readonly long[] _reservedAt = new long[TickLedgerSize];
+    private readonly long[] _submittedAt = new long[TickLedgerSize];
+    private static readonly HLE.Diagnostics.ThreadCounter _heldTicks = new();
+    private static readonly HLE.Diagnostics.ThreadCounter _heldTime = new();
+    private static readonly HLE.Diagnostics.ThreadCounter _submitsAtLimit = new();
+    private static readonly HLE.Diagnostics.ThreadCounter _submitsEnsured = new();
+    private static readonly HLE.Diagnostics.ThreadCounter _submitsFolded = new();
+    private static readonly HLE.Diagnostics.ThreadCounter _completions = new();
+    private static readonly HLE.Diagnostics.ThreadCounter _completionAfterSubmit = new();
+
+    public static string TakeTickLedgerReport()
+    {
+        var held = _heldTicks.Take();
+        var completions = _completions.Take();
+        return FormattableString.Invariant($"tick_hold=ticks:{held},avg_us:{Microseconds(_heldTime.Take(), held):F1} submits=limit:{_submitsAtLimit.Take()},ensure:{_submitsEnsured.Take()},fold:{_submitsFolded.Take()} ") +
+            FormattableString.Invariant($"completion_callbacks={completions}/after_submit_us:{Microseconds(_completionAfterSubmit.Take(), completions):F1}");
+    }
+
+    private static double Microseconds(long ticks, long samples) =>
+        samples == 0 ? 0 : ticks * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency / samples;
+
+    public long ReservedAt(ulong tick) => Volatile.Read(ref _ledgerTicks[tick % TickLedgerSize]) == tick ? Volatile.Read(ref _reservedAt[tick % TickLedgerSize]) : 0;
+
+    public long SubmittedAt(ulong tick) => Volatile.Read(ref _ledgerTicks[tick % TickLedgerSize]) == tick ? Volatile.Read(ref _submittedAt[tick % TickLedgerSize]) : 0;
+
+    private void NoteReserved(ulong tick, long now, bool submitted)
+    {
+        var slot = tick % TickLedgerSize;
+        Volatile.Write(ref _ledgerTicks[slot], 0);
+        Volatile.Write(ref _reservedAt[slot], now);
+        Volatile.Write(ref _submittedAt[slot], submitted ? now : 0);
+        Volatile.Write(ref _ledgerTicks[slot], tick);
+    }
+
+    private void NoteDeferredSubmitted(long now)
+    {
+        foreach (var tick in _deferredTicks)
+        {
+            var slot = tick % TickLedgerSize;
+            if (Volatile.Read(ref _ledgerTicks[slot]) != tick)
+            {
+                continue;
+            }
+
+            Volatile.Write(ref _submittedAt[slot], now);
+            _heldTicks.Increment();
+            _heldTime.Add(now - Volatile.Read(ref _reservedAt[slot]));
+        }
+    }
 
     public static string TakeDeferredReport() =>
         FormattableString.Invariant($"deferred_submits={Interlocked.Exchange(ref _deferredSubmissions, 0)} batched_submits={Interlocked.Exchange(ref _batchedSubmissions, 0)}");
@@ -311,6 +362,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
 
         _deferredTicks.Add(tick);
+        NoteReserved(tick, System.Diagnostics.Stopwatch.GetTimestamp(), submitted: false);
         _command.Submitted(tick);
         foreach (var recording in trailing)
         {
@@ -321,6 +373,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         Interlocked.Increment(ref _deferredSubmissions);
         if (_deferredTicks.Count >= MaxDeferredSubmissions)
         {
+            _submitsAtLimit.Increment();
             SubmitDeferred();
         }
 
@@ -351,6 +404,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
             if (submitted)
             {
+                NoteDeferredSubmitted(System.Diagnostics.Stopwatch.GetTimestamp());
                 EnqueueDeferredCompletions();
             }
         }
@@ -383,6 +437,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     {
         if (_deferredTicks.Count != 0 && tick >= _deferredTicks[0])
         {
+            _submitsEnsured.Increment();
             SubmitDeferred();
         }
     }
@@ -742,6 +797,14 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
             if (submitted)
             {
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                NoteReserved(tick, now, submitted: true);
+                if (deferred != 0)
+                {
+                    _submitsFolded.Increment();
+                    NoteDeferredSubmitted(now);
+                }
+
                 EnqueueDeferredCompletions();
             }
 
@@ -819,6 +882,12 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             }
 
             _timeline.Wait(operation.Tick);
+            if (SubmittedAt(operation.Tick) is var submittedAt and not 0)
+            {
+                _completions.Increment();
+                _completionAfterSubmit.Add(System.Diagnostics.Stopwatch.GetTimestamp() - submittedAt);
+            }
+
             if (!Volatile.Read(ref _stopRequested))
             {
                 RunDeferredCallback(operation.Callback);

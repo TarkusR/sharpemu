@@ -197,7 +197,16 @@ internal static class BufferUploadProfile
         var lead = _guestFrameLead;
         return FormattableString.Invariant($"guest_reads={reads} read_us=queue:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackQueueTicks, reads):F1},begin:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackBeginTicks, reads):F1},gpu_wait:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackGpuWaitTicks, reads):F1} ") +
             FormattableString.Invariant($"read_behind={behind}/ticks:{(behind == 0 ? 0 : (double)ticksBehind / behind):F1} read_frame_age=0:{age[0].Take()},1:{age[1].Take()},2:{age[2].Take()},3+:{age[3].Take()} ") +
-            FormattableString.Invariant($"guest_lead=0:{lead[0].Take()},1:{lead[1].Take()},2:{lead[2].Take()},3:{lead[3].Take()},4+:{lead[4].Take()}");
+            FormattableString.Invariant($"guest_lead=0:{lead[0].Take()},1:{lead[1].Take()},2:{lead[2].Take()},3:{lead[3].Take()},4+:{lead[4].Take()} ") +
+            TakeReadWriterReport() + " " + Gpu.Scheduling.SubmissionScheduler.TakeTickLedgerReport();
+    }
+
+    private static string TakeReadWriterReport()
+    {
+        var timed = Gpu.Buffers.GuestBufferCache.WriterTimedReads.Take();
+        var held = Gpu.Buffers.GuestBufferCache.WriterHeldReads.Take();
+        return FormattableString.Invariant($"read_writer=timed:{timed},writer_age_us:{PerSample(Gpu.Buffers.GuestBufferCache.WriterAgeTicks, timed):F1},since_submit_us:{PerSample(Gpu.Buffers.GuestBufferCache.WriterSinceSubmitTicks, timed):F1},") +
+            FormattableString.Invariant($"held:{held}/us:{PerSample(Gpu.Buffers.GuestBufferCache.WriterHeldTicks, held):F1},submitted_by_read:{Gpu.Buffers.GuestBufferCache.WriterSubmittedByRead.Take()}");
     }
 
     private static double PerSample(SharpEmu.HLE.Diagnostics.ThreadCounter ticks, long samples)
