@@ -120,15 +120,6 @@ public static class VertexInputResolver
         ((channels > 2 ? 6u : 0u) << 6) |
         ((channels > 3 ? 7u : 1u) << 9);
 
-    private sealed class ResolvedBuffer
-    {
-        public ulong Address;
-        public uint Stride;
-        public uint RecordCount;
-        public uint FetchIndex;
-        public List<int> AttributeIndices { get; } = [];
-    }
-
     // Reads the direct resource registers and the input semantics; false with the reason when invalid.
     public static bool TryReadTables(CpuContext context, RegisteredShader shader, uint maxUserScalarRegisters, out VertexTableMetadata metadata, out string error)
     {
@@ -405,39 +396,47 @@ public static class VertexInputResolver
     // Attributes with one stride and fetch rate whose bases lie within one record share a buffer.
     public static VertexInputBuffer[] MergeBuffers(List<VertexAttributeResource> resources, ulong shaderAddress)
     {
-        var buffers = new List<ResolvedBuffer>();
+        const int StackResources = 64;
+        Span<int> bufferOf = resources.Count <= StackResources ? stackalloc int[StackResources] : new int[resources.Count];
+        Span<ulong> addresses = stackalloc ulong[VertexInputInfo.MaxBuffers];
+        Span<uint> strides = stackalloc uint[VertexInputInfo.MaxBuffers];
+        Span<uint> recordCounts = stackalloc uint[VertexInputInfo.MaxBuffers];
+        Span<uint> fetchIndices = stackalloc uint[VertexInputInfo.MaxBuffers];
+        Span<int> attributeCounts = stackalloc int[VertexInputInfo.MaxBuffers];
+        var bufferCount = 0;
         for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
         {
             var resource = resources[resourceIndex];
             var descriptor = resource.Descriptor;
             var merged = false;
-            foreach (var buffer in buffers)
+            for (var bufferIndex = 0; bufferIndex < bufferCount; bufferIndex++)
             {
-                ulong stride = buffer.Stride;
-                if (stride != descriptor.Stride || buffer.FetchIndex != resource.FetchIndex)
+                ulong stride = strides[bufferIndex];
+                if (stride != descriptor.Stride || fetchIndices[bufferIndex] != resource.FetchIndex)
                 {
                     continue;
                 }
 
                 var resourceBase = descriptor.Address;
-                var lowest = Math.Min(resourceBase, buffer.Address);
+                var lowest = Math.Min(resourceBase, addresses[bufferIndex]);
                 var offset1 = resourceBase - lowest;
-                var offset2 = buffer.Address - lowest;
+                var offset2 = addresses[bufferIndex] - lowest;
                 if (offset1 < stride && offset2 < stride)
                 {
-                    if (buffer.RecordCount != descriptor.RecordCount)
+                    if (recordCounts[bufferIndex] != descriptor.RecordCount)
                     {
                         throw SubmissionScheduler.Fatal(
-                            $"Two attributes of one vertex buffer disagree on the record count: shader=0x{shaderAddress:X16} records={buffer.RecordCount}/{descriptor.RecordCount}.");
+                            $"Two attributes of one vertex buffer disagree on the record count: shader=0x{shaderAddress:X16} records={recordCounts[bufferIndex]}/{descriptor.RecordCount}.");
                     }
 
-                    buffer.Address = lowest;
-                    if (buffer.AttributeIndices.Count >= VertexInputInfo.MaxBuffers)
+                    addresses[bufferIndex] = lowest;
+                    if (attributeCounts[bufferIndex] >= VertexInputInfo.MaxBuffers)
                     {
                         throw SubmissionScheduler.Fatal($"A vertex buffer has too many attributes: shader=0x{shaderAddress:X16}.");
                     }
 
-                    buffer.AttributeIndices.Add(resourceIndex);
+                    attributeCounts[bufferIndex]++;
+                    bufferOf[resourceIndex] = bufferIndex;
                     merged = true;
                     break;
                 }
@@ -448,36 +447,34 @@ public static class VertexInputResolver
                 continue;
             }
 
-            if (buffers.Count >= VertexInputInfo.MaxBuffers)
+            if (bufferCount >= VertexInputInfo.MaxBuffers)
             {
                 throw SubmissionScheduler.Fatal($"The vertex program has too many buffers: shader=0x{shaderAddress:X16}.");
             }
 
-            var created = new ResolvedBuffer
-            {
-                Address = descriptor.Address,
-                Stride = descriptor.Stride,
-                RecordCount = descriptor.RecordCount,
-                FetchIndex = resource.FetchIndex,
-            };
-            created.AttributeIndices.Add(resourceIndex);
-            buffers.Add(created);
+            addresses[bufferCount] = descriptor.Address;
+            strides[bufferCount] = descriptor.Stride;
+            recordCounts[bufferCount] = descriptor.RecordCount;
+            fetchIndices[bufferCount] = resource.FetchIndex;
+            attributeCounts[bufferCount] = 1;
+            bufferOf[resourceIndex] = bufferCount++;
         }
 
-        var result = new VertexInputBuffer[buffers.Count];
-        for (var bufferIndex = 0; bufferIndex < buffers.Count; bufferIndex++)
+        var result = new VertexInputBuffer[bufferCount];
+        for (var bufferIndex = 0; bufferIndex < bufferCount; bufferIndex++)
         {
-            var buffer = buffers[bufferIndex];
-            result[bufferIndex] = new VertexInputBuffer(buffer.Address, buffer.Stride, buffer.RecordCount, buffer.FetchIndex != 0);
-            foreach (var resourceIndex in buffer.AttributeIndices)
+            result[bufferIndex] = new VertexInputBuffer(addresses[bufferIndex], strides[bufferIndex], recordCounts[bufferIndex], fetchIndices[bufferIndex] != 0);
+        }
+
+        for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
+        {
+            var resource = resources[resourceIndex];
+            var bufferIndex = bufferOf[resourceIndex];
+            resources[resourceIndex] = resource with
             {
-                var resource = resources[resourceIndex];
-                resources[resourceIndex] = resource with
-                {
-                    BufferIndex = bufferIndex,
-                    OffsetBytes = (uint)(resource.Descriptor.Address - buffer.Address),
-                };
-            }
+                BufferIndex = bufferIndex,
+                OffsetBytes = (uint)(resource.Descriptor.Address - addresses[bufferIndex]),
+            };
         }
 
         return result;

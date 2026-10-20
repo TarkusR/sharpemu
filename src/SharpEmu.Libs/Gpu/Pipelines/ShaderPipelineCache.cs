@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -127,7 +128,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     private const int IdentityRecheckPeriod = 64;
-    private static long _identityMemoHits;
+    private static readonly ThreadCounter _identityMemoHits = new();
 
     internal ulong IdentityOf(ShaderHeaderEntry header, ulong codeAddress, string label)
     {
@@ -135,7 +136,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (uses > 0 && uses % IdentityRecheckPeriod != 0)
         {
             header.IdentityUses = uses + 1;
-            Interlocked.Increment(ref _identityMemoHits);
+            _identityMemoHits.Increment();
             return header.IdentityHash;
         }
 
@@ -146,7 +147,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     public static string TakeFastPathReport() =>
-        FormattableString.Invariant($"[PERF][FAST_PATHS] zero_group_skips={Interlocked.Exchange(ref Rendering.RenderExecutor.ZeroGroupSkips, 0)} shader_hash_memo={Interlocked.Exchange(ref _identityMemoHits, 0)} ") +
+        FormattableString.Invariant($"[PERF][FAST_PATHS] zero_group_skips={Interlocked.Exchange(ref Rendering.RenderExecutor.ZeroGroupSkips, 0)} shader_hash_memo={_identityMemoHits.Take()} ") +
         FormattableString.Invariant($"stream_cleaned={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamCleaned, 0)} stream_uses={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamUses, 0)}");
 
     private uint[]? InputSemantics(ShaderHeaderEntry header)
@@ -232,11 +233,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     [ThreadStatic]
     private static Dictionary<(ulong Vertex, ulong Pixel), GraphicsPair>? _pairs;
     private const int MaxPairs = 4096;
-    private static long _pairEntryHits;
-    private static long _pairEntryMisses;
+    private static readonly ThreadCounter _pairEntryHits = new();
+    private static readonly ThreadCounter _pairEntryMisses = new();
 
     public static string TakePairReport() => FormattableString.Invariant(
-        $"pair_entry_hits={Interlocked.Exchange(ref _pairEntryHits, 0)} pair_entry_misses={Interlocked.Exchange(ref _pairEntryMisses, 0)}");
+        $"pair_entry_hits={_pairEntryHits.Take()} pair_entry_misses={_pairEntryMisses.Take()}");
 
     private static GraphicsPair PairOf(ulong vertex, ulong pixel)
     {
@@ -259,15 +260,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private static Dictionary<ulong, List<KeptComputeProgram>>? _keptComputes;
     private const int KeptComputesPerShader = 4;
 
-    private static long _graphicsKept;
-    private static long _graphicsResolved;
-    private static long _computeKept;
-    private static long _computeRebound;
-    private static long _computeResolved;
+    private static readonly ThreadCounter _graphicsKept = new();
+    private static readonly ThreadCounter _graphicsResolved = new();
+    private static readonly ThreadCounter _computeKept = new();
+    private static readonly ThreadCounter _computeRebound = new();
+    private static readonly ThreadCounter _computeResolved = new();
 
     public static string TakeKeptProgramsReport() =>
-        FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={Interlocked.Exchange(ref _graphicsKept, 0)} graphics_resolved={Interlocked.Exchange(ref _graphicsResolved, 0)} ") +
-        FormattableString.Invariant($"compute_kept={Interlocked.Exchange(ref _computeKept, 0)} compute_rebound={Interlocked.Exchange(ref _computeRebound, 0)} compute_resolved={Interlocked.Exchange(ref _computeResolved, 0)}");
+        FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
+        FormattableString.Invariant($"compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()}");
 
 
     private bool TryKeepGraphicsPrograms(RegisterBanks banks, KeptGraphicsPrograms kept, ulong programsStamp, ulong vertexUserDataStamp, ulong pixelUserDataStamp, ulong interfaceStamp,
@@ -344,7 +345,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var keptGraphics = _keptGraphics ??= new KeptGraphicsPrograms();
         if (TryKeepGraphicsPrograms(banks, keptGraphics, programsStamp, vertexUserDataStamp, pixelUserDataStamp, interfaceStamp, targetExportMapping, pixelActive, depthBound, startInstanceUserData, out var keptPrograms))
         {
-            Interlocked.Increment(ref _graphicsKept);
+            _graphicsKept.Increment();
             return keptPrograms;
         }
 
@@ -370,7 +371,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var pixel = banks.Shader.Pixel;
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
-        Interlocked.Increment(ref _graphicsResolved);
+        _graphicsResolved.Increment();
         if (keptGraphics is not null)
         {
             keptGraphics.Programs = null;
@@ -466,13 +467,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
         }
 
-        var programs = new GraphicsPrograms
+        var programs = new GraphicsPrograms(vertexInfo, pixelInfo ?? new PixelInputInfo())
         {
             Vertex = vertexProgram,
             Pixel = pixelProgramHandle,
-            VertexInput = vertexInfo,
             MeshInput = mesh,
-            PixelInput = pixelInfo ?? new PixelInputInfo(),
             SolidClear = solidClear,
             DisableBlending = disableBlending,
             DropUnwrittenColorTargets = dropUnwritten,
@@ -533,7 +532,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             kept.UserDataCount == source.UserData.Length && kept.RequiredOutputs == requiredOutputs && kept.StartInstance == startInstance &&
             kept.IeeeMode == ieeeMode && kept.Registrations == ShaderHeaderRegistry.Registrations)
         {
-            Interlocked.Increment(ref _pairEntryHits);
+            _pairEntryHits.Increment();
             if (_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
             {
                 return true;
@@ -543,7 +542,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return false;
         }
 
-        Interlocked.Increment(ref _pairEntryMisses);
+        _pairEntryMisses.Increment();
         if (!TryPrepareProgram(source, options, ref pushDataCursor, out program, out stage))
         {
             kept.Entry = null;
@@ -608,8 +607,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         dropUnwritten = depthBound ||
             LeavesSingleDualSourceTarget(context, targetExportMapping, pixelProgram.PixelColorExportMasks) ||
             UnwrittenTargetBoundsRenderArea(context, targetExportMapping, pixelProgram.PixelColorExportMasks);
-        outputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null,
-            out var outputModes, out var outputMappings);
+        Span<byte> outputModes = stackalloc byte[PixelInputInfo.TargetCount];
+        Span<ColorComponentMap> outputMappings = stackalloc ColorComponentMap[PixelInputInfo.TargetCount];
+        outputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null, outputModes, outputMappings);
         var info = PixelStageInputResolver.Resolve(_context, source.Registered, shaderInterface, outputModes, outputMappings, inputCount,
             InputSemantics(header));
         // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
@@ -723,11 +723,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // attachments alike (RenderExecutor.DropUnwrittenColorTargets): unwrittenExportMasks is the
     // pixel program's export mask then, null otherwise.
     private Gen5PixelOutputBinding[] ResolveBoundTargets(ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        uint? unwrittenExportMasks, out byte[] outputModes, out ColorComponentMap[] outputMappings)
+        uint? unwrittenExportMasks, Span<byte> outputModes, Span<ColorComponentMap> outputMappings)
     {
-        outputModes = new byte[PixelInputInfo.TargetCount];
-        outputMappings = new ColorComponentMap[PixelInputInfo.TargetCount];
-        var outputs = new List<Gen5PixelOutputBinding>(ContextRegisters.ColorTargetCount);
+        Span<Gen5PixelOutputBinding> outputs = stackalloc Gen5PixelOutputBinding[ContextRegisters.ColorTargetCount];
+        var outputCount = 0;
         var location = 0u;
         for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
         {
@@ -756,20 +755,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // A bound slot that no export reaches keeps its contents: its color write mask is zero.
             var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
             // The high nibble keys the compiled program by the export that feeds the slot.
-            outputModes[slot] = (byte)(((uint)kind + 1) | (uint)((exportTarget + 1) << 4));
-            outputMappings[slot] = new ColorComponentMap(mapping.Packed);
+            outputModes[(int)slot] = (byte)(((uint)kind + 1) | (uint)((exportTarget + 1) << 4));
+            outputMappings[(int)slot] = new ColorComponentMap(mapping.Packed);
             // No EXP target reaches 8 and above, so an unfed slot is declared but never written.
-            outputs.Add(new Gen5PixelOutputBinding(slot, location++, kind, mapping)
+            outputs[outputCount++] = new Gen5PixelOutputBinding(slot, location++, kind, mapping)
             {
                 ExportTarget = exportTarget >= 0 ? (uint)exportTarget : ContextRegisters.ColorTargetCount + slot,
                 ExportFormat = ExportFormatOf(context.ShaderInterface, exportTarget),
-            });
+            };
         }
 
         if (context.BlendControls[0].UsesSecondarySource && (context.ColorTargets[0].Info & (1u << 16)) == 0 &&
-            outputs.Any(output => output.GuestSlot == 0))
+            outputCount != 0 && outputs[0].GuestSlot == 0)
         {
-            if (outputs.Count != 1 || outputs[0].Kind != Gen5PixelOutputKind.Float)
+            if (outputCount != 1 || outputs[0].Kind != Gen5PixelOutputKind.Float)
             {
                 throw SubmissionScheduler.Fatal("Dual-source blending requires one floating-point color output.");
             }
@@ -780,22 +779,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             // EXP1 supplies the second source for target zero, not a second attachment.
             outputs[0] = outputs[0] with { ExportTarget = 0, ExportFormat = ExportFormatOf(context.ShaderInterface, 0) };
-            outputs.Add(outputs[0] with { GuestSlot = 1, ExportTarget = 1, Index = 1, ExportFormat = ExportFormatOf(context.ShaderInterface, 1) });
+            outputs[outputCount++] = outputs[0] with { GuestSlot = 1, ExportTarget = 1, Index = 1, ExportFormat = ExportFormatOf(context.ShaderInterface, 1) };
             outputModes[0] = (byte)(((uint)outputs[0].Kind + 1) | 0x10u);
             outputModes[1] = DualSourceOutputMode;
         }
 
         // Dual-source blending is limited to a single attachment.
-        if (outputs.Count == 1 &&
+        if (outputCount == 1 &&
             _host.SupportsDualSourceBlend &&
             outputs[0].Kind == Gen5PixelOutputKind.Float &&
-            NeedsDualSourceAlpha(context, outputs[0].GuestSlot, outputMappings[outputs[0].GuestSlot]))
+            NeedsDualSourceAlpha(context, outputs[0].GuestSlot, outputMappings[(int)outputs[0].GuestSlot]))
         {
             outputs[0] = outputs[0] with { DualSourceAlpha = true };
-            outputModes[outputs[0].GuestSlot] |= DualSourceAlphaOutputMode;
+            outputModes[(int)outputs[0].GuestSlot] |= DualSourceAlphaOutputMode;
         }
 
-        return outputs.ToArray();
+        return outputs[..outputCount].ToArray();
     }
 
     private const byte DualSourceOutputMode = 0xFF;
@@ -1014,20 +1013,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             if (kept.Program is { } previous && kept.DimensionX == dimensionX && kept.DimensionY == dimensionY && kept.DimensionZ == dimensionZ &&
                 SameUserScalars(kept.Registers.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
             {
-                Interlocked.Increment(ref _computeKept);
+                _computeKept.Increment();
                 return previous;
             }
 
             if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
             {
-                Interlocked.Increment(ref _computeRebound);
+                _computeRebound.Increment();
                 var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
                 KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
                 return rebound;
             }
         }
 
-        Interlocked.Increment(ref _computeResolved);
+        _computeResolved.Increment();
         var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var copyKernel);
         if (kept is null)
         {

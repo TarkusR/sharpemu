@@ -126,4 +126,68 @@ public sealed class ResolvedCommandReplayTests : IDisposable
         Assert.Null(record.State.Programs);
         Assert.Equal(0u, record.State.Rendering.ColorAttachmentCount);
     }
+
+    private sealed class FixedPrograms(GraphicsPrograms graphics) : IShaderPipelineProvider
+    {
+        public GraphicsPrograms GetGraphicsPrograms(RegisterBanks banks, ReadOnlySpan<SharpEmu.Libs.Gpu.Images.ColorComponentMap> targetExportMapping, bool pixelActive,
+            bool depthBound) => graphics;
+
+        public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput,
+            PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, Silk.NET.Vulkan.PrimitiveTopology topology, bool primitiveRestartEnabled,
+            bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram) => throw new InvalidOperationException();
+
+        public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX,
+            uint dimensionY, uint dimensionZ) => throw new InvalidOperationException();
+
+        public PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program) => throw new InvalidOperationException();
+    }
+
+    private sealed class ReturningSink(RecordPool pool) : IResolvedCommandSink
+    {
+        private long _sequence;
+
+        public long NextSequence() => ++_sequence;
+
+        public void Record(ResolvedDraw record) => pool.Return(record);
+
+        public void Record(ResolvedDispatch record) => pool.Return(record);
+    }
+
+    [Fact]
+    public void ADrawBetweenDepthControlWritesAllocatesOnlyTheContextCopyOfTheWrite()
+    {
+        var (host, pipelines) = Arrange();
+        var pool = new RecordPool();
+        var executor = new RenderExecutor(host, new FixedPrograms(pipelines.Graphics), new ReturningSink(pool), pool: pool);
+        var banks = Banks(withDepth: true);
+        var arguments = Indexed(6);
+        var depthControl = new uint[1];
+        var packet = new SharpEmu.Libs.Gpu.GpuCommands.PacketContext(
+            SharpEmu.Libs.Gpu.GpuCommands.PacketHeader.Make(3, SharpEmu.Libs.Gpu.GpuCommands.PacketOpcode.SetContextRegister), 0x1_0000_1000, 0, 100, 100);
+        void Draw(int index)
+        {
+            depthControl[0] = 0x70u | (uint)(index & 1);
+            RegisterWriteTable.WriteContextPacket(banks, in packet, ContextRegisterOffset.DbDepthControl, depthControl);
+            executor.DrawIndexed(7, banks, in arguments);
+        }
+
+        var allocated = AllocationMeasurement.SteadyState(
+            () =>
+            {
+                for (var index = 0; index < 8; index++)
+                {
+                    Draw(index);
+                }
+            },
+            () =>
+            {
+                for (var index = 0; index < 64; index++)
+                {
+                    Draw(index);
+                }
+            });
+
+        var contextCopy = AllocationMeasurement.SteadyState(null, () => banks.Context.ShallowCopy());
+        Assert.Equal(64 * contextCopy, allocated);
+    }
 }

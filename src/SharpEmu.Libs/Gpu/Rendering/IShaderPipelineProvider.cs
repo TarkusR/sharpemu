@@ -23,11 +23,22 @@ public readonly record struct VertexPositionStream(ulong Address, uint Stride, u
 
 public sealed class GraphicsPrograms
 {
+    public GraphicsPrograms()
+        : this(new VertexInputInfo(), new PixelInputInfo())
+    {
+    }
+
+    public GraphicsPrograms(VertexInputInfo vertexInput, PixelInputInfo pixelInput)
+    {
+        VertexInput = vertexInput;
+        PixelInput = pixelInput;
+    }
+
     public ShaderProgram Vertex { get; init; }
     public ShaderProgram Pixel { get; init; }
-    public VertexInputInfo VertexInput { get; init; } = new();
+    public VertexInputInfo VertexInput { get; init; }
     public MeshDrawConfiguration? MeshInput { get; init; }
-    public PixelInputInfo PixelInput { get; init; } = new();
+    public PixelInputInfo PixelInput { get; init; }
 
     // False when the provider could not build the programs; the executor skips the draw.
     public bool Available { get; init; } = true;

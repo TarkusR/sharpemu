@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
@@ -27,11 +28,11 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private readonly KeptPipeline _pipeline = new();
     private readonly InPlaceDraw _inPlace = new();
     private long _sequence;
-    private static long _inPlaceDraws;
-    private static long _inPlaceRefused;
+    private static readonly ThreadCounter _inPlaceDraws = new();
+    private static readonly ThreadCounter _inPlaceRefused = new();
 
     public static string TakeInPlaceReport() => FormattableString.Invariant(
-        $"in_place={Interlocked.Exchange(ref _inPlaceDraws, 0)} in_place_refused={Interlocked.Exchange(ref _inPlaceRefused, 0)}");
+        $"in_place={_inPlaceDraws.Take()} in_place_refused={_inPlaceRefused.Take()}");
 
     private sealed class InPlaceDraw
     {
@@ -492,13 +493,13 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
         if (inPlace && TryRestoreAttachments(ref state))
         {
-            Interlocked.Increment(ref _inPlaceDraws);
+            _inPlaceDraws.Increment();
         }
         else
         {
             if (inPlace)
             {
-                Interlocked.Increment(ref _inPlaceRefused);
+                _inPlaceRefused.Increment();
             }
 
             state.Rendering = AcquireAttachments(ref state);
