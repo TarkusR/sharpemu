@@ -1036,7 +1036,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
         _executor.DrawIndexed(1, banks, Indexed(3));
         Assert.Equal(_host.DynamicStates[0], _host.DynamicStates[1]);
 
-        banks.Context.ScreenViewport.Viewports[0] = banks.Context.ScreenViewport.Viewports[0] with { XScale = 16, XOffset = 16 };
+        banks.Context.ScreenViewport.Primary = banks.Context.ScreenViewport.Primary with { XScale = 16, XOffset = 16 };
         banks.MarkWritten(1u << (int)RegisterStamp.ContextDynamic);
         _executor.DrawIndexed(1, banks, Indexed(3));
 

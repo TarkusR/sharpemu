@@ -294,7 +294,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         context.ColorTargets[0] = target;
         context.RenderTargetMask = 0xF;
         context.ShaderInterface.ColorShaderMask = 0xF;
-        context.ScreenViewport.Viewports[0] = new ViewportRegisters
+        context.ScreenViewport.Primary = new ViewportRegisters
         {
             XScale = Size / 2f,
             XOffset = Size / 2f,

@@ -63,7 +63,7 @@ public sealed class MetalRenderHostTests : IDisposable
         context.ColorTargets[0] = RegisterWords.Color(ColorBase, Size, Size);
         context.RenderTargetMask = 0xF;
         context.ShaderInterface.ColorShaderMask = 0xF;
-        context.ScreenViewport.Viewports[0] = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = 32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
+        context.ScreenViewport.Primary = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = 32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
         _banks.Shader.Vertex.ExportAddress = 0x1000;
         _banks.Shader.Pixel.Address = 0x2000;
         _banks.Shader.Compute.Address = 0x3000;

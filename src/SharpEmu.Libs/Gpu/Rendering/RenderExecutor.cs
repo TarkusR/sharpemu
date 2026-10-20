@@ -897,7 +897,7 @@ public sealed partial class RenderExecutor
         var colorWidth = state.ColorCount != 0 ? state.Colors[0].Resolution.Extent.Width : 0;
         var colorHeight = state.ColorCount != 0 ? state.Colors[0].Resolution.Extent.Height : 0;
         var depth = state.Depth.HasTarget ? state.Depth.Target : default;
-        ref readonly var viewport = ref banks.Context.ScreenViewport.Viewports[0];
+        ref readonly var viewport = ref banks.Context.ScreenViewport.Primary;
         var clip = banks.Context.Clip;
         RenderTrace.Write(
             $"DrawState seq={RenderTrace.NextSequence()} submit={submitId} name={draw.Name} export=0x{shader.Vertex.ExportAddress:X16} " +

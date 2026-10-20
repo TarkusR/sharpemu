@@ -545,7 +545,7 @@ internal static partial class RegisterWriters
 
         if (offset >= PaScClipRect0Tl && offset < PaScClipRect0Tl + ClipRectangleRegisterCount)
         {
-            var rectangle = (offset - PaScClipRect0Tl) / 2;
+            var rectangle = (int)((offset - PaScClipRect0Tl) / 2);
             if (((offset - PaScClipRect0Tl) & 1) == 0)
             {
                 viewport.ClipRectangleLeft[rectangle] = RegisterField.Coordinate15(value);
@@ -679,7 +679,7 @@ internal static partial class RegisterWriters
 
     private static void ViewportScissorTopLeftEntry(RegisterBanks banks, uint offset, uint value)
     {
-        ref var viewport = ref banks.ViewportsForWrite[(offset - PaScViewportScissor0Tl) / 2];
+        ref var viewport = ref banks.ViewportForWrite((int)((offset - PaScViewportScissor0Tl) / 2));
         viewport.ScissorLeft = RegisterField.Coordinate15(value);
         viewport.ScissorTop = RegisterField.Coordinate15(value >> 16);
         viewport.ScissorWindowOffsetEnable = !RegisterField.Bit(value, 31);
@@ -687,21 +687,21 @@ internal static partial class RegisterWriters
 
     private static void ViewportScissorBottomRightEntry(RegisterBanks banks, uint offset, uint value)
     {
-        ref var viewport = ref banks.ViewportsForWrite[(offset - PaScViewportScissor0Br) / 2];
+        ref var viewport = ref banks.ViewportForWrite((int)((offset - PaScViewportScissor0Br) / 2));
         viewport.ScissorRight = RegisterField.Coordinate15(value);
         viewport.ScissorBottom = RegisterField.Coordinate15(value >> 16);
     }
 
     private static void ViewportZMinEntry(RegisterBanks banks, uint offset, uint value) =>
-        banks.ViewportsForWrite[(offset - PaScViewportZMin0) / 2].MinDepth = RegisterField.AsFloat(value);
+        banks.ViewportForWrite((int)((offset - PaScViewportZMin0) / 2)).MinDepth = RegisterField.AsFloat(value);
 
     private static void ViewportZMaxEntry(RegisterBanks banks, uint offset, uint value) =>
-        banks.ViewportsForWrite[(offset - PaScViewportZMax0) / 2].MaxDepth = RegisterField.AsFloat(value);
+        banks.ViewportForWrite((int)((offset - PaScViewportZMax0) / 2)).MaxDepth = RegisterField.AsFloat(value);
 
     private static void ViewportScaleOffsetEntry(RegisterBanks banks, uint offset, uint value)
     {
         var relative = offset - PaClViewportXScale;
-        ref var viewport = ref banks.ViewportsForWrite[relative / ViewportFieldCount];
+        ref var viewport = ref banks.ViewportForWrite((int)(relative / ViewportFieldCount));
         var number = RegisterField.AsFloat(value);
         switch (relative % ViewportFieldCount)
         {

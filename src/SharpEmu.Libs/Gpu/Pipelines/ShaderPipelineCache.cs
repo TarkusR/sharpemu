@@ -66,7 +66,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             throw SubmissionScheduler.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.");
         }
 
-        return registers.Values.AsSpan(0, (int)count);
+        return registers.ValueSpan((int)count);
     }
 
     private static uint[] KeptUserData(KeptUserData kept, ulong userDataStamp, ulong programsStamp, UserScalarRegisters registers, uint declaredCount,
@@ -493,7 +493,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private ClipSpaceTransform ResolveClipSpace(ContextRegisters context)
     {
         if (!context.Clip.ClipDisable) return default;
-        ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
+        ref readonly var viewport = ref context.ScreenViewport.Primary;
         var limits = _host.Limits;
         return new ClipSpaceTransform(true, viewport.XScale, viewport.YScale,
             viewport.XOffset, viewport.YOffset,
@@ -1020,9 +1020,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         kept.Program = program.Available && !program.Consumed && program.KnownWrite is null ? program : null;
         if (kept.Registers is { } registers && SameComputeShape(registers, compute))
         {
-            var count = compute.UserScalarCount;
-            compute.UserScalars.Values.AsSpan(0, count).CopyTo(registers.UserScalars.Values);
-            compute.UserScalars.Kinds.AsSpan(0, count).CopyTo(registers.UserScalars.Kinds);
+            registers.UserScalars.CopyFrom(compute.UserScalars, compute.UserScalarCount);
         }
         else
         {
@@ -1053,8 +1051,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     private static bool SameUserScalars(UserScalarRegisters kept, UserScalarRegisters current, int count) =>
-        kept.Values.AsSpan(0, count).SequenceEqual(current.Values.AsSpan(0, count)) &&
-        kept.Kinds.AsSpan(0, count).SequenceEqual(current.Kinds.AsSpan(0, count));
+        kept.ValueSpan(count).SequenceEqual(current.ValueSpan(count)) &&
+        kept.KindSpan(count).SequenceEqual(current.KindSpan(count));
 
     private static bool SameComputeShape(ComputeStageRegisters? kept, ComputeStageRegisters current) =>
         kept is not null &&

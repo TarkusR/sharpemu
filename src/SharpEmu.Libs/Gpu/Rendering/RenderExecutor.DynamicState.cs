@@ -81,7 +81,7 @@ public sealed partial class RenderExecutor
         }
 
         var scissor = ResolveScissor(viewportRegisters, context.ScanMode, framebufferWidth, framebufferHeight, recoverStaleWindow: true);
-        ref readonly var viewport = ref viewportRegisters.Viewports[0];
+        ref readonly var viewport = ref viewportRegisters.Primary;
         float viewportX;
         float viewportY;
         float viewportWidth;
@@ -213,7 +213,7 @@ public sealed partial class RenderExecutor
             final = final.Intersect(in generic);
         }
 
-        ref readonly var first = ref viewport.Viewports[0];
+        ref readonly var first = ref viewport.Primary;
         var viewportScissor = new ScissorRectangle(first.ScissorLeft, first.ScissorTop, first.ScissorRight, first.ScissorBottom);
         if (scanMode.ViewportScissorEnable && viewportScissor.IsSet)
         {
@@ -269,7 +269,7 @@ public sealed partial class RenderExecutor
             return false;
         }
 
-        ref readonly var active = ref viewport.Viewports[0];
+        ref readonly var active = ref viewport.Primary;
         return !active.ScissorWindowOffsetEnable &&
             active.ScissorLeft == 0 && active.ScissorTop == 0 &&
             active.ScissorRight == width && active.ScissorBottom == height &&

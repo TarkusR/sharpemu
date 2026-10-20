@@ -64,7 +64,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        ref readonly var viewport = ref banks.Context.ScreenViewport.Viewports[0];
+        ref readonly var viewport = ref banks.Context.ScreenViewport.Primary;
         RenderTrace.Write(
             $"DrawDisposition name={draw.Name} reason={reason} count={draw.Count} " +
             $"export=0x{banks.Shader.Vertex.ExportAddress:X16} pixel=0x{banks.Shader.Pixel.Address:X16} " +

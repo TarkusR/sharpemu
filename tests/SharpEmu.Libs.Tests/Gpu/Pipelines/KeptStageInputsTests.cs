@@ -180,7 +180,7 @@ public sealed class KeptStageInputsTests : IDisposable
     {
         var first = Lookup();
         _banks.Context.Clip.ClipDisable = true;
-        _banks.Context.ScreenViewport.Viewports[0] = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = 32, YOffset = 32 };
+        _banks.Context.ScreenViewport.Primary = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = 32, YOffset = 32 };
         _banks.MarkWritten(1u << (int)RegisterStamp.Context);
         var clipped = Lookup();
 

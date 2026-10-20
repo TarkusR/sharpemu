@@ -290,7 +290,9 @@ public sealed class RegisterStampsTests
         if (type != right.GetType()) return false;
         if (type.IsPrimitive || type.IsEnum || left is string) return left.Equals(right);
         if (left is Delegate) return true;
-        if (type.IsValueType && type.GetCustomAttribute<InlineArrayAttribute>() is not null) return left.Equals(right);
+        if (type.IsValueType && type.GetCustomAttribute<InlineArrayAttribute>() is not null)
+            return (bool)typeof(RegisterStampsTests).GetMethod(nameof(SameBytes), BindingFlags.Static | BindingFlags.NonPublic)!
+                .MakeGenericMethod(type).Invoke(null, [left, right])!;
         if (left is IEnumerable leftItems)
         {
             var leftList = leftItems.Cast<object?>().ToList();
@@ -299,5 +301,14 @@ public sealed class RegisterStampsTests
         }
 
         return Members(left, right).All(static member => DeepEquals(member.Left, member.Right));
+    }
+
+    private static bool SameBytes<T>(object left, object right)
+        where T : struct
+    {
+        var leftValue = (T)left;
+        var rightValue = (T)right;
+        return System.Runtime.InteropServices.MemoryMarshal.AsBytes(new ReadOnlySpan<T>(ref leftValue))
+            .SequenceEqual(System.Runtime.InteropServices.MemoryMarshal.AsBytes(new ReadOnlySpan<T>(ref rightValue)));
     }
 }

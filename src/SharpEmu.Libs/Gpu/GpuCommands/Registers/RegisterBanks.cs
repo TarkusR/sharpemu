@@ -11,7 +11,7 @@ public sealed class RegisterBanks
     private ContextRegisters? _savedContext;
     private uint? _savedCompositeDepthSizeXy;
     private static long _writeSerial;
-    private ulong[] _stamps = InitialStamps();
+    private RegisterStampSet _stamps = InitialStamps();
 
     public RegisterBanks(Func<string, Exception> fatal)
         : this(fatal, new ContextRegisters(), new ShaderProgramRegisters(), new UserConfigRegisters())
@@ -54,10 +54,10 @@ public sealed class RegisterBanks
 
     private static ulong NextSerial() => (ulong)Interlocked.Increment(ref _writeSerial);
 
-    private static ulong[] InitialStamps()
+    private static RegisterStampSet InitialStamps()
     {
-        var stamps = new ulong[RegisterStamps.Count];
-        for (var index = 0; index < stamps.Length; index++)
+        var stamps = new RegisterStampSet();
+        for (var index = 0; index < RegisterStamps.Count; index++)
         {
             stamps[index] = NextSerial();
         }
@@ -80,7 +80,7 @@ public sealed class RegisterBanks
             CompositeDepthSizeXy = CompositeDepthSizeXy,
             UserDataMarker = UserDataMarker,
             IndexTypeAndSize = IndexTypeAndSize,
-            _stamps = (ulong[])_stamps.Clone(),
+            _stamps = _stamps,
         };
         return clone;
     }
@@ -101,7 +101,7 @@ public sealed class RegisterBanks
             CompositeDepthSizeXy = CompositeDepthSizeXy,
             UserDataMarker = UserDataMarker,
             IndexTypeAndSize = IndexTypeAndSize,
-            _stamps = (ulong[])_stamps.Clone(),
+            _stamps = _stamps,
         };
         SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteSnapshot();
         _contextShared = _vertexShared = _pixelShared = _computeShared = _userConfigShared = true;
@@ -130,7 +130,7 @@ public sealed class RegisterBanks
     // The context is copied without its nested parts, and a part only when a writer asks for it
     // through these accessors: a draw usually rewrites a few plain fields.
     private bool _screenViewportShared;
-    private bool _viewportsShared;
+    private bool _secondaryViewportsShared;
     private bool _sampleLocationsShared;
     private bool _shaderInterfaceShared;
     private bool _blendControlsShared;
@@ -139,7 +139,7 @@ public sealed class RegisterBanks
     private bool _unmodeledShared;
 
     private void SetContextPartsShared(bool shared) =>
-        _screenViewportShared = _viewportsShared = _sampleLocationsShared = _shaderInterfaceShared =
+        _screenViewportShared = _secondaryViewportsShared = _sampleLocationsShared = _shaderInterfaceShared =
             _blendControlsShared = _colorTargetsShared = _colorClearWord1Shared = _unmodeledShared = shared;
 
     private void OwnContext(ContextRegisters context)
@@ -156,7 +156,7 @@ public sealed class RegisterBanks
             PrepareContextWrite();
             if (_screenViewportShared)
             {
-                Context.ScreenViewport = Context.ScreenViewport.CopySharingViewports();
+                Context.ScreenViewport = Context.ScreenViewport.CopySharingSecondary();
                 _screenViewportShared = false;
                 SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
             }
@@ -165,20 +165,22 @@ public sealed class RegisterBanks
         }
     }
 
-    public ViewportRegisters[] ViewportsForWrite
+    public ref ViewportRegisters ViewportForWrite(int slot)
     {
-        get
+        var screenViewport = ScreenViewportForWrite;
+        if (slot == 0)
         {
-            var screenViewport = ScreenViewportForWrite;
-            if (_viewportsShared)
-            {
-                screenViewport.Viewports = (ViewportRegisters[])screenViewport.Viewports.Clone();
-                _viewportsShared = false;
-                SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
-            }
-
-            return screenViewport.Viewports;
+            return ref screenViewport.Primary;
         }
+
+        if (_secondaryViewportsShared)
+        {
+            screenViewport.Secondary = (ViewportRegisters[])screenViewport.Secondary.Clone();
+            _secondaryViewportsShared = false;
+            SharpEmu.Libs.Diagnostics.RegisterCopyTally.NoteContextPart();
+        }
+
+        return ref screenViewport.Secondary[slot - 1];
     }
 
     public SampleLocationRegisters SampleLocationsForWrite
@@ -399,7 +401,7 @@ public sealed class RegisterBanks
 
     public void ApplyContextState(ContextStateOperation operation)
     {
-        var previousViewport = Context.ScreenViewport.Viewports[0];
+        var previousViewport = Context.ScreenViewport.Primary;
         switch (operation)
         {
             case ContextStateOperation.Clear:
@@ -432,7 +434,7 @@ public sealed class RegisterBanks
         MarkWritten(RegisterStamps.ContextBits);
         if (Rendering.RenderTrace.Enabled)
         {
-            var currentViewport = Context.ScreenViewport.Viewports[0];
+            var currentViewport = Context.ScreenViewport.Primary;
             Rendering.RenderTrace.Write(
                 $"ContextState operation={operation} previousZScale={previousViewport.ZScale} previousZOffset={previousViewport.ZOffset} " +
                 $"zScale={currentViewport.ZScale} zOffset={currentViewport.ZOffset}");

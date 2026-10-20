@@ -130,10 +130,7 @@ internal static partial class RegisterWriters
             throw banks.Fatal($"The user scalar packet is outside the stage window: offset=0x{offset:X4} count={values.Length} capacity={capacity} header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
         }
 
-        for (var index = 0u; index < values.Length; index++)
-        {
-            target.Set(slot + index, values[(int)index], banks.UserDataMarker);
-        }
+        target.SetRange(slot, values, banks.UserDataMarker);
 
         banks.UserDataMarker = UserScalarKind.Unknown;
         return (uint)values.Length;

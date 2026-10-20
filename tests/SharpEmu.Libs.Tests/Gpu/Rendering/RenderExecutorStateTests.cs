@@ -68,8 +68,8 @@ public sealed class RenderExecutorStateTests : IDisposable
     {
         var banks = Banks();
         banks.Context.Clip = ClipControlRegisters.Decode(directXClipSpace ? 1u << 19 : 0u);
-        banks.Context.ScreenViewport.Viewports[0].ZScale = depthScale;
-        banks.Context.ScreenViewport.Viewports[0].ZOffset = depthOffset;
+        banks.Context.ScreenViewport.Primary.ZScale = depthScale;
+        banks.Context.ScreenViewport.Primary.ZOffset = depthOffset;
 
         var state = DrawAndTakeState(banks);
 
@@ -186,7 +186,7 @@ public sealed class RenderExecutorStateTests : IDisposable
             GenericScissorRight = 80,
             GenericScissorBottom = 80,
         };
-        viewport.Viewports[0] = new ViewportRegisters { ScissorLeft = 20, ScissorTop = 0, ScissorRight = 70, ScissorBottom = 70 };
+        viewport.Primary = new ViewportRegisters { ScissorLeft = 20, ScissorTop = 0, ScissorRight = 70, ScissorBottom = 70 };
         var scanMode = new ScanModeRegisters { ViewportScissorEnable = true };
 
         Assert.Equal(new ScissorRectangle(20, 5, 64, 64), RenderExecutor.ResolveScissor(viewport, in scanMode, 64, 64));
@@ -202,7 +202,7 @@ public sealed class RenderExecutorStateTests : IDisposable
             WindowScissorRight = 784,
             WindowScissorBottom = 784,
         };
-        viewport.Viewports[0] = new ViewportRegisters
+        viewport.Primary = new ViewportRegisters
         {
             XScale = 1920,
             YScale = -1080,
@@ -218,7 +218,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.Equal(new ScissorRectangle(0, 0, 3840, 2160),
             RenderExecutor.ResolveScissor(viewport, in scanMode, 3840, 2160, recoverStaleWindow: true));
 
-        viewport.Viewports[0] = viewport.Viewports[0] with { XScale = 392, YScale = -392 };
+        viewport.Primary = viewport.Primary with { XScale = 392, YScale = -392 };
         Assert.Equal(new ScissorRectangle(0, 0, 784, 784),
             RenderExecutor.ResolveScissor(viewport, in scanMode, 3840, 2160, recoverStaleWindow: true));
     }
@@ -233,7 +233,7 @@ public sealed class RenderExecutorStateTests : IDisposable
             WindowScissorRight = windowRight,
             WindowScissorBottom = windowBottom,
         };
-        viewport.Viewports[0] = new ViewportRegisters
+        viewport.Primary = new ViewportRegisters
         {
             XScale = 1920, YScale = -1080, XOffset = 1920, YOffset = 1080,
             ScissorRight = 3840, ScissorBottom = 2160,
@@ -258,8 +258,8 @@ public sealed class RenderExecutorStateTests : IDisposable
         var banks = Banks();
         banks.Context.ScreenViewport.WindowScissorRight = windowRight;
         banks.Context.ScreenViewport.WindowScissorBottom = windowBottom;
-        banks.Context.ScreenViewport.Viewports[0].ScissorRight = 64;
-        banks.Context.ScreenViewport.Viewports[0].ScissorBottom = 64;
+        banks.Context.ScreenViewport.Primary.ScissorRight = 64;
+        banks.Context.ScreenViewport.Primary.ScissorBottom = 64;
 
         Assert.Equal(new ScissorRectangle(0, 0, 64, 64), DrawAndTakeState(banks).Scissor);
     }
@@ -272,7 +272,7 @@ public sealed class RenderExecutorStateTests : IDisposable
             WindowScissorRight = 784,
             WindowScissorBottom = 784,
         };
-        viewport.Viewports[0] = new ViewportRegisters
+        viewport.Primary = new ViewportRegisters
         {
             XScale = 392, YScale = -392, XOffset = 392, YOffset = 392,
             ScissorRight = 784, ScissorBottom = 784,

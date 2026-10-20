@@ -93,3 +93,9 @@ public static class RegisterStamps
         return dynamic;
     }
 }
+
+[System.Runtime.CompilerServices.InlineArray(RegisterStamps.Count)]
+public struct RegisterStampSet
+{
+    private ulong _first;
+}

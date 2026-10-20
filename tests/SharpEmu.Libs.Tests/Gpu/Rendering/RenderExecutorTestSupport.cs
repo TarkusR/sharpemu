@@ -626,7 +626,7 @@ internal static class RenderExecutorFixtures
         context.ColorTargets[0] = RegisterWords.Color(ColorBase, 64, 64);
         context.RenderTargetMask = 0xF;
         context.ShaderInterface.ColorShaderMask = 0xF;
-        context.ScreenViewport.Viewports[0] = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = -32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
+        context.ScreenViewport.Primary = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = -32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
         if (withDepth)
         {
             context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64);
