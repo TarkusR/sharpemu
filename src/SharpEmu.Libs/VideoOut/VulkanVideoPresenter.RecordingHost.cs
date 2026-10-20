@@ -89,9 +89,37 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
-            _barriersAfterRendering.Add((sourceStages, destinationStages, barriers.ToArray()));
+            _afterRenderingSourceStages |= sourceStages;
+            _afterRenderingDestinationStages |= destinationStages;
+            foreach (var barrier in barriers)
+            {
+                MergeBarrierAfterRendering(in barrier);
+            }
+
             return true;
         }
+
+        private void MergeBarrierAfterRendering(in ImageMemoryBarrier2 barrier)
+        {
+            var pending = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_barriersAfterRendering);
+            for (var index = 0; index < pending.Length; index++)
+            {
+                ref var merged = ref pending[index];
+                if (merged.Image.Handle == barrier.Image.Handle && SameSubresources(in merged.SubresourceRange, in barrier.SubresourceRange))
+                {
+                    merged.SrcAccessMask |= barrier.SrcAccessMask;
+                    merged.DstAccessMask |= barrier.DstAccessMask;
+                    merged.NewLayout = barrier.NewLayout;
+                    return;
+                }
+            }
+
+            _barriersAfterRendering.Add(barrier);
+        }
+
+        private static bool SameSubresources(in ImageSubresourceRange left, in ImageSubresourceRange right) =>
+            left.AspectMask == right.AspectMask && left.BaseMipLevel == right.BaseMipLevel && left.LevelCount == right.LevelCount &&
+            left.BaseArrayLayer == right.BaseArrayLayer && left.LayerCount == right.LayerCount;
 
         private CommandBuffer BeginBatchedGuestCommands() => _worker ? new CommandBuffer(_workerBuffer!.Handle) : _presenter.BeginBatchedGuestCommands();
 

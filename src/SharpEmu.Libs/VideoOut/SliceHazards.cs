@@ -53,13 +53,20 @@ internal sealed class SliceHazards
             }
 
             var repeatedWrite = (state.Access & WriteAccess) != 0;
-            if (state.Access != access || repeatedWrite)
+            if ((state.Access != access || repeatedWrite) && (state.RepeatsAttachmentAccess(access) || state.ReadsAfterRead(access)))
             {
                 if (GpuSyncProfile.Enabled)
                 {
                     BarrierTally.CountAvoidableImageBarrier(in state, access);
                 }
 
+                ImageAccessState.BarriersElided.Increment();
+                _states[image] = state with { Stage = state.Stage | stage, Access = state.Access | access };
+                return _barriers;
+            }
+
+            if (state.Access != access || repeatedWrite)
+            {
                 _barriers.Add(new ImageMemoryBarrier2
                 {
                     SType = StructureType.ImageMemoryBarrier2,
@@ -74,6 +81,10 @@ internal sealed class SliceHazards
                 });
                 ImageAccessState.Barriers.Increment();
                 sourceStages = state.Stage;
+            }
+            else
+            {
+                next = state with { Stage = state.Stage | stage };
             }
         }
 

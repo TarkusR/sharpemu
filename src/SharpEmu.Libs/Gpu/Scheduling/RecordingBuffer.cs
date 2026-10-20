@@ -16,6 +16,32 @@ public readonly record struct MemoryBarrierRequest(
         DestinationStages | other.DestinationStages,
         SourceAccess | other.SourceAccess,
         DestinationAccess | other.DestinationAccess);
+
+    private const AccessFlags WriteAccess = AccessFlags.ShaderWriteBit | AccessFlags.ColorAttachmentWriteBit |
+        AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.TransferWriteBit | AccessFlags.HostWriteBit | AccessFlags.MemoryWriteBit;
+
+    public bool Covers(in MemoryBarrierRequest other) =>
+        CoversStages(SourceStages, other.SourceStages) && CoversStages(DestinationStages, other.DestinationStages) &&
+        CoversAccess(SourceAccess, other.SourceAccess) && CoversAccess(DestinationAccess, other.DestinationAccess);
+
+    private static bool CoversStages(PipelineStageFlags stages, PipelineStageFlags other) =>
+        (stages & PipelineStageFlags.AllCommandsBit) != 0 || (other & ~stages) == 0;
+
+    private static bool CoversAccess(AccessFlags access, AccessFlags other)
+    {
+        var uncovered = other & ~access;
+        if ((access & AccessFlags.MemoryWriteBit) != 0)
+        {
+            uncovered &= ~WriteAccess;
+        }
+
+        if ((access & AccessFlags.MemoryReadBit) != 0)
+        {
+            uncovered &= WriteAccess;
+        }
+
+        return uncovered == 0;
+    }
 }
 
 public enum RecordedOperation : uint
@@ -47,7 +73,6 @@ public sealed class RecordingBuffer
     private MemoryBarrierRequest _deferredBarrier;
     private bool _hasDeferredBarrier;
     private bool _checkedWindow;
-    private bool _idleSinceFullBarrier;
     private long _recordedBarriersAtBegin;
     private bool _hostReadRecorded;
 
@@ -93,6 +118,10 @@ public sealed class RecordingBuffer
 
     public long RecordedBarriers { get; private set; }
 
+    public bool MayWriteMappedMemory { get; private set; }
+
+    public void NoteMappedMemoryWrite() => MayWriteMappedMemory = true;
+
     // The native handle stays valid only until the next submission.
     public nint Handle
     {
@@ -111,7 +140,6 @@ public sealed class RecordingBuffer
 
             FlushPendingBarrier();
             _handleWasRequested = true;
-            _idleSinceFullBarrier = false;
             return Buffer;
         }
     }
@@ -134,7 +162,6 @@ public sealed class RecordingBuffer
 
             FlushPendingBarrier();
             _handleWasRequested = true;
-            _idleSinceFullBarrier = false;
             return Buffer;
         }
     }
@@ -160,11 +187,6 @@ public sealed class RecordingBuffer
             throw SubmissionScheduler.Fatal("A memory barrier needs a recording command buffer outside rendering.");
         }
 
-        if (_idleSinceFullBarrier && !_hasPendingBarrier && Vulkan.GpuSyncProfile.Enabled)
-        {
-            Vulkan.BarrierTally.IdleRequests.Increment();
-        }
-
         var merged = request;
         if (_hasDeferredBarrier)
         {
@@ -179,13 +201,17 @@ public sealed class RecordingBuffer
 
         if (_hasPendingBarrier)
         {
-            _pendingBarrier = _pendingBarrier.Union(merged);
-            MergedBarriers++;
             if (Vulkan.GpuSyncProfile.Enabled)
             {
                 Vulkan.GpuSyncProfile.CountMergedRequest();
+                if (_pendingBarrier.Covers(merged))
+                {
+                    Vulkan.BarrierTally.IdleRequests.Increment();
+                }
             }
 
+            _pendingBarrier = _pendingBarrier.Union(merged);
+            MergedBarriers++;
             return;
         }
 
@@ -227,8 +253,6 @@ public sealed class RecordingBuffer
     }
 
     public void ExitCheckedWindow() => _checkedWindow = false;
-
-    public void NoteFullBarrierRecorded() => _idleSinceFullBarrier = true;
 
     private void PromoteDeferredBarrier(Vulkan.DeferredBarrierPromotion cause)
     {
@@ -317,7 +341,7 @@ public sealed class RecordingBuffer
 
         if (!Ended)
         {
-            End();
+            EndDiscarded();
         }
 
         if (Vulkan.GpuSyncProfile.Enabled)
@@ -345,9 +369,9 @@ public sealed class RecordingBuffer
         _hasPendingBarrier = false;
         _hasDeferredBarrier = false;
         _checkedWindow = false;
-        _idleSinceFullBarrier = false;
         _recordedBarriersAtBegin = RecordedBarriers;
         _hostReadRecorded = false;
+        MayWriteMappedMemory = false;
         DeferredPromotions = Interlocked.Increment(ref s_promotionGeneration);
         SetDebugInfo((uint)RecordedOperation.Unknown, 0);
     }
@@ -356,13 +380,37 @@ public sealed class RecordingBuffer
     {
         EndRendering();
         _checkedWindow = false;
-        _hostReadRecorded = true;
+        _hostReadRecorded = MayWriteMappedMemory;
         _source.EndBuffer(Handle, _hostReadRecorded);
         if (Vulkan.GpuSyncProfile.Enabled)
         {
-            Vulkan.BarrierTally.HostReadRecorded.Increment();
+            (_hostReadRecorded ? Vulkan.BarrierTally.HostReadRecorded : Vulkan.BarrierTally.HostReadSkipped).Increment();
         }
 
         Ended = true;
+    }
+
+    internal void EndDiscarded()
+    {
+        var avoided = DropBarriers();
+        EndRendering();
+        avoided += DropBarriers();
+        _checkedWindow = false;
+        _hostReadRecorded = false;
+        _source.EndBuffer(Handle, hostRead: false);
+        if (Vulkan.GpuSyncProfile.Enabled)
+        {
+            Vulkan.BarrierTally.DiscardAvoided.Add(avoided + (MayWriteMappedMemory ? 1 : 0));
+        }
+
+        Ended = true;
+    }
+
+    private int DropBarriers()
+    {
+        var dropped = (_hasPendingBarrier ? 1 : 0) + (_hasDeferredBarrier ? 1 : 0);
+        _hasPendingBarrier = false;
+        _hasDeferredBarrier = false;
+        return dropped;
     }
 }

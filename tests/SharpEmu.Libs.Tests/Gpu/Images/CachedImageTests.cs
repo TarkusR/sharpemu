@@ -204,6 +204,49 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
     }
 
     [Fact]
+    public void Barriers_ReadsAfterReadsNeedNoBarrierUntilTheNextWrite()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64, levels: 2));
+
+        Assert.Single(image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null).Barriers);
+        Assert.Empty(image.GetBarriers(AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit, null).Barriers);
+        Assert.Equal(new ImageAccessState(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit,
+            AccessFlags.ShaderReadBit | AccessFlags.TransferReadBit, ImageLayout.General), image.Backing.State);
+
+        var (write, writeStages) = image.GetBarriers(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, new SubresourceRange(1, 1, 0, 1));
+        var only = Assert.Single(write);
+        Assert.Equal(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit, writeStages);
+        Assert.Equal(AccessFlags2.ShaderReadBit | AccessFlags2.TransferReadBit, only.SrcAccessMask);
+
+        var (whole, wholeStages) = image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, null);
+        var written = Assert.Single(whole);
+        Assert.Equal(1u, written.SubresourceRange.BaseMipLevel);
+        Assert.Equal(PipelineStageFlags.TransferBit, wholeStages);
+        Assert.Null(image.Backing.SubresourceStates);
+        Assert.Equal(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit, image.Backing.State.Stage);
+
+        var (after, afterStages) = image.GetBarriers(AccessFlags.ShaderWriteBit, PipelineStageFlags.ComputeShaderBit, null);
+        Assert.Single(after);
+        Assert.Equal(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit, afterStages);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void Barriers_AttachmentReadsKeepTheirBarrierAfterSampling()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64));
+
+        Assert.Single(image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, null).Barriers);
+        Assert.Single(image.GetBarriers(AccessFlags.ColorAttachmentReadBit, PipelineStageFlags.ColorAttachmentOutputBit, null).Barriers);
+        Assert.Single(image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, null).Barriers);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
     public void Barriers_RepeatedGuestStorageWritesNeedNoBarrierButEveryOtherWriteKeepsOne()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

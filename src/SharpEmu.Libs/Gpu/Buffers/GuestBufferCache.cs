@@ -1058,14 +1058,26 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     internal long UploadBarrierPairs { get; private set; }
 
-    private void OpenSweepBarrier(CommandBuffer native)
+    private sealed class SweepTarget
     {
-        if (_sweepBarrierBuffer.Handle == native.Handle)
+        public ulong Begin;
+        public ulong End;
+        public readonly List<(ulong Offset, ulong End)> Ranges = [];
+    }
+
+    private readonly Dictionary<ulong, SweepTarget> _sweepTargets = [];
+    private readonly Stack<SweepTarget> _spareSweepTargets = new();
+
+    private void OpenSweepBarrier(CommandBuffer native, ulong buffer, ReadOnlySpan<BufferCopy> copies)
+    {
+        if (_sweepBarrierBuffer.Handle == native.Handle && !RepeatsSweepWrite(buffer, copies))
         {
+            NoteSweepWrites(buffer, copies);
             return;
         }
 
         CloseSweepBarrier();
+        NoteSweepWrites(buffer, copies);
         _sweepBarrierBuffer = native;
         UploadBarrierPairs++;
         RecordSweepBarrier(native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit,
@@ -1073,8 +1085,66 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             AccessFlags2.TransferWriteBit);
     }
 
+    private bool RepeatsSweepWrite(ulong buffer, ReadOnlySpan<BufferCopy> copies)
+    {
+        if (!_sweepTargets.TryGetValue(buffer, out var target))
+        {
+            return false;
+        }
+
+        foreach (var copy in copies)
+        {
+            var end = copy.DstOffset + copy.Size;
+            if (end <= target.Begin || copy.DstOffset >= target.End)
+            {
+                continue;
+            }
+
+            foreach (var (offset, rangeEnd) in target.Ranges)
+            {
+                if (copy.DstOffset < rangeEnd && offset < end)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private void NoteSweepWrites(ulong buffer, ReadOnlySpan<BufferCopy> copies)
+    {
+        if (!_sweepTargets.TryGetValue(buffer, out var target))
+        {
+            target = _spareSweepTargets.Count != 0 ? _spareSweepTargets.Pop() : new SweepTarget();
+            target.Begin = ulong.MaxValue;
+            target.End = 0;
+            target.Ranges.Clear();
+            _sweepTargets.Add(buffer, target);
+        }
+
+        foreach (var copy in copies)
+        {
+            var end = copy.DstOffset + copy.Size;
+            target.Ranges.Add((copy.DstOffset, end));
+            target.Begin = Math.Min(target.Begin, copy.DstOffset);
+            target.End = Math.Max(target.End, end);
+        }
+    }
+
+    private void ForgetSweepWrites()
+    {
+        foreach (var target in _sweepTargets.Values)
+        {
+            _spareSweepTargets.Push(target);
+        }
+
+        _sweepTargets.Clear();
+    }
+
     private void CloseSweepBarrier()
     {
+        ForgetSweepWrites();
         if (_sweepBarrierBuffer.Handle == 0)
         {
             return;
@@ -2106,6 +2176,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     internal ulong PromotedBytes => _promotedBytes;
 
+    private long _mappedBuffers;
+
+    public bool HasMappedBuffers => Volatile.Read(ref _mappedBuffers) != 0;
+
     internal long DirectReadsApplied { get; private set; }
 
     private static bool IsPromoted(GpuBuffer buffer) => buffer.Usage == GpuBufferUsage.MappedDeviceLocal && buffer.IsMapped;
@@ -2381,6 +2455,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _promotedBytes = insert ? _promotedBytes + buffer.Size : _promotedBytes - buffer.Size;
             Interlocked.Add(ref PromotedLiveBytes, insert ? (long)buffer.Size : -(long)buffer.Size);
+        }
+
+        if (buffer.IsMapped)
+        {
+            Interlocked.Add(ref _mappedBuffers, insert ? 1 : -1);
         }
 
         if (GuestGpuMemoryHook.Traces(buffer.CpuAddress, buffer.Size))
@@ -3104,7 +3183,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         UploadsRecorded++;
         if (sweep)
         {
-            OpenSweepBarrier(native);
+            OpenSweepBarrier(native, buffer.Handle.Handle, regions);
         }
         else
         {

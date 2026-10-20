@@ -215,7 +215,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _nextDrawWritesMemory;
         internal bool _globalBarrierAfterRendering;
         // Attachment barriers that order this rendering scope before later work; see TryDeferUntilRenderingEnds.
-        private readonly List<(PipelineStageFlags Source, PipelineStageFlags Destination, ImageMemoryBarrier2[] Barriers)> _barriersAfterRendering = new();
+        private readonly List<ImageMemoryBarrier2> _barriersAfterRendering = new();
+        private PipelineStageFlags _afterRenderingSourceStages;
+        private PipelineStageFlags _afterRenderingDestinationStages;
         private bool _hasBoundDepth;
         private DepthAttachmentState _boundDepth;
         private DepthStencilState _boundDepthLoadState;
@@ -1193,32 +1195,38 @@ internal static unsafe partial class VulkanVideoPresenter
                 _presenter._occlusionQueries?.End(command);
             }
 
-            if (GpuSyncProfile.Enabled && _barriersAfterRendering.Count != 0)
+            if (_barriersAfterRendering.Count != 0)
             {
-                BarrierTally.ScopeEnds.Increment();
-                BarrierTally.ScopeEndCalls.Add(_barriersAfterRendering.Count);
-                foreach (var (_, _, barriers) in _barriersAfterRendering)
+                if (GpuSyncProfile.Enabled)
                 {
-                    BarrierTally.ScopeEndImages.Add(barriers.Length);
+                    BarrierTally.ScopeEnds.Increment();
+                    BarrierTally.ScopeEndCalls.Increment();
+                    BarrierTally.ScopeEndImages.Add(_barriersAfterRendering.Count);
                 }
-            }
 
-            foreach (var (sourceStages, destinationStages, barriers) in _barriersAfterRendering)
-            {
-                fixed (ImageMemoryBarrier2* pointer = barriers)
+                fixed (ImageMemoryBarrier2* pointer = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_barriersAfterRendering))
                 {
                     VulkanSynchronization.PipelineBarrier(_vk,
-                        command, sourceStages, destinationStages, DependencyFlags.ByRegionBit,
-                        0, null, 0, null, (uint)barriers.Length, pointer, BarrierSource.ScopeEnd);
+                        command, _afterRenderingSourceStages, _afterRenderingDestinationStages, DependencyFlags.ByRegionBit,
+                        0, null, 0, null, (uint)_barriersAfterRendering.Count, pointer, BarrierSource.ScopeEnd);
                 }
+
+                _barriersAfterRendering.Clear();
+                _afterRenderingSourceStages = 0;
+                _afterRenderingDestinationStages = 0;
             }
 
-            _barriersAfterRendering.Clear();
             if (_globalBarrierAfterRendering)
             {
                 _globalBarrierAfterRendering = false;
-                _presenter.RecordGlobalBarrier(command);
-                CurrentRecording().NoteFullBarrierRecorded();
+                if (BatchBarriers)
+                {
+                    RequestGuestMemoryBarrier(GlobalMemoryBarrier);
+                }
+                else
+                {
+                    _presenter.RecordGlobalBarrier(command);
+                }
             }
 
             _renderingWritesMemory = false;
@@ -1245,6 +1253,15 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _nextDrawWritesMemory = true;
+            NoteShaderMayWriteMappedMemory();
+        }
+
+        private void NoteShaderMayWriteMappedMemory()
+        {
+            if (_bufferCache.HasMappedBuffers)
+            {
+                CurrentRecording().NoteMappedMemoryWrite();
+            }
         }
 
         public void BindPipeline(PipelineBindPoint bindPoint, in PipelineHandle pipeline)
@@ -1449,6 +1466,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Dispatch,
                 _profileComputePipeline, groupsX, groupsY, groupsZ);
             CountDraw();
+            NoteShaderMayWriteMappedMemory();
         }
 
         public bool TryDispatchIndirect(ulong argumentsAddress)
@@ -1476,6 +1494,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.CmdDispatchIndirect(command, buffer, offset);
             }
             CountDraw();
+            NoteShaderMayWriteMappedMemory();
             return true;
         }
 
@@ -1507,7 +1526,9 @@ internal static unsafe partial class VulkanVideoPresenter
             VulkanSynchronization.PipelineBarrier(_vk,command, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null, BarrierSource.Requested);
         }
 
-        public void ShaderWriteBarrier(PipelineStageFlags sourceStages) =>
+        public void ShaderWriteBarrier(PipelineStageFlags sourceStages)
+        {
+            NoteShaderMayWriteMappedMemory();
             RecordMemoryBarrier(
                 sourceStages,
                 PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit | PipelineStageFlags.VertexShaderBit |
@@ -1517,6 +1538,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.VertexAttributeReadBit | AccessFlags.IndexReadBit |
                 AccessFlags.UniformReadBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |
                 AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit);
+        }
 
         private static readonly MemoryBarrierRequest ShaderWriteHazardRequest = new(
             PipelineStageFlags.AllCommandsBit,

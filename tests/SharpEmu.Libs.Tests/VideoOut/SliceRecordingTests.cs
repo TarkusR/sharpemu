@@ -27,22 +27,22 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     public SliceRecordingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
     [Fact]
-    public void SliceHazards_FirstAccessNeedsNoBarrierAndRepeatedWritesDo()
+    public void SliceHazards_FirstAccessNeedsNoBarrierAndRepeatedShaderWritesDo()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new ImageTestHarness(_vulkan);
         var image = harness.CreateImage(CachedImageTests.Color2D(16, 16));
         var hazards = new SliceHazards();
 
-        var first = hazards.Transition(image, AccessFlags.ColorAttachmentWriteBit, PipelineStageFlags.ColorAttachmentOutputBit, out var firstStages);
+        var first = hazards.Transition(image, AccessFlags.ShaderWriteBit, PipelineStageFlags.ComputeShaderBit, out var firstStages);
         Assert.Empty(first);
         Assert.Equal(PipelineStageFlags.None, firstStages);
 
-        var repeated = hazards.Transition(image, AccessFlags.ColorAttachmentWriteBit, PipelineStageFlags.ColorAttachmentOutputBit, out var repeatedStages);
+        var repeated = hazards.Transition(image, AccessFlags.ShaderWriteBit, PipelineStageFlags.ComputeShaderBit, out var repeatedStages);
         var barrier = Assert.Single(repeated);
         Assert.Equal((ImageLayout.General, ImageLayout.General), (barrier.OldLayout, barrier.NewLayout));
         Assert.Equal(image.Backing.Handle.Handle, barrier.Image.Handle);
-        Assert.Equal(PipelineStageFlags.ColorAttachmentOutputBit, repeatedStages);
+        Assert.Equal(PipelineStageFlags.ComputeShaderBit, repeatedStages);
 
         var read = hazards.Transition(image, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, out _);
         Assert.Single(read);
@@ -51,6 +51,46 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
 
         hazards.Reset();
         Assert.Empty(hazards.Transition(image, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, out _));
+    }
+
+    [Fact]
+    public void SliceHazards_ReacquiringAKeptAttachmentNeedsNoBarrierButAnotherAccessorDoes()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(CachedImageTests.Color2D(16, 16));
+        var hazards = new SliceHazards();
+        const AccessFlags Color = AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit;
+
+        Assert.Empty(hazards.Transition(image, Color, PipelineStageFlags.ColorAttachmentOutputBit, out _));
+        Assert.Empty(hazards.Transition(image, Color, PipelineStageFlags.ColorAttachmentOutputBit, out _));
+        Assert.Empty(hazards.Transition(image, Color, PipelineStageFlags.ColorAttachmentOutputBit, out _));
+
+        var sampled = Assert.Single(hazards.Transition(image, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, out var sampledStages));
+        Assert.Equal(PipelineStageFlags.ColorAttachmentOutputBit, sampledStages);
+        Assert.Equal(AccessFlags2.ColorAttachmentReadBit | AccessFlags2.ColorAttachmentWriteBit, sampled.SrcAccessMask);
+
+        Assert.Single(hazards.Transition(image, Color, PipelineStageFlags.ColorAttachmentOutputBit, out _));
+        Assert.Single(hazards.Transition(image, AccessFlags.ShaderWriteBit | Color, PipelineStageFlags.FragmentShaderBit, out _));
+        Assert.Single(hazards.Transition(image, AccessFlags.ShaderWriteBit | Color, PipelineStageFlags.FragmentShaderBit, out _));
+    }
+
+    [Fact]
+    public void SliceHazards_ReadsAfterReadsMergeUntilTheNextWrite()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(CachedImageTests.Color2D(16, 16));
+        var hazards = new SliceHazards();
+
+        Assert.Empty(hazards.Transition(image, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, out _));
+        Assert.Empty(hazards.Transition(image, AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit, out _));
+        Assert.Empty(hazards.Transition(image, AccessFlags.ShaderReadBit | AccessFlags.TransferReadBit, PipelineStageFlags.ComputeShaderBit, out _));
+
+        var write = Assert.Single(hazards.Transition(image, AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, out var writeStages));
+        Assert.Equal(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ComputeShaderBit, writeStages);
+        Assert.Equal(AccessFlags2.ShaderReadBit | AccessFlags2.TransferReadBit, write.SrcAccessMask);
+        Assert.Single(hazards.Transition(image, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, out _));
     }
 
     [Fact]

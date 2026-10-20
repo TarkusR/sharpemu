@@ -40,6 +40,8 @@ public sealed unsafe partial class CachedImage
     {
         List<ImageMemoryBarrier2>? barriers = null;
         PipelineStageFlags sourceStages = 0;
+        PipelineStageFlags keptStages = 0;
+        AccessFlags keptAccess = 0;
         if ((access & (WriteAccess | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit)) != 0)
         {
             // Any GPU write, the guest upload included, leaves contents the piece hashes do not describe.
@@ -98,15 +100,20 @@ public sealed unsafe partial class CachedImage
                     {
                         ImageAccessState.BarriersElided.Increment();
                         states[index] = state with { Stage = state.Stage | stage };
+                        keptStages |= state.Stage;
                         continue;
                     }
 
                     var repeatedWrite = (state.Access & WriteAccess) != 0;
                     if (state.Layout != ReadyLayout || state.Access != access || repeatedWrite)
                     {
-                        if (GpuSyncProfile.Enabled)
+                        if (state.ReadsAfterRead(access))
                         {
-                            BarrierTally.CountAvoidableImageBarrier(in state, access);
+                            CountReadAfterRead(in state, access);
+                            states[index] = state with { Stage = state.Stage | stage, Access = state.Access | access };
+                            keptStages |= state.Stage;
+                            keptAccess |= state.Access;
+                            continue;
                         }
 
                         (barriers ??= []).Add(MakeBarrier(state, access, level, 1, layer, 1));
@@ -138,9 +145,11 @@ public sealed unsafe partial class CachedImage
                 return (NoBarriers, sourceStages);
             }
 
-            if (GpuSyncProfile.Enabled)
+            if (state.ReadsAfterRead(access))
             {
-                BarrierTally.CountAvoidableImageBarrier(in state, access);
+                CountReadAfterRead(in state, access);
+                Backing.State = state with { Stage = state.Stage | stage, Access = state.Access | access };
+                return (NoBarriers, sourceStages);
             }
 
             (barriers ??= []).Add(MakeBarrier(state, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
@@ -148,8 +157,17 @@ public sealed unsafe partial class CachedImage
             sourceStages |= state.Stage;
         }
 
-        Backing.State = new ImageAccessState(stage, access, ReadyLayout, guest);
+        Backing.State = new ImageAccessState(stage | keptStages, access | keptAccess, ReadyLayout, guest);
         return (barriers ?? NoBarriers, sourceStages);
+    }
+
+    private static void CountReadAfterRead(in ImageAccessState state, AccessFlags access)
+    {
+        ImageAccessState.BarriersElided.Increment();
+        if (GpuSyncProfile.Enabled)
+        {
+            BarrierTally.CountAvoidableImageBarrier(in state, access);
+        }
     }
 
     public void Transition(AccessFlags access, SubresourceRange? range, CommandBuffer command, bool guest = false)

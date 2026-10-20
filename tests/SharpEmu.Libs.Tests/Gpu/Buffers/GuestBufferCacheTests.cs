@@ -470,6 +470,48 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void UploadBatch_SharesOneBarrierPairUntilAnUploadRewritesBytesOfTheBatch()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address + 0x40, Pattern(0x100, 1));
+        harness.Write(address + 0x10040, Pattern(0x100, 2));
+        var pairs = harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address, 0x20000, isWritten: false);
+            harness.Scheduler.Finish();
+            return harness.Cache.UploadBarrierPairs;
+        });
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x40, 8));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x10040, 8));
+        harness.Write(address + 0x40, Pattern(0x100, 3));
+        harness.Write(address + 0x10040, Pattern(0x100, 4));
+
+        var (buffer, _) = harness.Worker.Run(() =>
+        {
+            harness.Cache.BeginUploadBatch();
+            var obtained = harness.Cache.ObtainBuffer(address + 0x40, 0x4100, isWritten: false);
+            _ = harness.Cache.ObtainBuffer(address + 0x10040, 0x4100, isWritten: false);
+            return obtained;
+        });
+        Assert.Equal(pairs + 1, harness.Worker.Run(() => harness.Cache.UploadBarrierPairs));
+
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x40, 8));
+        harness.Write(address + 0x40, Pattern(0x100, 5));
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address + 0x40, 0x4100, isWritten: false);
+            harness.Cache.EndUploadBatch();
+        });
+
+        Assert.Equal(pairs + 2, harness.Worker.Run(() => harness.Cache.UploadBarrierPairs));
+        Assert.Equal(Pattern(0x100, 5), harness.ReadBack(buffer, 0x40, 0x100));
+        Assert.Equal(Pattern(0x100, 4), harness.ReadBack(buffer, 0x10040, 0x100));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void ObtainBuffer_CreatesRegistersAndUploadsOnlyCpuDirtyPages()
     {
         if (_vulkan is null) return;

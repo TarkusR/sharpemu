@@ -221,6 +221,11 @@ public unsafe class GpuBuffer : IDisposable
             LastGpuWriteTick = tick;
         }
 
+        if (_mapped != null)
+        {
+            _scheduler.NoteMappedMemoryWrite();
+        }
+
         if (size == 0 || offset >= Size)
         {
             return;
@@ -308,6 +313,11 @@ public unsafe class GpuBuffer : IDisposable
 
         command.EndRendering();
         NoteGpuWrite(destinationOffset, size);
+        if (IsMapped)
+        {
+            command.NoteMappedMemoryWrite();
+        }
+
         var vk = _device.Vk;
         var native = new CommandBuffer(command.TransferHandle);
         var before = stackalloc BufferMemoryBarrier2[2];
@@ -445,6 +455,11 @@ public unsafe class GpuBuffer : IDisposable
                         {
                             var copy = _pending[end];
                             copy.Destination.NoteGpuWrite(copy.DestinationOffset, copy.Size);
+                            if (copy.Destination.IsMapped)
+                            {
+                                command.NoteMappedMemoryWrite();
+                            }
+
                             regions[end - first] = new BufferCopy(copy.SourceOffset, copy.DestinationOffset, copy.Size);
                             end++;
                         }

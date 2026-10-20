@@ -149,4 +149,70 @@ public sealed class RecordingBufferBarrierTests
         _rendering.IsRendering = false;
         _device.CompleteOnSubmit = true;
     }
+
+    [Fact]
+    public void ADiscardedBufferRecordsNeitherItsBarriersNorTheHostReadBarrier()
+    {
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        _device.CompleteOnSubmit = true;
+        var recorded = new List<MemoryBarrierRequest>();
+        scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
+        var worker = scheduler.CreateRecordingBuffer(new RecordingRenderingState());
+        scheduler.BeginRecording(worker);
+        var name = _device.Name(worker.Buffer);
+        worker.RequestMemoryBarrier(AllToCompute);
+        worker.DeferMemoryBarrier(ComputeToAll);
+        worker.NoteMappedMemoryWrite();
+
+        scheduler.EndDiscardedRecording(worker);
+        scheduler.DiscardRecording(worker);
+
+        Assert.Empty(recorded);
+        Assert.Equal(0, _device.HostReadBarriers);
+        Assert.True(worker.IsInvalid);
+        Assert.Contains($"end {name}", _device.Log);
+    }
+
+    [Fact]
+    public void ABufferEndsWithTheHostReadBarrierOnlyAfterAMappedWrite()
+    {
+        using var fatal = new FatalScope();
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        _device.CompleteOnSubmit = true;
+        scheduler.MemoryBarrierRecorder = (_, _) => { };
+        _ = scheduler.Current.Handle;
+        scheduler.Flush();
+        Assert.Equal(0, _device.HostReadBarriers);
+
+        _ = scheduler.Current.Handle;
+        scheduler.NoteMappedMemoryWrite();
+        Assert.True(scheduler.Current.MayWriteMappedMemory);
+        scheduler.Flush();
+        Assert.Equal(1, _device.HostReadBarriers);
+        Assert.False(scheduler.Current.MayWriteMappedMemory);
+
+        scheduler.Flush();
+        Assert.Equal(1, _device.HostReadBarriers);
+    }
+
+    [Fact]
+    public void ARequestThePendingBarrierCoversMergesWithoutAnotherRecord()
+    {
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        _device.CompleteOnSubmit = true;
+        var recorded = new List<MemoryBarrierRequest>();
+        scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
+        var full = new MemoryBarrierRequest(PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit,
+            AccessFlags.MemoryWriteBit, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit);
+
+        scheduler.Current.RequestMemoryBarrier(full);
+        scheduler.Current.RequestMemoryBarrier(full);
+        _ = scheduler.Current.Handle;
+
+        Assert.Equal([full], recorded);
+        Assert.True(full.Covers(full));
+        Assert.True(full.Covers(new MemoryBarrierRequest(PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.TransferBit,
+            AccessFlags.MemoryWriteBit, AccessFlags.MemoryReadBit)));
+        Assert.False(full.Covers(AllToCompute));
+    }
 }

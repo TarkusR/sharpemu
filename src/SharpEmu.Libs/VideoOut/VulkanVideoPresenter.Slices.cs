@@ -654,19 +654,27 @@ internal static unsafe partial class VulkanVideoPresenter
             RequestGuestMemoryBarrier(RecordingHost.GlobalMemoryBarrier);
             var uploadsBefore = _bufferCache.UploadsRecorded;
             var pairsBefore = _bufferCache.UploadBarrierPairs;
-            if (requests.NeedsBdaSweep && requests.BdaSpans is { } spans)
+            _bufferCache.BeginUploadBatch();
+            try
             {
-                _bufferCache.PrepareBda(spans, requests.BdaMapping);
-            }
+                if (requests.NeedsBdaSweep && requests.BdaSpans is { } spans)
+                {
+                    _bufferCache.PrepareBda(spans, requests.BdaMapping);
+                }
 
-            foreach (var (address, size) in requests.SyncRanges)
-            {
-                _bufferCache.SynchronizeBuffersInRange(address, size);
-            }
+                foreach (var (address, size) in requests.SyncRanges)
+                {
+                    _bufferCache.SynchronizeBuffersInRange(address, size);
+                }
 
-            foreach (var use in requests.Buffers)
+                foreach (var use in requests.Buffers)
+                {
+                    _bufferCache.ApplySliceUse(in use);
+                }
+            }
+            finally
             {
-                _bufferCache.ApplySliceUse(in use);
+                _bufferCache.EndUploadBatch();
             }
 
             if (GpuSyncProfile.Enabled)
@@ -835,7 +843,15 @@ internal static unsafe partial class VulkanVideoPresenter
         private void EndSegment(RenderSlice slice, SliceSegment segment)
         {
             EndRendering();
-            _scheduler.EndRecording(_workerBuffer!);
+            if (segment.Count == 0)
+            {
+                _scheduler.EndDiscardedRecording(_workerBuffer!);
+            }
+            else
+            {
+                _scheduler.EndRecording(_workerBuffer!);
+            }
+
             segment.Buffer = _workerBuffer;
             segment.DrawCount = _sliceDrawCount;
             slice.Segments.Enqueue(segment);
@@ -924,6 +940,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (ReferenceEquals(entry.Snapshot, _buffers) && (isWritten || !_bufferCache.MayHaveCpuDirtyPages(address, size)))
                 {
                     _sliceUseHits.Increment();
+                    NoteSliceWrite(cached, isWritten);
                     Requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, cached));
                     return (cached, cached.Offset(address), cached.Size - cached.Offset(address));
                 }
@@ -961,6 +978,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             entry = new SliceUseEntry(address, size, isWritten, isTexelBuffer, invalidateImages, _buffers, buffer);
+            NoteSliceWrite(buffer, isWritten);
             Requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
             return (buffer, buffer.Offset(address), buffer.Size - buffer.Offset(address));
         }
@@ -995,6 +1013,14 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _imageCache.ApplyNativeColorClear(imageIdentifier, request);
+        }
+
+        private void NoteSliceWrite(GpuBuffer buffer, bool isWritten)
+        {
+            if (isWritten && buffer.IsMapped)
+            {
+                _workerBuffer!.NoteMappedMemoryWrite();
+            }
         }
 
         private const int SliceUseSlots = 4096;

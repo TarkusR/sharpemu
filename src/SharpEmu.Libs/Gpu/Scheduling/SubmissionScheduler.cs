@@ -759,6 +759,16 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
     public void EndRecording(RecordingBuffer buffer) => buffer.End();
 
+    public void EndDiscardedRecording(RecordingBuffer buffer) => buffer.EndDiscarded();
+
+    public void NoteMappedMemoryWrite()
+    {
+        if (Active && !_command.IsInvalid)
+        {
+            _command.NoteMappedMemoryWrite();
+        }
+    }
+
     public void DiscardRecording(RecordingBuffer buffer) => buffer.Discard();
 
     // Add the timeline signal to a copy. Keep the caller's submission bundle unchanged. Trailing
