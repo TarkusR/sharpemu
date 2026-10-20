@@ -380,7 +380,7 @@ public sealed class RecordingBuffer
     {
         EndRendering();
         _checkedWindow = false;
-        _hostReadRecorded = MayWriteMappedMemory;
+        _hostReadRecorded = true;
         _source.EndBuffer(Handle, _hostReadRecorded);
         if (Vulkan.GpuSyncProfile.Enabled)
         {

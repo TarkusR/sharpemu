@@ -174,7 +174,7 @@ public sealed class RecordingBufferBarrierTests
     }
 
     [Fact]
-    public void ABufferEndsWithTheHostReadBarrierOnlyAfterAMappedWrite()
+    public void EverySubmittedBufferEndsWithTheHostReadBarrier()
     {
         using var fatal = new FatalScope();
         using var scheduler = NewActiveScheduler(_device, _rendering);
@@ -182,17 +182,13 @@ public sealed class RecordingBufferBarrierTests
         scheduler.MemoryBarrierRecorder = (_, _) => { };
         _ = scheduler.Current.Handle;
         scheduler.Flush();
-        Assert.Equal(0, _device.HostReadBarriers);
+        Assert.Equal(1, _device.HostReadBarriers);
 
         _ = scheduler.Current.Handle;
         scheduler.NoteMappedMemoryWrite();
-        Assert.True(scheduler.Current.MayWriteMappedMemory);
         scheduler.Flush();
-        Assert.Equal(1, _device.HostReadBarriers);
+        Assert.Equal(2, _device.HostReadBarriers);
         Assert.False(scheduler.Current.MayWriteMappedMemory);
-
-        scheduler.Flush();
-        Assert.Equal(1, _device.HostReadBarriers);
     }
 
     [Fact]
