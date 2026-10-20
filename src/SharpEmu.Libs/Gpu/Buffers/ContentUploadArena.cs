@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.IO.Hashing;
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
@@ -27,12 +29,12 @@ public sealed class ContentUploadArena : IDisposable
     private readonly Arena[] _arenas;
     private int _active;
 
-    private static long _hits;
-    private static long _identityHits;
-    private static long _stores;
-    private static long _recycles;
-    private static long _refused;
-    private static long _collisions;
+    private static readonly ThreadCounter _hits = new();
+    private static readonly ThreadCounter _identityHits = new();
+    private static readonly ThreadCounter _stores = new();
+    private static readonly ThreadCounter _recycles = new();
+    private static readonly ThreadCounter _refused = new();
+    private static readonly ThreadCounter _collisions = new();
 
     public ContentUploadArena(GpuDeviceInfo device, SubmissionScheduler scheduler)
     {
@@ -63,7 +65,7 @@ public sealed class ContentUploadArena : IDisposable
             }
 
             arena.LastUseTick = tick;
-            Interlocked.Increment(ref _identityHits);
+            _identityHits.Increment();
             buffer = arena.Buffer.Handle;
             offset = entry.Offset;
             return true;
@@ -87,7 +89,7 @@ public sealed class ContentUploadArena : IDisposable
             return false;
         }
 
-        var hash = Hash(data);
+        var hash = XxHash3.HashToUInt64(data);
         var tick = _scheduler.CurrentTick;
         for (var index = 0; index < _arenas.Length; index++)
         {
@@ -99,12 +101,12 @@ public sealed class ContentUploadArena : IDisposable
 
             if (entry.Size != data.Length || !data.SequenceEqual(arena.Mirror.AsSpan((int)entry.Offset, entry.Size)))
             {
-                Interlocked.Increment(ref _collisions);
+                _collisions.Increment();
                 break;
             }
 
             arena.LastUseTick = tick;
-            Interlocked.Increment(ref _hits);
+            _hits.Increment();
             buffer = arena.Buffer.Handle;
             offset = entry.Offset;
             return true;
@@ -148,7 +150,7 @@ public sealed class ContentUploadArena : IDisposable
             var other = _arenas[1 - _active];
             if (other.LastUseTick > _scheduler.CompletedTick)
             {
-                Interlocked.Increment(ref _refused);
+                _refused.Increment();
                 stored = active;
                 buffer = default;
                 offset = 0;
@@ -161,41 +163,23 @@ public sealed class ContentUploadArena : IDisposable
             _active = 1 - _active;
             active = other;
             aligned = 0;
-            Interlocked.Increment(ref _recycles);
+            _recycles.Increment();
         }
 
         active.Buffer.Write(aligned, data);
         data.CopyTo(active.Mirror.AsSpan((int)aligned));
         active.Offset = aligned + (ulong)data.Length;
         active.LastUseTick = tick;
-        Interlocked.Increment(ref _stores);
+        _stores.Increment();
         stored = active;
         buffer = active.Buffer.Handle;
         offset = aligned;
         return true;
     }
 
-    private static ulong Hash(ReadOnlySpan<byte> data)
-    {
-        var hash = 0xCBF29CE484222325ul ^ (ulong)data.Length;
-        var words = MemoryMarshal.Cast<byte, ulong>(data[..(data.Length & ~7)]);
-        foreach (var word in words)
-        {
-            hash = (hash ^ word) * 0x100000001B3ul;
-            hash ^= hash >> 29;
-        }
-
-        foreach (var tail in data[(data.Length & ~7)..])
-        {
-            hash = (hash ^ tail) * 0x100000001B3ul;
-        }
-
-        return hash;
-    }
-
     public static string TakeReport() =>
-        FormattableString.Invariant($"[PERF][CONTENT_UPLOADS] hits={Interlocked.Exchange(ref _hits, 0)} identity_hits={Interlocked.Exchange(ref _identityHits, 0)} stores={Interlocked.Exchange(ref _stores, 0)} recycles={Interlocked.Exchange(ref _recycles, 0)} ") +
-        FormattableString.Invariant($"refused={Interlocked.Exchange(ref _refused, 0)} collisions={Interlocked.Exchange(ref _collisions, 0)}");
+        FormattableString.Invariant($"[PERF][CONTENT_UPLOADS] hits={_hits.Take()} identity_hits={_identityHits.Take()} stores={_stores.Take()} recycles={_recycles.Take()} ") +
+        FormattableString.Invariant($"refused={_refused.Take()} collisions={_collisions.Take()}");
 
     public void Dispose()
     {
