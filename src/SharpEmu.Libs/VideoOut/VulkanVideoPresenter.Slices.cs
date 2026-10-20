@@ -51,6 +51,11 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly ConcurrentDictionary<string, long[]> _roundTrips = new();
     private static readonly ThreadCounter _relayInWait = new();
     private static readonly ThreadCounter _relayInWaitTicks = new();
+    private static readonly ThreadCounter _validateBuffersSkipped = new();
+    private static readonly ThreadCounter _validateDeferredSkipped = new();
+    private static readonly ThreadCounter _validateImageTicks = new();
+    private static readonly ThreadCounter _validateBufferTicks = new();
+    private static readonly ThreadCounter _validateDeferredTicks = new();
     private static long _streamCopies;
     private static long _streamFallbacks;
     private static readonly ConcurrentDictionary<string, StrongBox<long>> _serialReasons = new();
@@ -71,7 +76,9 @@ internal static unsafe partial class VulkanVideoPresenter
         FormattableString.Invariant($"relay_in_wait={_relayInWait.Take()}/{_relayInWaitTicks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms ") +
         FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +
         FormattableString.Invariant($"worker_busy_ms={Interlocked.Exchange(ref _workerBusyTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} worker_items={Interlocked.Exchange(ref _workerItems, 0)} inline_ms={Interlocked.Exchange(ref _inlineTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
-        FormattableString.Invariant($"join_ms={Ticks(ref _joinTicks):F1} validate_ms={Ticks(ref _validateTicks):F1} prologue_ms={Ticks(ref _prologueTicks):F1} stolen_origin=ahead:{Interlocked.Exchange(ref _stolenByOrigin[0], 0)},tail:{Interlocked.Exchange(ref _stolenByOrigin[1], 0)},rest:{Interlocked.Exchange(ref _stolenByOrigin[2], 0)} ") +
+        FormattableString.Invariant($"join_ms={Ticks(ref _joinTicks):F1} validate_ms={Ticks(ref _validateTicks):F1} ") +
+        FormattableString.Invariant($"validate_kind_ms=images:{Ticks(_validateImageTicks):F1},buffers:{Ticks(_validateBufferTicks):F1},deferred:{Ticks(_validateDeferredTicks):F1} validate_skipped=buffers:{_validateBuffersSkipped.Take()},deferred:{_validateDeferredSkipped.Take()} ") +
+        FormattableString.Invariant($"prologue_ms={Ticks(ref _prologueTicks):F1} stolen_origin=ahead:{Interlocked.Exchange(ref _stolenByOrigin[0], 0)},tail:{Interlocked.Exchange(ref _stolenByOrigin[1], 0)},rest:{Interlocked.Exchange(ref _stolenByOrigin[2], 0)} ") +
         FormattableString.Invariant($"stolen_age=lt100us:{Interlocked.Exchange(ref _stolenByAge[0], 0)},lt1ms:{Interlocked.Exchange(ref _stolenByAge[1], 0)},ge1ms:{Interlocked.Exchange(ref _stolenByAge[2], 0)} ") +
         FormattableString.Invariant($"wait_origin_ms=ahead:{Ticks(ref _waitByOrigin[0]):F1},tail:{Ticks(ref _waitByOrigin[1]):F1},rest:{Ticks(ref _waitByOrigin[2]):F1} ") +
         FormattableString.Invariant($"stolen={Interlocked.Exchange(ref _slicesStolen, 0)} stolen_items={Interlocked.Exchange(ref _stolenItems, 0)} rest_chunks={Interlocked.Exchange(ref _restChunks, 0)} rest_items={Interlocked.Exchange(ref _restItems, 0)} ") +
@@ -81,6 +88,8 @@ internal static unsafe partial class VulkanVideoPresenter
         "serial_reasons=" + TakeSerialReasons() + " " + GuestImageCache.TakeSliceLookupReport() + " " + TakeGcReport() + " " + Diagnostics.ItemCostTally.TakeReport() + " posts=" + TakePosts();
 
     private static double Ticks(ref long ticks) => Interlocked.Exchange(ref ticks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+    private static double Ticks(ThreadCounter ticks) => ticks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     private static string TakeGcReport()
     {
@@ -192,6 +201,9 @@ internal static unsafe partial class VulkanVideoPresenter
         public readonly List<(ulong Address, uint[] Words)> KnownWrites = new();
         public readonly List<SubmissionUploadResources> Resources = new();
         public bool NeedsBdaSweep;
+        public long BufferSerial;
+        public long? ReadsVersion;
+        public bool MixedReadsVersions;
         public ulong LookupGeneration;
         public long MetadataGeneration;
         public IReadOnlyList<GuestSpan>? BdaSpans;
@@ -493,8 +505,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 var validateStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-                var valid = _imageCache.ValidateSliceImages(segment.Requests.Images, segment.Requests.LookupGeneration, segment.Requests.MetadataGeneration) &&
-                    _bufferCache.ValidateSliceBuffers(segment.Requests.Buffers) && ValidateDeferredItems(slice, segment);
+                var valid = ValidateSegment(slice, segment);
                 Interlocked.Add(ref _validateTicks, System.Diagnostics.Stopwatch.GetTimestamp() - validateStarted);
                 if (!valid)
                 {
@@ -547,6 +558,47 @@ internal static unsafe partial class VulkanVideoPresenter
                     slice.Host!.ReturnWorkerBuffer(buffer);
                 }
             }
+        }
+
+        private bool ValidateSegment(RenderSlice slice, SliceSegment segment)
+        {
+            var requests = segment.Requests;
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var valid = _imageCache.ValidateSliceImages(requests.Images, requests.LookupGeneration, requests.MetadataGeneration);
+            var imagesDone = System.Diagnostics.Stopwatch.GetTimestamp();
+            _validateImageTicks.Add(imagesDone - started);
+            if (!valid)
+            {
+                return false;
+            }
+
+            if (requests.BufferSerial == _bufferCache.RegistrationSerial)
+            {
+                _validateBuffersSkipped.Increment();
+            }
+            else
+            {
+                valid = _bufferCache.ValidateSliceBuffers(requests.Buffers);
+            }
+
+            var buffersDone = System.Diagnostics.Stopwatch.GetTimestamp();
+            _validateBufferTicks.Add(buffersDone - imagesDone);
+            if (!valid)
+            {
+                return false;
+            }
+
+            if (!requests.MixedReadsVersions && (requests.ReadsVersion is not { } version || version == _bufferCache.GpuModifiedVersion))
+            {
+                _validateDeferredSkipped.Increment();
+            }
+            else
+            {
+                valid = ValidateDeferredItems(slice, segment);
+            }
+
+            _validateDeferredTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - buffersDone);
+            return valid;
         }
 
         private bool ValidateDeferredItems(RenderSlice slice, SliceSegment segment)
@@ -672,6 +724,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         }
 
                         segment!.Count++;
+                        NoteReadsVersion(segment.Requests, slice.Items[index].Work!);
                     }
                     catch (SerialRequiredException serial)
                     {
@@ -724,9 +777,27 @@ internal static unsafe partial class VulkanVideoPresenter
             _presenter.RecordGlobalBarrier(BeginBatchedGuestCommands());
         }
 
+        private static void NoteReadsVersion(SliceRequests requests, SharpEmu.Libs.Agc.AgcExports.DeferredWork work)
+        {
+            if (work is not SharpEmu.Libs.Agc.AgcExports.DeferredDraw draw)
+            {
+                return;
+            }
+
+            if (requests.ReadsVersion is not { } version)
+            {
+                requests.ReadsVersion = draw.Reads.Version;
+            }
+            else if (version != draw.Reads.Version)
+            {
+                requests.MixedReadsVersions = true;
+            }
+        }
+
         private SliceSegment BeginSegment(int first)
         {
             var segment = new SliceSegment { First = first };
+            segment.Requests.BufferSerial = _buffers.Serial;
             segment.Requests.LookupGeneration = _imageCache.LookupGeneration;
             segment.Requests.MetadataGeneration = _imageCache.MetadataGeneration;
             _segment = segment;

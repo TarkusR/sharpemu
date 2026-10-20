@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Reflection;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
@@ -188,4 +190,92 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
         scheduler.RunCompletedOperations();
         Assert.Equal(["parked", "direct"], ran);
     }
+
+    [Fact]
+    public void JoinSkipsBufferValidationOnlyWhileTheRegistrationsMatchTheSegmentSnapshot()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        var page = GuestBufferCache.CachingPageSize;
+        var skipped = SliceCounter("_validateBuffersSkipped");
+        presenter.Run(() =>
+        {
+            var first = harness.Cache.ObtainBuffer(address, 4, isWritten: true);
+            var snapshot = harness.Cache.RefreshSnapshot();
+            var (slice, segment) = NewSegment(presenter, snapshot.Serial, new BufferSliceUse(address, 4, false, false, false, first.Buffer));
+
+            var before = skipped.Total;
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            Assert.Equal(before + 1, skipped.Total);
+
+            _ = harness.Cache.ObtainBuffer(address + 2 * page, 4, isWritten: true);
+            Assert.NotEqual(snapshot.Serial, harness.Cache.RegistrationSerial);
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            Assert.Equal(before + 1, skipped.Total);
+
+            _ = harness.Cache.FindBuffer(address, 2 * page + 4);
+            Assert.False(ValidateSegment(presenter, slice, segment));
+            Assert.Equal(before + 1, skipped.Total);
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void JoinSkipsDeferredValidationOnlyWhenEveryDrawReadUnderTheCurrentVersion()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        var skipped = SliceCounter("_validateDeferredSkipped");
+        presenter.Run(() =>
+        {
+            var first = harness.Cache.ObtainBuffer(address, 4, isWritten: true);
+            var (slice, segment) = NewSegment(presenter, harness.Cache.RefreshSnapshot().Serial, new BufferSliceUse(address, 4, false, false, false, first.Buffer));
+            var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+            var requestsType = requests.GetType();
+
+            var before = skipped.Total;
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            Assert.Equal(before + 1, skipped.Total);
+
+            requestsType.GetField("ReadsVersion")!.SetValue(requests, (long?)harness.Cache.GpuModifiedVersion);
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            Assert.Equal(before + 2, skipped.Total);
+
+            requestsType.GetField("ReadsVersion")!.SetValue(requests, (long?)(harness.Cache.GpuModifiedVersion - 1));
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            Assert.Equal(before + 2, skipped.Total);
+
+            requestsType.GetField("ReadsVersion")!.SetValue(requests, (long?)harness.Cache.GpuModifiedVersion);
+            requestsType.GetField("MixedReadsVersions")!.SetValue(requests, true);
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            Assert.Equal(before + 2, skipped.Total);
+        });
+        harness.Shutdown();
+    }
+
+    private static readonly Type SliceType = typeof(VulkanVideoPresenter).GetNestedType("RenderSlice", BindingFlags.NonPublic)!;
+    private static readonly Type SegmentType = typeof(VulkanVideoPresenter).GetNestedType("SliceSegment", BindingFlags.NonPublic)!;
+
+    private static ThreadCounter SliceCounter(string name) =>
+        (ThreadCounter)typeof(VulkanVideoPresenter).GetField(name, BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+
+    private static (object Slice, object Segment) NewSegment(PresenterUnderTest presenter, long bufferSerial, BufferSliceUse use)
+    {
+        var slice = Activator.CreateInstance(SliceType, nonPublic: true)!;
+        var segment = Activator.CreateInstance(SegmentType, nonPublic: true)!;
+        var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+        var requestsType = requests.GetType();
+        requestsType.GetField("BufferSerial")!.SetValue(requests, bufferSerial);
+        requestsType.GetField("LookupGeneration")!.SetValue(requests, presenter.Harness.Images.LookupGeneration);
+        requestsType.GetField("MetadataGeneration")!.SetValue(requests, presenter.Harness.Images.MetadataGeneration);
+        ((List<BufferSliceUse>)requestsType.GetField("Buffers")!.GetValue(requests)!).Add(use);
+        return (slice, segment);
+    }
+
+    private static bool ValidateSegment(PresenterUnderTest presenter, object slice, object segment) =>
+        (bool)PresenterUnderTest.PresenterType.GetMethod("ValidateSegment", PresenterUnderTest.InstanceMembers)!.Invoke(presenter.Instance, [slice, segment])!;
 }
