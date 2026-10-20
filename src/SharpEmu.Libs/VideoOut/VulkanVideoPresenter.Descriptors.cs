@@ -1063,6 +1063,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            foreach (var stage in preparation.Stages)
+            {
+                if (!stage.Program.UsesDeviceAddresses) continue;
+                foreach (var range in stage.Stage.Resources.DeviceAddressRanges)
+                {
+                    _bufferCache.NoteDeviceAddressWindow(range.Base);
+                }
+            }
+
             _bufferCache.PrepareBda(spans, _bdaSpanMapping);
         }
 

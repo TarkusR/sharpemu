@@ -566,6 +566,9 @@ internal static class RenderPhaseProfile
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(BufferUploadProfile.TakeTotalsReport());
+        Console.Error.WriteLine(BufferUploadProfile.TakeDirtyTrackingReport());
+        Console.Error.WriteLine(BufferUploadProfile.TakeSyncPointReport());
+        Console.Error.WriteLine("[PERF][MATERIALIZE] " + SharpEmu.ShaderCompiler.Resources.MaterializationTally.TakeReport());
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeOutcomeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeAsyncReadbackReport());

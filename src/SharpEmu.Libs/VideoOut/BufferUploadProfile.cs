@@ -168,6 +168,13 @@ internal static class BufferUploadProfile
         return report;
     }
 
+    internal static string TakeDirtyTrackingReport() =>
+        "[PERF][DIRTY_TRACKING] " + Gpu.Buffers.GuestBufferCache.TakeDirtyTrackingReport() + " " + SharpEmu.HLE.GpuMemory.ProtectionCauseCounts.TakeReport() + " " +
+        Gpu.Buffers.GpuBuffer.CopyRun.TakeReport() + " " + SharpEmu.ShaderCompiler.Resources.DeviceAddressRangePlanner.TakeUnboundedReport();
+
+    internal static string TakeSyncPointReport() =>
+        "[PERF][SYNC_POINTS] " + Gpu.Scheduling.GpuWorkerRelay.TakeRelayWaitReport() + " " + Gpu.GpuCommands.GpuCommandInterpreter.TakeAcquireMemoryReport();
+
     internal static string TakeTotalsReport() =>
         FormattableString.Invariant($"[PERF][BUFFER_SYNC_TOTAL] uploads={Interlocked.Exchange(ref _totalUploads, 0)} copies={Interlocked.Exchange(ref _totalCopies, 0)} bytes={Interlocked.Exchange(ref _totalBytes, 0)} range_bytes={Interlocked.Exchange(ref _totalRangeBytes, 0)} ") +
         TakeShapeReport() + " " +
