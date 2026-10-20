@@ -173,7 +173,15 @@ internal static class BufferUploadProfile
         TakeShapeReport() + " " +
         FormattableString.Invariant($"widened={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploads, 0)} widened_bytes={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploadBytes, 0)} ") +
         FormattableString.Invariant($"hot_skipped={SharpEmu.HLE.GpuMemory.TrackedRegion.TakeHotUploadsSkipped()} ") +
-        FormattableString.Invariant($"readbacks=async:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksStarted, 0)},sync:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSynchronous, 0)},no_writer:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksNoWriter, 0)},too_large:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksTooLarge, 0)},busy:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksBusy, 0)},slot_waits:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSlotWaits, 0)}");
+        FormattableString.Invariant($"readbacks=async:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksStarted, 0)},sync:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSynchronous, 0)},no_writer:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksNoWriter, 0)},too_large:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksTooLarge, 0)},busy:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksBusy, 0)},slot_waits:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSlotWaits, 0)} ") +
+        FormattableString.Invariant($"relay_hop_us=begin:{AverageMicroseconds(Gpu.Buffers.GuestBufferCache.RelayHopBeginTicks, Gpu.Buffers.GuestBufferCache.RelayHopBegin):F1},complete:{AverageMicroseconds(Gpu.Buffers.GuestBufferCache.RelayHopCompleteTicks, Gpu.Buffers.GuestBufferCache.RelayHopComplete):F1}");
+
+    private static double AverageMicroseconds(SharpEmu.HLE.Diagnostics.ThreadCounter ticks, SharpEmu.HLE.Diagnostics.ThreadCounter count)
+    {
+        var total = ticks.Take();
+        var samples = count.Take();
+        return samples == 0 ? 0 : total * 1_000_000.0 / Stopwatch.Frequency / samples;
+    }
 
     internal readonly struct Scope : IDisposable
     {

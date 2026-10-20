@@ -847,7 +847,7 @@ internal static partial class VulkanVideoPresenter
 
             try
             {
-                while (_presenter.NextSegment(slice) is { } segment)
+                while (_presenter.NextSegment(slice, betweenItems) is { } segment)
                 {
                     var end = segment.First + segment.Count;
                     var joinStarted = Stopwatch.GetTimestamp();

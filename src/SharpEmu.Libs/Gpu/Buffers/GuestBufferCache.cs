@@ -1518,11 +1518,15 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 var waitForSlot = slotWaits < MaxReadbackSlotWaits;
                 PendingDownload? pending = null;
                 var slotsBusy = false;
+                var beginPosted = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (!_relay.TryRunOnGpuQueue(() =>
                         pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending, markHot, waitForSlot, out slotsBusy)))
                 {
                     return AwaitShutdown();
                 }
+
+                RelayHopBegin.Increment();
+                RelayHopBeginTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - beginPosted);
 
                 if (slotsBusy)
                 {
@@ -1540,10 +1544,14 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
                 readback.Wait(pending.Ticket);
                 var complete = false;
+                var completePosted = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (!_relay.TryRunOnGpuQueue(() => complete = CompleteReadMemoryOnGpu(pending, consumed: true)))
                 {
                     return AwaitShutdown();
                 }
+
+                RelayHopComplete.Increment();
+                RelayHopCompleteTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - completePosted);
 
                 if (complete)
                 {
@@ -2377,6 +2385,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     public static long ReadbacksBusy;
     public static long ReadbacksSlotWaits;
     public static long ReadbacksSynchronous;
+    public static readonly ThreadCounter RelayHopBegin = new();
+    public static readonly ThreadCounter RelayHopBeginTicks = new();
+    public static readonly ThreadCounter RelayHopComplete = new();
+    public static readonly ThreadCounter RelayHopCompleteTicks = new();
 
     private bool TryBeginDownloadAsync(List<DownloadPiece> copies, out VulkanAsyncReadback.Ticket ticket, out ulong[] writeTicks, out bool busy)
     {

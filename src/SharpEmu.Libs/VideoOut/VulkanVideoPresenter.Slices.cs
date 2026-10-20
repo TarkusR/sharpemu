@@ -6,6 +6,7 @@ namespace SharpEmu.Libs.VideoOut;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
@@ -48,6 +49,8 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly long[] _stolenByAge = new long[3];
     private static readonly long[] _tailByProducer = new long[5];
     private static readonly ConcurrentDictionary<string, long[]> _roundTrips = new();
+    private static readonly ThreadCounter _relayInWait = new();
+    private static readonly ThreadCounter _relayInWaitTicks = new();
     private static long _streamCopies;
     private static long _streamFallbacks;
     private static readonly ConcurrentDictionary<string, StrongBox<long>> _serialReasons = new();
@@ -65,6 +68,7 @@ internal static unsafe partial class VulkanVideoPresenter
         FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)} ") +
         FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
         FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
+        FormattableString.Invariant($"relay_in_wait={_relayInWait.Take()}/{_relayInWaitTicks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms ") +
         FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +
         FormattableString.Invariant($"worker_busy_ms={Interlocked.Exchange(ref _workerBusyTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} worker_items={Interlocked.Exchange(ref _workerItems, 0)} inline_ms={Interlocked.Exchange(ref _inlineTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
         FormattableString.Invariant($"join_ms={Ticks(ref _joinTicks):F1} validate_ms={Ticks(ref _validateTicks):F1} prologue_ms={Ticks(ref _prologueTicks):F1} stolen_origin=ahead:{Interlocked.Exchange(ref _stolenByOrigin[0], 0)},tail:{Interlocked.Exchange(ref _stolenByOrigin[1], 0)},rest:{Interlocked.Exchange(ref _stolenByOrigin[2], 0)} ") +
@@ -392,9 +396,10 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // The next finished segment of the slice in order, or null once the recording thread is done with it.
-        internal SliceSegment? NextSegment(RenderSlice slice)
+        internal SliceSegment? NextSegment(RenderSlice slice, Action whileWaiting)
         {
             var waitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            var relayTicks = 0L;
             var spinner = new SpinWait();
             SliceSegment? segment;
             while (!slice.Segments.TryDequeue(out segment))
@@ -406,7 +411,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         break;
                     }
 
-                    var waitedForDone = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted;
+                    var waitedForDone = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted - relayTicks;
                     Interlocked.Add(ref _sliceWaitTicks, waitedForDone);
                     Interlocked.Add(ref _waitByOrigin[slice.Origin], waitedForDone);
                     if (slice.Failure is { } failure)
@@ -417,6 +422,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     return null;
                 }
 
+                if (_relay.HasPendingCommands)
+                {
+                    relayTicks += RunRelayInSegmentWait(whileWaiting);
+                    continue;
+                }
+
                 if (spinner.Count < 200)
                 {
                     spinner.SpinOnce(sleep1Threshold: -1);
@@ -424,21 +435,47 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 slice.Progress.Reset();
-                if (slice.Segments.TryDequeue(out segment))
+                Interlocked.Exchange(ref _segmentWaitSlice, slice);
+                try
                 {
-                    break;
-                }
+                    if (slice.Segments.TryDequeue(out segment))
+                    {
+                        break;
+                    }
 
-                if (!slice.Done.IsSet)
+                    if (!slice.Done.IsSet && !_relay.HasPendingCommands)
+                    {
+                        slice.Progress.Wait();
+                    }
+                }
+                finally
                 {
-                    slice.Progress.Wait();
+                    Volatile.Write(ref _segmentWaitSlice, null);
                 }
             }
 
-            var waited = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted;
+            var waited = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted - relayTicks;
             Interlocked.Add(ref _sliceWaitTicks, waited);
             Interlocked.Add(ref _waitByOrigin[slice.Origin], waited);
             return segment;
+        }
+
+        private RenderSlice? _segmentWaitSlice;
+
+        private void WakeRenderThreadForRelay()
+        {
+            WakeRenderThread();
+            Volatile.Read(ref _segmentWaitSlice)?.Progress.Set();
+        }
+
+        private static long RunRelayInSegmentWait(Action whileWaiting)
+        {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            whileWaiting();
+            var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            _relayInWait.Increment();
+            _relayInWaitTicks.Add(ticks);
+            return ticks;
         }
 
         // Joins one segment in stream order: validates what the recording thread resolved, records the
