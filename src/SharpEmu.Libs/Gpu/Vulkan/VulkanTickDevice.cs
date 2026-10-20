@@ -66,8 +66,17 @@ internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDispo
 
     public void EndBuffer(nint buffer)
     {
-        _profile?.WriteMarker(new CommandBuffer(buffer), VulkanCommandProfile.IntervalKind.Tail);
-        VulkanTickDevice.RequireSuccess(_vk.EndCommandBuffer(new CommandBuffer(buffer)), "vkEndCommandBuffer(scheduler)");
+        var command = new CommandBuffer(buffer);
+        _profile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Tail);
+        var hostRead = new MemoryBarrier2
+        {
+            SType = StructureType.MemoryBarrier2,
+            SrcAccessMask = AccessFlags2.MemoryWriteBit,
+            DstAccessMask = AccessFlags2.HostReadBit,
+        };
+        VulkanSynchronization.PipelineBarrier(_vk, command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0,
+            1, &hostRead, 0, null, 0, null);
+        VulkanTickDevice.RequireSuccess(_vk.EndCommandBuffer(command), "vkEndCommandBuffer(scheduler)");
     }
 
     public void Dispose() => _vk.DestroyCommandPool(_device, _pool, null);

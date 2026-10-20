@@ -85,6 +85,25 @@ public sealed class GpuBufferTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void MappedDeviceLocal_RanksOnlyHostVisibleDeviceMemoryAndBudgetsNothingWithoutIt()
+    {
+        if (_vulkan is null) return;
+        var info = _vulkan.DeviceInfo;
+        const MemoryPropertyFlags mapped = MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.DeviceLocalBit;
+        var allTypes = info.MemoryTypeCount >= 32 ? uint.MaxValue : (1u << (int)info.MemoryTypeCount) - 1;
+        var ranked = GpuBuffer.RankMemoryTypes(info, allTypes, GpuBufferUsage.MappedDeviceLocal).ToArray();
+
+        Assert.All(ranked, index => Assert.Equal(mapped, info.GetMemoryTypeFlags(index) & mapped));
+        if (ranked.Length == 0)
+        {
+            Assert.Equal(0UL, info.MappedDeviceLocalBudget);
+            return;
+        }
+
+        Assert.True(info.MappedDeviceLocalBudget <= info.GetMemoryHeapSize(info.GetMemoryHeapIndex(ranked[0])) / 4);
+    }
+
+    [Fact]
     public void SlabBuffers_ShareAChunkAndRecycleZeroedOnlyAfterForeignReads()
     {
         if (_vulkan is null) return;

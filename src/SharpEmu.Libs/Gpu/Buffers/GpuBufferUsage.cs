@@ -10,6 +10,7 @@ public enum GpuBufferUsage : byte
     Download,
     Stream,
     HostCachedStream,
+    MappedDeviceLocal,
 }
 
 public static class GpuMemoryPlacement

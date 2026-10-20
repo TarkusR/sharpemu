@@ -28,7 +28,8 @@ public unsafe class GpuBuffer : IDisposable
     private const AccessFlags HostAccess = AccessFlags.HostReadBit | AccessFlags.HostWriteBit;
 
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("GPU");
-    private static readonly int[] _loggedMemoryTypes = new int[(int)GpuBufferUsage.HostCachedStream + 1];
+    private static readonly int[] _loggedMemoryTypes = new int[(int)GpuBufferUsage.MappedDeviceLocal + 1];
+    private static readonly int[] _loggedFallbackTypes = new int[(int)GpuBufferUsage.MappedDeviceLocal + 1];
 
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
@@ -89,33 +90,45 @@ public unsafe class GpuBuffer : IDisposable
 
         // The best-scored type first; a full heap falls through to the next candidate.
         var result = Result.ErrorOutOfDeviceMemory;
-        var candidates = RankMemoryTypes(device, requirements.MemoryTypeBits, usage).ToArray();
+        var candidates = RankAllocationCandidates(device, requirements.MemoryTypeBits, usage);
+        var chosen = -1;
+        var slabFailed = false;
+        var firstFailure = Result.Success;
         if (allowSlab && GpuMemorySlabs.Fits(requirements))
         {
-            foreach (var candidate in candidates)
+            for (var index = 0; index < candidates.Length; index++)
             {
-                if (device.Slabs.TryAllocate(candidate, withAddress, requirements, out var block))
+                if (device.Slabs.TryAllocate(candidates[index], withAddress, requirements, out var block))
                 {
                     _slab = block;
                     _memory = block.Memory;
                     _memoryOffset = block.Offset;
                     _mapped = block.Mapped;
-                    allocateInfo.MemoryTypeIndex = candidate;
+                    allocateInfo.MemoryTypeIndex = candidates[index];
                     result = Result.Success;
+                    chosen = index;
                     break;
                 }
+
+                slabFailed = true;
             }
         }
 
         if (_slab is null)
         {
-            foreach (var candidate in candidates)
+            for (var index = 0; index < candidates.Length; index++)
             {
-                allocateInfo.MemoryTypeIndex = candidate;
+                allocateInfo.MemoryTypeIndex = candidates[index];
                 result = device.AllocateMemory(allocateInfo, out _memory);
                 if (result == Result.Success)
                 {
+                    chosen = index;
                     break;
+                }
+
+                if (firstFailure == Result.Success)
+                {
+                    firstFailure = result;
                 }
             }
         }
@@ -126,6 +139,11 @@ public unsafe class GpuBuffer : IDisposable
         var properties = device.GetMemoryTypeFlags(allocateInfo.MemoryTypeIndex);
         IsCoherent = (properties & MemoryPropertyFlags.HostCoherentBit) != 0;
         NotePlacement(usage, allocateInfo.MemoryTypeIndex, properties);
+        if (chosen > 0)
+        {
+            NoteFallback(device, usage, size, requirements.MemoryTypeBits, candidates[0], allocateInfo.MemoryTypeIndex, _slab is not null,
+                slabFailed && firstFailure == Result.Success ? "the slab chunk allocation failed" : firstFailure.ToString());
+        }
         if (_slab is null && (properties & MemoryPropertyFlags.HostVisibleBit) != 0)
         {
             void* pointer;
@@ -158,7 +176,15 @@ public unsafe class GpuBuffer : IDisposable
 
     public bool IsCoherent { get; }
 
+    public bool IsMapped => _mapped != null;
+
     public GpuBufferUsage Usage { get; }
+
+    public int Readbacks { get; private set; }
+
+    public void NoteReadback() => Readbacks++;
+
+    public void ForgetReadbacks() => Readbacks = 0;
 
     public ulong CpuAddress { get; }
 
@@ -241,7 +267,7 @@ public unsafe class GpuBuffer : IDisposable
 
     public void Invalidate(ulong offset, ulong size)
     {
-        if (Usage != GpuBufferUsage.Download || offset > Size || size > Size - offset)
+        if (_mapped == null || offset > Size || size > Size - offset)
         {
             throw SubmissionScheduler.Fatal("The buffer invalidation range is invalid.");
         }
@@ -251,6 +277,12 @@ public unsafe class GpuBuffer : IDisposable
             var range = GetMappedRange(offset, size);
             RequireSuccess(_device.Vk.InvalidateMappedMemoryRanges(_device.Device, 1, &range), "vkInvalidateMappedMemoryRanges");
         }
+    }
+
+    public ReadOnlySpan<byte> ReadMapped(ulong offset, ulong size)
+    {
+        Invalidate(offset, size);
+        return new ReadOnlySpan<byte>(_mapped + offset, checked((int)size));
     }
 
     public void CopyFrom(
@@ -539,11 +571,35 @@ public unsafe class GpuBuffer : IDisposable
         Log.Info(FormattableString.Invariant($"{usage} buffers use memory type {memoryType}: {properties}"));
     }
 
+    private static void NoteFallback(GpuDeviceInfo device, GpuBufferUsage usage, ulong size, uint typeBits, uint preferredType, uint memoryType,
+        bool slab, string reason)
+    {
+        var preferred = device.GetMemoryTypeFlags(preferredType);
+        var properties = device.GetMemoryTypeFlags(memoryType);
+        var bit = 1 << (int)memoryType;
+        ref var logged = ref _loggedFallbackTypes[(int)usage];
+        if ((preferred & ~properties) == 0 || (Volatile.Read(ref logged) & bit) != 0 || (Interlocked.Or(ref logged, bit) & bit) != 0)
+        {
+            return;
+        }
+
+        Log.Warn(FormattableString.Invariant($"A {usage} buffer of 0x{size:X} bytes ({(slab ? "slab block" : "dedicated")}, allowed memory types 0x{typeBits:X}) fell back from memory type {preferredType} ({preferred}) to {memoryType} ({properties}) after {reason}"));
+    }
+
+    private static uint[] RankAllocationCandidates(GpuDeviceInfo device, uint typeBits, GpuBufferUsage usage)
+    {
+        var ranked = RankMemoryTypes(device, typeBits, usage);
+        return usage == GpuBufferUsage.MappedDeviceLocal
+            ? ranked.Concat(RankMemoryTypes(device, typeBits, GpuBufferUsage.DeviceLocal)).Distinct().ToArray()
+            : ranked.ToArray();
+    }
+
     internal static IEnumerable<uint> RankMemoryTypes(GpuDeviceInfo device, uint typeBits, GpuBufferUsage usage)
     {
         var (required, preferred, avoided) = usage switch
         {
             GpuBufferUsage.DeviceLocal => (MemoryPropertyFlags.None, MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.None),
+            GpuBufferUsage.MappedDeviceLocal => (MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.HostCoherentBit, MemoryPropertyFlags.HostCachedBit),
             GpuBufferUsage.Upload => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit, MemoryPropertyFlags.DeviceLocalBit),
             GpuBufferUsage.Download => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.HostCachedBit, MemoryPropertyFlags.DeviceLocalBit),
             GpuBufferUsage.HostCachedStream => (MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCachedBit, MemoryPropertyFlags.HostCoherentBit, MemoryPropertyFlags.DeviceLocalBit),
