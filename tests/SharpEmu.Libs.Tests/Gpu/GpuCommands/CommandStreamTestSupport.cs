@@ -91,6 +91,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public int PendingCommandRuns { get; private set; }
 
+    public PendingCommandSignal CommandSignal { get; set; } = PendingCommandSignal.AlwaysRaised;
+
     public bool FlipSlot { get; set; } = true;
 
     public bool FlipDone { get; set; } = true;

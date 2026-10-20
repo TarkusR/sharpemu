@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
@@ -117,6 +118,8 @@ public interface ICommandStreamHost
 
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();
+
+    PendingCommandSignal CommandSignal => PendingCommandSignal.AlwaysRaised;
 
     // Starts a slice of a submission; the geometry snapshots were captured when it was submitted.
     void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots);

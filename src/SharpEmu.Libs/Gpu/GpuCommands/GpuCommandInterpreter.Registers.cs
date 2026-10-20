@@ -141,17 +141,14 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var count = packet.Length - 2;
-        for (var index = 0u; index < count; index++)
+        if (count > RegisterBankLayout.ShaderRegisterCount - offset)
         {
-            if (offset + index >= RegisterBankLayout.ShaderRegisterCount)
-            {
-                throw _host.Fatal($"The shader register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
-            }
-
-            Registers.Shader[offset + index] = payload[1 + (int)index];
+            throw _host.Fatal($"The shader register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
         }
 
-        return RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count)) + 1;
+        var values = payload.Slice(1, (int)count);
+        Registers.Shader.SetRange(offset, values);
+        return RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, values) + 1;
     }
 
     internal uint SetUserConfigRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)

@@ -16,7 +16,7 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
     private readonly Queue<Action> _commands = new();
     private readonly Action _wake;
     private readonly Func<Action, Action, bool>? _tryEnqueueAfterPendingWork;
-    private int _pendingCount;
+    private readonly PendingCommandSignal _pending = new();
     private bool _accepting = true;
 
     private sealed class HandoffTiming
@@ -82,7 +82,9 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
 
     public bool IsGpuQueueThread => _boundWorker == this;
 
-    public bool HasPendingCommands => Volatile.Read(ref _pendingCount) != 0;
+    public bool HasPendingCommands => _pending.IsRaised;
+
+    public PendingCommandSignal CommandSignal => _pending;
 
     public void BindCurrentThread() => _boundWorker = this;
 
@@ -116,7 +118,7 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
             }
 
             _commands.Enqueue(work);
-            Interlocked.Increment(ref _pendingCount);
+            _pending.Raise();
             if (timing is not null)
                 timing.Published = GuestMemoryProfile.GetTimestamp();
         }
@@ -142,7 +144,7 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
             lock (_gate)
             {
                 command = _commands.Dequeue();
-                Interlocked.Decrement(ref _pendingCount);
+                _pending.Lower();
             }
 
             command();

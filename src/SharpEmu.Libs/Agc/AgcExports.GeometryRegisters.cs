@@ -32,11 +32,11 @@ public static partial class AgcExports
                 startRegister &= 0x0FFF_FFFFu;
             }
 
-            var directDestination = operation switch
+            var directBank = operation switch
             {
-                ItSetShReg => state.ShRegisters,
-                ItSetContextReg => state.CxRegisters,
-                _ => state.UcRegisters,
+                ItSetShReg => RShRegsIndirect,
+                ItSetContextReg => RCxRegsIndirect,
+                _ => RUcRegsIndirect,
             };
             for (uint index = 0; index < packetLength - 2; index++)
             {
@@ -48,7 +48,7 @@ public static partial class AgcExports
                     return;
                 }
 
-                directDestination[startRegister + index] = value;
+                SetSubmittedRegister(state, directBank, startRegister + index, value);
                 if (operation == ItSetContextReg &&
                     startRegister + index is DbZInfo or DbDepthSizeXy)
                 {
@@ -69,7 +69,6 @@ public static partial class AgcExports
             return;
         }
 
-        Dictionary<uint, uint> destination;
         uint registerCount;
         ulong registersAddress;
         uint indirectRegister;
@@ -106,12 +105,6 @@ public static partial class AgcExports
             return;
         }
 
-        destination = indirectRegister switch
-        {
-            RCxRegsIndirect => state.CxRegisters,
-            RShRegsIndirect => state.ShRegisters,
-            _ => state.UcRegisters,
-        };
         var tableBytes = checked((int)registerCount * 8);
         var table = tableBytes <= IndirectTableStackBytes ? stackalloc byte[tableBytes] : new byte[tableBytes];
         var tableRead = tableBytes != 0 && ctx.Memory.TryRead(registersAddress, table);
@@ -143,7 +136,7 @@ public static partial class AgcExports
                 continue;
             }
 
-            destination[registerOffset] = value;
+            SetSubmittedRegister(state, indirectRegister, registerOffset, value);
             if (indirectRegister == RCxRegsIndirect)
             {
             }
@@ -151,6 +144,22 @@ public static partial class AgcExports
             {
                 ApplyUcIndexTypeIfNeeded(state, registerOffset, value);
             }
+        }
+    }
+
+    private static void SetSubmittedRegister(SubmittedDcbState state, uint bank, uint offset, uint value)
+    {
+        switch (bank)
+        {
+            case RShRegsIndirect:
+                state.ShRegisters[offset] = value;
+                break;
+            case RCxRegsIndirect:
+                state.CxRegisters[offset] = value;
+                break;
+            default:
+                state.UcRegisters[offset] = value;
+                break;
         }
     }
 

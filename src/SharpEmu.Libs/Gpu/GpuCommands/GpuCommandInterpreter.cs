@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -32,6 +33,9 @@ public sealed partial class GpuCommandInterpreter
 
     private readonly ICommandStreamHost _host;
     private readonly List<uint[]> _payloadScratchByDepth = new();
+    private readonly List<PacketWindow> _packetWindowsByDepth = new();
+    private long _packetWindowGeneration;
+    private PendingCommandSignal _pendingCommands = PendingCommandSignal.AlwaysRaised;
     private readonly uint[] _constantRam = new uint[ConstantRamDwords];
     private PacketCursorStack? _execution;
     private bool _chainRequested;
@@ -196,6 +200,8 @@ public sealed partial class GpuCommandInterpreter
         execution.MadeProgress = false;
         // Forwarding is local to this slice, never a cached signal from an older submission.
         _lastWriteLength = 0;
+        _pendingCommands = _host.CommandSignal;
+        _packetWindowGeneration++;
         _execution = execution;
         try
         {
@@ -275,7 +281,11 @@ public sealed partial class GpuCommandInterpreter
     {
         while (execution.Depth > stopDepth)
         {
-            _host.RunPendingCommands();
+            if (_pendingCommands.IsRaised)
+            {
+                _host.RunPendingCommands();
+            }
+
             var cursorIndex = execution.Depth - 1;
             ref var cursor = ref execution.At(cursorIndex);
             if (cursor.Offset > cursor.DwordCount)
@@ -304,9 +314,13 @@ public sealed partial class GpuCommandInterpreter
 
             var packetAddress = cursor.Address + ((ulong)cursor.Offset * sizeof(uint));
             uint header;
+            PacketWindow? window;
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
             {
-                header = ReadDword(packetAddress, RenderPhaseProfile.CommandReadKind.Header);
+                window = ObtainPacketWindow(cursorIndex, in cursor, packetAddress);
+                header = window is null
+                    ? ReadDword(packetAddress, RenderPhaseProfile.CommandReadKind.Header)
+                    : window.Words[window.IndexOf(packetAddress)];
             }
 
             _packetSerial++;
@@ -365,9 +379,21 @@ public sealed partial class GpuCommandInterpreter
             }
 
             ReadOnlySpan<uint> payload;
-            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
+            if (window is not null && window.Holds(packetAddress, length))
             {
-                payload = ReadPayload(cursorIndex, packetAddress, length - 1);
+                payload = window.Words.AsSpan(window.IndexOf(packetAddress) + 1, (int)length - 1);
+            }
+            else
+            {
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketRead))
+                {
+                    payload = ReadPayload(cursorIndex, packetAddress, length - 1);
+                }
+            }
+
+            if (!KeepsPacketWindows(header, payload))
+            {
+                _packetWindowGeneration++;
             }
 
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
@@ -415,6 +441,87 @@ public sealed partial class GpuCommandInterpreter
             execution.At(cursorIndex).Offset += consumed;
             execution.MadeProgress = true;
         }
+    }
+
+    private sealed class PacketWindow
+    {
+        public const int CapacityDwords = 256;
+
+        public readonly uint[] Words = new uint[CapacityDwords];
+        public ulong Address;
+        public uint DwordCount;
+        public long Generation = -1;
+
+        public int IndexOf(ulong packetAddress) => (int)((packetAddress - Address) / sizeof(uint));
+
+        public bool Covers(ulong packetAddress, long generation) =>
+            Generation == generation && packetAddress >= Address && packetAddress - Address < (ulong)DwordCount * sizeof(uint);
+
+        public bool Holds(ulong packetAddress, uint packetDwords) => (uint)IndexOf(packetAddress) + packetDwords <= DwordCount;
+    }
+
+    private const ulong PacketWindowPageBytes = 0x1000;
+
+    private PacketWindow? ObtainPacketWindow(int depth, in PacketCursor cursor, ulong packetAddress)
+    {
+        if (cursor.FollowedChunkAdvance)
+        {
+            return null;
+        }
+
+        while (_packetWindowsByDepth.Count <= depth)
+        {
+            _packetWindowsByDepth.Add(new PacketWindow());
+        }
+
+        var window = _packetWindowsByDepth[depth];
+        if (window.Covers(packetAddress, _packetWindowGeneration))
+        {
+            return window;
+        }
+
+        var toPageEnd = (uint)((PacketWindowPageBytes - (packetAddress & (PacketWindowPageBytes - 1))) / sizeof(uint));
+        var dwords = Math.Min(Math.Min((uint)PacketWindow.CapacityDwords, cursor.Remaining), toPageEnd);
+        if (dwords < 2)
+        {
+            return null;
+        }
+
+        window.Generation = -1;
+        var words = window.Words.AsSpan(0, (int)dwords);
+        RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Header, words.Length * sizeof(uint));
+        if (!_host.TryReadGuest(packetAddress, MemoryMarshal.AsBytes(words)))
+        {
+            return null;
+        }
+
+        window.Address = packetAddress;
+        window.DwordCount = dwords;
+        window.Generation = _packetWindowGeneration;
+        return window;
+    }
+
+    private static bool KeepsPacketWindows(uint header, ReadOnlySpan<uint> payload)
+    {
+        var opcode = PacketHeader.Opcode(header);
+        if (opcode == PacketOpcode.Nop)
+        {
+            return PacketHeader.CustomCode(header) switch
+            {
+                PacketCustomCode.Zero => payload.IsEmpty || (payload[0] & 0xFFFF_0000u) != MarkerMagic,
+                PacketCustomCode.PushMarker or PacketCustomCode.PopMarker or PacketCustomCode.IndexCount or PacketCustomCode.DrawIndexAuto or
+                    PacketCustomCode.ShaderRegisterTable or PacketCustomCode.ContextRegisterTable or PacketCustomCode.UserConfigRegisterTable => true,
+                _ => false,
+            };
+        }
+
+        return opcode is PacketOpcode.SetContextRegister or PacketOpcode.SetShaderRegister or PacketOpcode.SetUserConfigRegister or
+            PacketOpcode.SetUserConfigRegisterIndex or PacketOpcode.SetContextRegisterIndirect or PacketOpcode.SetShaderRegisterIndirect or
+            PacketOpcode.SetUserConfigRegisterIndirect or PacketOpcode.IndexBase or PacketOpcode.IndexBufferSize or PacketOpcode.IndexType or
+            PacketOpcode.NumInstances or PacketOpcode.SetBase or PacketOpcode.DrawIndex2 or PacketOpcode.DrawIndexOffset2 or
+            PacketOpcode.DrawIndexAuto or PacketOpcode.DrawIndexMultiAuto or PacketOpcode.DrawIndirect or PacketOpcode.DrawIndexIndirect or
+            PacketOpcode.DrawIndirectMulti or PacketOpcode.DrawIndexIndirectMulti or PacketOpcode.DispatchDirect or
+            PacketOpcode.DispatchIndirect or PacketOpcode.DispatchDrawPreamble;
     }
 
     // The payload lives in a per-depth scratch buffer for the handler call only.
