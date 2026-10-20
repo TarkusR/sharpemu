@@ -39,7 +39,7 @@ public sealed partial class RenderExecutor
         }
 
         var key = new DynamicStateKey(
-            banks.Stamp(RegisterStamp.Context),
+            banks.ContextStamp,
             banks.Stamp(RegisterStamp.ContextDynamic),
             resolution.TargetVersion,
             state.ColorCount,

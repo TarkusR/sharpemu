@@ -317,15 +317,15 @@ public sealed class RegisterBanksSnapshotTests
     {
         var banks = NewBanks();
         var snapshot = banks.Snapshot();
-        var context = snapshot.Stamp(RegisterStamp.Context);
+        var context = snapshot.ContextStamp;
         var pixelUserData = snapshot.Stamp(RegisterStamp.PixelUserData);
 
         WriteContext(banks, DbDepthControl, 0x0000_0006);
         WriteShader(banks, SpiShaderUserDataPs0, 1);
 
-        Assert.Equal(context, snapshot.Stamp(RegisterStamp.Context));
+        Assert.Equal(context, snapshot.ContextStamp);
         Assert.Equal(pixelUserData, snapshot.Stamp(RegisterStamp.PixelUserData));
-        Assert.NotEqual(context, banks.Stamp(RegisterStamp.Context));
+        Assert.NotEqual(context, banks.ContextStamp);
         Assert.NotEqual(pixelUserData, banks.Stamp(RegisterStamp.PixelUserData));
     }
 

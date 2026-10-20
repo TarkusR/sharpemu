@@ -19,6 +19,67 @@ public sealed class RegisterStampsTests
 
     private static readonly string[] DynamicContextMembers = ["ScreenViewport", "BlendColor", "LineWidth", "PolygonOffset"];
 
+    private static readonly string[] ColorTargetMembers = ["ColorTargets", "ColorClearWord1", "RenderTargetMask", "ColorControl"];
+
+    private static readonly string[] DepthTargetMembers =
+    [
+        "DepthTarget", "DepthRenderOverride", "DepthBoundsMin", "DepthBoundsMax", "DepthClearValue", "StencilClearValue", "StencilControl",
+        "StencilMask", "ReservedDepthRegister", "ReservedDepthRegister1", "ReservedDepthRegister3", "DepthCountControl",
+    ];
+
+    private static readonly string[] ShaderInterfaceMembers = ["ShaderInterface", "Clip", "ShaderStages"];
+
+    private static readonly RegisterStamp[] ContextStamps =
+    [
+        RegisterStamp.ColorTargets, RegisterStamp.DepthTargets, RegisterStamp.ShaderInterface, RegisterStamp.PipelineState, RegisterStamp.ContextDynamic,
+    ];
+
+    private static RegisterStamp StampOfContextMember(string member) =>
+        ColorTargetMembers.Contains(member) ? RegisterStamp.ColorTargets
+        : DepthTargetMembers.Contains(member) ? RegisterStamp.DepthTargets
+        : ShaderInterfaceMembers.Contains(member) ? RegisterStamp.ShaderInterface
+        : RegisterStamp.PipelineState;
+
+    [Fact]
+    public void EachContextRegisterFamilyMovesOnlyItsConsumersStamp()
+    {
+        Assert.Equal(RegisterStamp.DepthTargets, RegisterStamps.ContextStampOf(DbDepthControl));
+        Assert.Equal(RegisterStamp.DepthTargets, RegisterStamps.ContextStampOf(DbZInfo));
+        Assert.Equal(RegisterStamp.DepthTargets, RegisterStamps.ContextStampOf(DbStencilControl));
+        Assert.Equal(RegisterStamp.ColorTargets, RegisterStamps.ContextStampOf(CbColor0Base + 0x0F));
+        Assert.Equal(RegisterStamp.ColorTargets, RegisterStamps.ContextStampOf(CbColor0Attrib3 + 7));
+        Assert.Equal(RegisterStamp.ShaderInterface, RegisterStamps.ContextStampOf(CbShaderMask));
+        Assert.Equal(RegisterStamp.ShaderInterface, RegisterStamps.ContextStampOf(SpiShaderColFormat));
+        Assert.Equal(RegisterStamp.ShaderInterface, RegisterStamps.ContextStampOf(PaClClipCntl));
+        Assert.Equal(RegisterStamp.PipelineState, RegisterStamps.ContextStampOf(CbBlend0Control));
+        Assert.Equal(RegisterStamp.PipelineState, RegisterStamps.ContextStampOf(PaSuScModeCntl));
+        Assert.Equal(RegisterStamp.ContextDynamic, RegisterStamps.ContextStampOf(PaClViewportXScale));
+
+        var banks = NewBanks();
+        var before = Stamps(banks);
+        RegisterWriteTable.WriteContextPacket(banks, Packet(PacketOpcode.SetContextRegister, 1), DbDepthControl, [0x0000_0006]);
+        Assert.Equal([RegisterStamp.DepthTargets], Moved(banks, before));
+    }
+
+    [Fact]
+    public void TheContextStampIsTheLatestOfTheNonDynamicContextStamps()
+    {
+        var banks = NewBanks();
+        var nonDynamic = new[] { RegisterStamp.ColorTargets, RegisterStamp.DepthTargets, RegisterStamp.ShaderInterface, RegisterStamp.PipelineState };
+        Assert.Equal(nonDynamic.Select(stamp => banks.Stamp(stamp)).Max(), banks.ContextStamp);
+        foreach (var offset in new[] { CbTargetMask, DbDepthControl, CbShaderMask, CbBlend0Control })
+        {
+            var previous = banks.ContextStamp;
+            RegisterWriteTable.WriteContextEntry(banks, offset, 1, 0x5000);
+            Assert.True(banks.ContextStamp > previous);
+            Assert.Equal(nonDynamic.Select(stamp => banks.Stamp(stamp)).Max(), banks.ContextStamp);
+        }
+
+        var unchanged = banks.ContextStamp;
+        RegisterWriteTable.WriteContextEntry(banks, PaClViewportXScale, 1, 0x5000);
+        Assert.Equal(unchanged, banks.ContextStamp);
+    }
+
     private static RegisterBanks NewBanks() => new(static message => new InvalidOperationException(message));
 
     private static PacketContext Packet(uint opcode, int valueCount) =>
@@ -37,7 +98,7 @@ public sealed class RegisterStampsTests
         var banks = NewBanks();
         var before = Stamps(banks);
         RegisterWriteTable.WriteContextEntry(banks, CbTargetMask, 0xF, 0x5000);
-        Assert.Equal([RegisterStamp.Context], Moved(banks, before));
+        Assert.Equal([RegisterStamp.ColorTargets], Moved(banks, before));
 
         before = Stamps(banks);
         RegisterWriteTable.WriteContextEntry(banks, PaClViewportXScale, BitConverter.SingleToUInt32Bits(960f), 0x5000);
@@ -58,7 +119,7 @@ public sealed class RegisterStampsTests
         Assert.Equal(Stamps(banks), taken);
 
         RegisterWriteTable.WriteContextEntry(banks, CbTargetMask, 0x3, 0x5000);
-        Assert.Equal([RegisterStamp.Context], Moved(banks, taken));
+        Assert.Equal([RegisterStamp.ColorTargets], Moved(banks, taken));
         Assert.Empty(Moved(snapshot, taken));
         Assert.Equal(Stamps(banks), Stamps(banks.Clone()));
     }
@@ -67,8 +128,8 @@ public sealed class RegisterStampsTests
     public void ARangeAcrossBothKindsOfContextRegistersMovesBothStamps()
     {
         Assert.Equal(1u << (int)RegisterStamp.ContextDynamic, RegisterStamps.ContextBitsFor(PaScGenericScissorTl, 2));
-        Assert.Equal(RegisterStamps.ContextBits, RegisterStamps.ContextBitsFor(PaScGenericScissorBr, 2));
-        Assert.Equal(1u << (int)RegisterStamp.Context, RegisterStamps.ContextBitsFor(CbTargetMask, 2));
+        Assert.Equal((1u << (int)RegisterStamp.ContextDynamic) | (1u << (int)RegisterStamp.PipelineState), RegisterStamps.ContextBitsFor(PaScGenericScissorBr, 2));
+        Assert.Equal((1u << (int)RegisterStamp.ColorTargets) | (1u << (int)RegisterStamp.ShaderInterface), RegisterStamps.ContextBitsFor(CbTargetMask, 2));
         Assert.Equal(0u, RegisterStamps.ContextBitsFor(CbTargetMask, 0));
     }
 
@@ -130,7 +191,7 @@ public sealed class RegisterStampsTests
 
         banks.ApplyContextState(operation);
 
-        Assert.Equal([RegisterStamp.Context, RegisterStamp.ContextDynamic], Moved(banks, before));
+        Assert.Equal(ContextStamps, Moved(banks, before));
     }
 
     [Fact]
@@ -140,7 +201,7 @@ public sealed class RegisterStampsTests
         banks.ApplyContextState(ContextStateOperation.Push);
         var before = Stamps(banks);
         banks.ApplyContextState(ContextStateOperation.Pop);
-        Assert.Equal([RegisterStamp.Context, RegisterStamp.ContextDynamic], Moved(banks, before));
+        Assert.Equal(ContextStamps, Moved(banks, before));
 
         before = Stamps(banks);
         banks.Reset();
@@ -231,7 +292,7 @@ public sealed class RegisterStampsTests
         var member = change[(separator + 1)..];
         return bank switch
         {
-            "Context" => moved.Contains(RegisterStamp.Context) ||
+            "Context" => moved.Contains(StampOfContextMember(member)) ||
                 (moved.Contains(RegisterStamp.ContextDynamic) && DynamicContextMembers.Contains(member)),
             "Shader" => member switch
             {

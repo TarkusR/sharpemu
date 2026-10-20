@@ -115,7 +115,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
 
         _host.Calls.Clear();
-        banks.MarkWritten(1u << (int)RegisterStamp.Context);
+        banks.MarkWritten(1u << (int)RegisterStamp.ColorTargets);
         _executor.DrawIndexed(9, banks, Indexed(6));
         Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
     }

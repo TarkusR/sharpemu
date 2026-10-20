@@ -43,6 +43,16 @@ public sealed class RegisterBanks
 
     public ulong Stamp(RegisterStamp stamp) => _stamps[(int)stamp];
 
+    public ulong Stamp(RegisterStamp first, RegisterStamp second) => Math.Max(_stamps[(int)first], _stamps[(int)second]);
+
+    public ulong Stamp(RegisterStamp first, RegisterStamp second, RegisterStamp third) =>
+        Math.Max(Math.Max(_stamps[(int)first], _stamps[(int)second]), _stamps[(int)third]);
+
+    public ulong ContextStamp =>
+        Math.Max(
+            Math.Max(_stamps[(int)RegisterStamp.ColorTargets], _stamps[(int)RegisterStamp.DepthTargets]),
+            Math.Max(_stamps[(int)RegisterStamp.ShaderInterface], _stamps[(int)RegisterStamp.PipelineState]));
+
     public void MarkWritten(uint stampBits)
     {
         while (stampBits != 0)

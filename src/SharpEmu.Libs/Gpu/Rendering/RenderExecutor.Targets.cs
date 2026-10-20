@@ -78,7 +78,7 @@ public sealed partial class RenderExecutor
     private DrawResolution ResolveTargetLayout(RegisterBanks banks)
     {
         var resolution = _drawResolution;
-        var contextStamp = banks.Stamp(RegisterStamp.Context);
+        var contextStamp = banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.DepthTargets, RegisterStamp.ShaderInterface);
         var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
         if (resolution.TargetContextStamp == contextStamp && resolution.TargetProgramsStamp == programsStamp)
         {
@@ -103,7 +103,7 @@ public sealed partial class RenderExecutor
             resolution.ColorSlots[resolution.ColorCount++] = resolvedSlot;
         }
 
-        resolution.Depth = DepthTargetResolver.Resolve(context, _host.FormatSupport, _host.Fatal);
+        resolution.Depth = DepthTargetResolver.Resolve(context, _host.FormatSupport, _fatal);
         resolution.PixelActive = HasActivePixelShader(banks);
         resolution.TargetContextStamp = contextStamp;
         resolution.TargetProgramsStamp = programsStamp;

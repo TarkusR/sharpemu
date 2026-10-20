@@ -220,7 +220,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         return ResolveGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound, -1,
             banks.Stamp(RegisterStamp.ShaderPrograms), banks.Stamp(RegisterStamp.VertexUserData), banks.Stamp(RegisterStamp.PixelUserData),
-            banks.Stamp(RegisterStamp.Context), null, mesh);
+            banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.ShaderInterface), null, mesh);
     }
 
     [ThreadStatic]
@@ -270,15 +270,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         FormattableString.Invariant($"compute_kept={Interlocked.Exchange(ref _computeKept, 0)} compute_rebound={Interlocked.Exchange(ref _computeRebound, 0)} compute_resolved={Interlocked.Exchange(ref _computeResolved, 0)}");
 
 
-    private bool TryKeepGraphicsPrograms(KeptGraphicsPrograms kept, ulong programsStamp, ulong vertexUserDataStamp, ulong pixelUserDataStamp, ulong contextStamp,
+    private bool TryKeepGraphicsPrograms(RegisterBanks banks, KeptGraphicsPrograms kept, ulong programsStamp, ulong vertexUserDataStamp, ulong pixelUserDataStamp, ulong interfaceStamp,
         ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound, int startInstanceUserData, out GraphicsPrograms programs)
     {
         programs = null!;
         if (kept.Programs is not { } previous || kept.ProgramsStamp != programsStamp || kept.VertexUserDataStamp != vertexUserDataStamp ||
-            kept.PixelUserDataStamp != pixelUserDataStamp || kept.ContextStamp != contextStamp || kept.PixelActive != pixelActive ||
+            kept.PixelUserDataStamp != pixelUserDataStamp || kept.InterfaceStamp != interfaceStamp || kept.PixelActive != pixelActive ||
             kept.DepthBound != depthBound || kept.StartInstanceUserData != startInstanceUserData ||
             kept.Registrations != ShaderHeaderRegistry.Registrations || kept.ExportMappingCount != targetExportMapping.Length ||
             !targetExportMapping.SequenceEqual(kept.ExportMapping.AsSpan(0, kept.ExportMappingCount)))
+        {
+            return false;
+        }
+
+        if ((kept.PipelineStateStamp != 0 && kept.PipelineStateStamp != banks.Stamp(RegisterStamp.PipelineState)) ||
+            (pixelActive && kept.OutputBlend != PixelOutputBlend(banks.Context)) ||
+            (previous.VertexInput.ClipSpace.Enabled && !SameClipViewport(previous.VertexInput.ClipSpace, in banks.Context.ScreenViewport.Primary)))
         {
             return false;
         }
@@ -298,16 +305,24 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return true;
     }
 
+    private static bool SameClipViewport(in ClipSpaceTransform clipSpace, in ViewportRegisters viewport) =>
+        BitConverter.SingleToInt32Bits(clipSpace.ScaleX) == BitConverter.SingleToInt32Bits(viewport.XScale) &&
+        BitConverter.SingleToInt32Bits(clipSpace.ScaleY) == BitConverter.SingleToInt32Bits(viewport.YScale) &&
+        BitConverter.SingleToInt32Bits(clipSpace.OffsetX) == BitConverter.SingleToInt32Bits(viewport.XOffset) &&
+        BitConverter.SingleToInt32Bits(clipSpace.OffsetY) == BitConverter.SingleToInt32Bits(viewport.YOffset);
+
     private static void KeepGraphicsPrograms(KeptGraphicsPrograms kept, GraphicsPrograms programs, ulong programsStamp, ulong vertexUserDataStamp,
-        ulong pixelUserDataStamp, ulong contextStamp, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound, int startInstanceUserData,
-        long registrations)
+        ulong pixelUserDataStamp, ulong interfaceStamp, ulong pipelineStateStamp, uint outputBlend, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive,
+        bool depthBound, int startInstanceUserData, long registrations)
     {
         kept.Programs = programs.Available ? programs : null;
         kept.StartInstanceUserData = startInstanceUserData;
         kept.ProgramsStamp = programsStamp;
         kept.VertexUserDataStamp = vertexUserDataStamp;
         kept.PixelUserDataStamp = pixelUserDataStamp;
-        kept.ContextStamp = contextStamp;
+        kept.InterfaceStamp = interfaceStamp;
+        kept.PipelineStateStamp = pipelineStateStamp;
+        kept.OutputBlend = outputBlend;
         kept.PixelActive = pixelActive;
         kept.DepthBound = depthBound;
         kept.Registrations = registrations;
@@ -325,16 +340,16 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var programsStamp = banks.Stamp(RegisterStamp.ShaderPrograms);
         var vertexUserDataStamp = banks.Stamp(RegisterStamp.VertexUserData);
         var pixelUserDataStamp = banks.Stamp(RegisterStamp.PixelUserData);
-        var contextStamp = banks.Stamp(RegisterStamp.Context);
+        var interfaceStamp = banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.ShaderInterface);
         var keptGraphics = _keptGraphics ??= new KeptGraphicsPrograms();
-        if (TryKeepGraphicsPrograms(keptGraphics, programsStamp, vertexUserDataStamp, pixelUserDataStamp, contextStamp, targetExportMapping, pixelActive, depthBound, startInstanceUserData, out var keptPrograms))
+        if (TryKeepGraphicsPrograms(banks, keptGraphics, programsStamp, vertexUserDataStamp, pixelUserDataStamp, interfaceStamp, targetExportMapping, pixelActive, depthBound, startInstanceUserData, out var keptPrograms))
         {
             Interlocked.Increment(ref _graphicsKept);
             return keptPrograms;
         }
 
         return ResolveGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound, startInstanceUserData,
-            programsStamp, vertexUserDataStamp, pixelUserDataStamp, contextStamp, keptGraphics, null);
+            programsStamp, vertexUserDataStamp, pixelUserDataStamp, interfaceStamp, keptGraphics, null);
     }
 
     private GraphicsPrograms ResolveGraphicsPrograms(
@@ -346,7 +361,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ulong programsStamp,
         ulong vertexUserDataStamp,
         ulong pixelUserDataStamp,
-        ulong contextStamp,
+        ulong interfaceStamp,
         KeptGraphicsPrograms? keptGraphics,
         MeshDrawConfiguration? mesh)
     {
@@ -434,6 +449,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         SolidColorClear? solidClear = null;
         var disableBlending = false;
+        var blendDependent = false;
         if (mesh is null && pixelInfo is not null && vertexInfo.Attributes.Length == 0 && HasNoImagesOrBuffers(vertexStage) && HasNoImagesOrBuffers(pixelStage))
         {
             var vertexProgramWords = _programs.Decode(vertexSource);
@@ -445,6 +461,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
             else
             {
+                blendDependent = true;
                 disableBlending = IsTransparentPremultipliedFill(context, pixelOutputs, vertexInfo, vertexStage, pixelStage);
             }
         }
@@ -463,7 +480,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         };
         if (keptGraphics is not null)
         {
-            KeepGraphicsPrograms(keptGraphics, programs, programsStamp, vertexUserDataStamp, pixelUserDataStamp, contextStamp, targetExportMapping, pixelActive,
+            KeepGraphicsPrograms(keptGraphics, programs, programsStamp, vertexUserDataStamp, pixelUserDataStamp, interfaceStamp,
+                blendDependent ? banks.Stamp(RegisterStamp.PipelineState) : 0, pixelActive ? PixelOutputBlend(context) : 0, targetExportMapping, pixelActive,
                 depthBound, startInstanceUserData, ShaderHeaderRegistry.Registrations);
         }
 
@@ -548,8 +566,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping, bool depthBound, KeptPixelInput kept, out Gen5PixelOutputBinding[] outputs,
         out uint attributeCount, out bool dropUnwritten)
     {
-        var key = new PixelInputKey(banks.Stamp(RegisterStamp.Context), header, source.Hash, Pack(targetExportMapping),
-            targetExportMapping.Length, depthBound);
+        var key = new PixelInputKey(banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.ShaderInterface), PixelOutputBlend(banks.Context), header, source.Hash,
+            Pack(targetExportMapping), targetExportMapping.Length, depthBound);
         if (kept.Info is { } info && kept.Key == key)
         {
             outputs = kept.Outputs;
@@ -823,6 +841,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     private static bool UsesSourceAlpha(byte factor) => factor is 4 or 5;
+
+    private static uint PixelOutputBlend(ContextRegisters context)
+    {
+        var bits = context.BlendControls[0].UsesSecondarySource ? 1u : 0u;
+        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        {
+            if (BlendsWithSourceAlpha(context, slot))
+            {
+                bits |= 2u << (int)slot;
+            }
+        }
+
+        return bits;
+    }
 
     // Dual-source blending allows a single attachment,
     // but post passes often keep another target bound that the program never writes.
@@ -1561,7 +1593,9 @@ internal sealed class KeptGraphicsPrograms
     public ulong ProgramsStamp;
     public ulong VertexUserDataStamp;
     public ulong PixelUserDataStamp;
-    public ulong ContextStamp;
+    public ulong InterfaceStamp;
+    public ulong PipelineStateStamp;
+    public uint OutputBlend;
     public long Registrations;
     public bool PixelActive;
     public bool DepthBound;
@@ -1636,7 +1670,8 @@ internal sealed class KeptPixelInput
 }
 
 internal readonly record struct PixelInputKey(
-    ulong ContextStamp,
+    ulong InterfaceStamp,
+    uint OutputBlend,
     ShaderHeaderEntry? Header,
     ulong Hash,
     ulong ExportMappings,

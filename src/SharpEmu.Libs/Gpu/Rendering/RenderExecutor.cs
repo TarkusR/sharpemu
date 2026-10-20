@@ -55,6 +55,7 @@ public sealed partial class RenderExecutor
     private readonly IShaderPipelineProvider _pipelines;
     private readonly IResolvedCommandSink _recorder;
     private readonly RecordPool _pool;
+    private readonly Func<string, Exception> _fatal;
 
     public RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines)
         : this(host, pipelines, DefaultStrictDrawResources)
@@ -74,6 +75,7 @@ public sealed partial class RenderExecutor
     internal RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines, IResolvedCommandSink recorder, PendingGpuWrites? pendingWrites = null, RecordPool? pool = null)
     {
         _host = host;
+        _fatal = host.Fatal;
         _pipelines = pipelines;
         _recorder = recorder;
         PendingWrites = pendingWrites ?? new PendingGpuWrites();
@@ -525,7 +527,7 @@ public sealed partial class RenderExecutor
         record.Emission = emission;
         record.Index = indexSource;
         record.Context = context;
-        record.ContextStamp = banks.Stamp(RegisterStamp.Context);
+        record.ContextStamp = banks.ContextStamp;
         record.DynamicStamp = banks.Stamp(RegisterStamp.ContextDynamic);
         record.TargetVersion = _drawResolution.TargetVersion;
         record.Dynamic = ResolveDynamicState(banks, in dropped, record.SubmitId, record.PacketAddress);
@@ -834,7 +836,7 @@ public sealed partial class RenderExecutor
     private void ValidateChangedDrawRegisters(RegisterBanks banks)
     {
         var resolution = _drawResolution;
-        var contextStamp = banks.Stamp(RegisterStamp.Context);
+        var contextStamp = banks.ContextStamp;
         var userConfigStamp = banks.Stamp(RegisterStamp.UserConfig);
         if (resolution.ValidatedContextStamp == contextStamp && resolution.ValidatedUserConfigStamp == userConfigStamp)
         {
