@@ -123,6 +123,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     // Arguments: buffer, offset of the guest address in that buffer, guest address, size.
     internal Action<GpuBuffer, ulong, ulong, ulong>? OverlayGuestPublications { get; set; }
 
+    internal Func<long>? PublicationOrdinal { get; set; }
+
     public bool DefersGpuWriteProtection
     {
         get => _tracker.DefersGpuWriteProtection;
@@ -294,16 +296,29 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             if (StreamUseExceeded(guestAddress, size) && !_tracker.IsCpuWriteHotRange(guestAddress, size))
             {
                 Interlocked.Increment(ref StreamCleaned);
+                _streamCopyShares.Forget(guestAddress, size);
             }
             else
             {
                 using var streamProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStreamUpload);
+                var tick = _scheduler.CurrentTick;
+                var publications = PublicationOrdinal?.Invoke() ?? 0;
+                if (ObservationGated && _streamCopyShares.TryShare(guestAddress, size, _observation, tick, publications, out var sharedOffset))
+                {
+                    return (_stream, sharedOffset);
+                }
+
                 if (_stream.TryMap(size, out var streamOffset, StreamOffsetAlignment, allowWait: false) &&
                     _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))
                 {
                     _stream.Commit();
                     if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-stream-upload", guestAddress, size, $"offset=0x{streamOffset:X}");
                     OverlayGuestPublications?.Invoke(_stream, streamOffset, guestAddress, size);
+                    if (ObservationGated)
+                    {
+                        _streamCopyShares.Remember(guestAddress, size, _observation, tick, publications, streamOffset);
+                    }
+
                     return (_stream, streamOffset);
                 }
             }
@@ -375,6 +390,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private const int StreamUseSlots = 1024;
     internal const int StreamUsesBeforeClean = 3;
     private readonly (ulong Address, ulong Size, int Uses)[] _streamUses = new (ulong, ulong, int)[StreamUseSlots];
+    private readonly StreamCopyShares _streamCopyShares = new();
     public static long StreamCleaned;
     public static long StreamUses;
 

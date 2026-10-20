@@ -105,6 +105,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 includeLabels: access == GuestBufferCache.PublicationAccess.Write,
                 skipGpuSlots: access == GuestBufferCache.PublicationAccess.OverlaidRead);
             _bufferCache.OverlayGuestPublications = OverlayPendingDumps;
+            _bufferCache.PublicationOrdinal = () => _guestPublications.Ordinal;
             _bufferCache.StreamOffsetAlignment = Math.Max(_bufferCache.StreamOffsetAlignment, GuestStorageBufferOffsetAlignment);
             _bufferCache.DefersGpuWriteProtection = true;
             if (_readbackQueueFamilyIndex is { } readbackFamily)

@@ -491,6 +491,35 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void ObtainBuffer_RepeatedStreamReadInOneObservationSharesTheCopy()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Pattern(0x400, 3));
+        harness.Cache.ObservationGated = true;
+
+        var first = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x80, isWritten: false));
+        var second = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x80, isWritten: false));
+        Assert.Same(first.Buffer, second.Buffer);
+        Assert.Equal(first.Offset, second.Offset);
+
+        var before = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x100, 0x80, isWritten: false));
+        harness.Cache.NoteObservation();
+        harness.Write(address + 0x100, Pattern(0x80, 4));
+        var observed = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x100, 0x80, isWritten: false));
+        Assert.NotEqual(before.Offset, observed.Offset);
+        Assert.Equal(Pattern(0x80, 4), observed.Buffer.Mapped.Slice((int)observed.Offset, 0x80).ToArray());
+
+        var beforeSubmit = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x200, 0x80, isWritten: false));
+        harness.Worker.Run(() => harness.Scheduler.Finish());
+        var afterSubmit = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x200, 0x80, isWritten: false));
+        Assert.Same(beforeSubmit.Buffer, afterSubmit.Buffer);
+        Assert.NotEqual(beforeSubmit.Offset, afterSubmit.Offset);
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void ObtainBuffer_RewrittenLargeReadUsesCurrentBytesFromTheStreamRing()
     {
         if (_vulkan is null) return;
