@@ -670,13 +670,22 @@ internal static unsafe partial class VulkanVideoPresenter
         // so the draws queued before it are recorded first.
         public void FlushFrame()
         {
+            BufferUploadProfile.NoteGuestFrameLead(++_framesEnded - _bufferCache.FrameTicks.CompletedFrame(_scheduler.CompletedTick));
             if (OnCommandThread)
             {
-                _commandThread!.Post(Flush);
+                _commandThread!.Post(EndFrame);
                 return;
             }
 
+            EndFrame();
+        }
+
+        private long _framesEnded;
+
+        private void EndFrame()
+        {
             Flush();
+            _bufferCache.FrameTicks.NoteFrameSubmitted(_scheduler.CurrentTick - 1);
         }
 
         public void FlushAndWait()

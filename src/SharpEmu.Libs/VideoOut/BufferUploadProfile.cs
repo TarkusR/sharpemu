@@ -174,7 +174,30 @@ internal static class BufferUploadProfile
         FormattableString.Invariant($"widened={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploads, 0)} widened_bytes={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploadBytes, 0)} ") +
         FormattableString.Invariant($"hot_skipped={SharpEmu.HLE.GpuMemory.TrackedRegion.TakeHotUploadsSkipped()} ") +
         FormattableString.Invariant($"readbacks=async:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksStarted, 0)},sync:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSynchronous, 0)},no_writer:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksNoWriter, 0)},too_large:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksTooLarge, 0)},busy:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksBusy, 0)},slot_waits:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSlotWaits, 0)} ") +
-        FormattableString.Invariant($"relay_hop_us=begin:{AverageMicroseconds(Gpu.Buffers.GuestBufferCache.RelayHopBeginTicks, Gpu.Buffers.GuestBufferCache.RelayHopBegin):F1},complete:{AverageMicroseconds(Gpu.Buffers.GuestBufferCache.RelayHopCompleteTicks, Gpu.Buffers.GuestBufferCache.RelayHopComplete):F1}");
+        FormattableString.Invariant($"relay_hop_us=begin:{AverageMicroseconds(Gpu.Buffers.GuestBufferCache.RelayHopBeginTicks, Gpu.Buffers.GuestBufferCache.RelayHopBegin):F1},complete:{AverageMicroseconds(Gpu.Buffers.GuestBufferCache.RelayHopCompleteTicks, Gpu.Buffers.GuestBufferCache.RelayHopComplete):F1} ") +
+        TakeGuestReadbackReport();
+
+    private static readonly SharpEmu.HLE.Diagnostics.ThreadCounter[] _guestFrameLead = [new(), new(), new(), new(), new()];
+
+    internal static void NoteGuestFrameLead(long lead) => _guestFrameLead[(int)Math.Clamp(lead, 0, _guestFrameLead.Length - 1)].Increment();
+
+    private static string TakeGuestReadbackReport()
+    {
+        var reads = Gpu.Buffers.GuestBufferCache.GuestReadbacks.Take();
+        var behind = Gpu.Buffers.GuestBufferCache.GuestReadbacksBehind.Take();
+        var ticksBehind = Gpu.Buffers.GuestBufferCache.GuestReadbackTicksBehind.Take();
+        var age = Gpu.Buffers.GuestBufferCache.GuestReadbackFrameAge;
+        var lead = _guestFrameLead;
+        return FormattableString.Invariant($"guest_reads={reads} read_us=queue:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackQueueTicks, reads):F1},begin:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackBeginTicks, reads):F1},gpu_wait:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackGpuWaitTicks, reads):F1} ") +
+            FormattableString.Invariant($"read_behind={behind}/ticks:{(behind == 0 ? 0 : (double)ticksBehind / behind):F1} read_frame_age=0:{age[0].Take()},1:{age[1].Take()},2:{age[2].Take()},3+:{age[3].Take()} ") +
+            FormattableString.Invariant($"guest_lead=0:{lead[0].Take()},1:{lead[1].Take()},2:{lead[2].Take()},3:{lead[3].Take()},4+:{lead[4].Take()}");
+    }
+
+    private static double PerSample(SharpEmu.HLE.Diagnostics.ThreadCounter ticks, long samples)
+    {
+        var total = ticks.Take();
+        return samples == 0 ? 0 : total * 1_000_000.0 / Stopwatch.Frequency / samples;
+    }
 
     private static double AverageMicroseconds(SharpEmu.HLE.Diagnostics.ThreadCounter ticks, SharpEmu.HLE.Diagnostics.ThreadCounter count)
     {

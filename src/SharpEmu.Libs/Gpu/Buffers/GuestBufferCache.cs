@@ -1519,14 +1519,25 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 PendingDownload? pending = null;
                 var slotsBusy = false;
                 var beginPosted = System.Diagnostics.Stopwatch.GetTimestamp();
+                var beginStarted = 0L;
+                var beginEnded = 0L;
+                var completedAtBegin = 0UL;
+                var frameAtBegin = 0L;
                 if (!_relay.TryRunOnGpuQueue(() =>
-                        pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending, markHot, waitForSlot, out slotsBusy)))
+                    {
+                        beginStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                        pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending, markHot, waitForSlot, out slotsBusy);
+                        completedAtBegin = _scheduler.CompletedTick;
+                        frameAtBegin = FrameTicks.LatestSubmittedFrame + 1;
+                        beginEnded = System.Diagnostics.Stopwatch.GetTimestamp();
+                    }))
                 {
                     return AwaitShutdown();
                 }
 
+                var beginReturned = System.Diagnostics.Stopwatch.GetTimestamp();
                 RelayHopBegin.Increment();
-                RelayHopBeginTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - beginPosted);
+                RelayHopBeginTicks.Add(beginReturned - beginPosted);
 
                 if (slotsBusy)
                 {
@@ -1542,7 +1553,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                     return true;
                 }
 
+                var gpuWaitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 readback.Wait(pending.Ticket);
+                NoteGuestReadback(pending, completedAtBegin, frameAtBegin, beginStarted - beginPosted, beginEnded - beginStarted,
+                    System.Diagnostics.Stopwatch.GetTimestamp() - gpuWaitStarted);
                 var complete = false;
                 var completePosted = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (!_relay.TryRunOnGpuQueue(() => complete = CompleteReadMemoryOnGpu(pending, consumed: true)))
@@ -2389,6 +2403,37 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     public static readonly ThreadCounter RelayHopBeginTicks = new();
     public static readonly ThreadCounter RelayHopComplete = new();
     public static readonly ThreadCounter RelayHopCompleteTicks = new();
+    public static readonly ThreadCounter GuestReadbacks = new();
+    public static readonly ThreadCounter GuestReadbackQueueTicks = new();
+    public static readonly ThreadCounter GuestReadbackBeginTicks = new();
+    public static readonly ThreadCounter GuestReadbackGpuWaitTicks = new();
+    public static readonly ThreadCounter GuestReadbacksBehind = new();
+    public static readonly ThreadCounter GuestReadbackTicksBehind = new();
+    public static readonly ThreadCounter[] GuestReadbackFrameAge = [new(), new(), new(), new()];
+
+    public FrameTickLedger FrameTicks { get; } = new();
+
+    private void NoteGuestReadback(PendingDownload pending, ulong completedAtBegin, long frameAtBegin, long queueTicks, long beginTicks, long gpuWaitTicks)
+    {
+        var waitTick = 0UL;
+        foreach (var tick in pending.WriteTicks)
+        {
+            waitTick = Math.Max(waitTick, tick);
+        }
+
+        GuestReadbacks.Increment();
+        GuestReadbackQueueTicks.Add(queueTicks);
+        GuestReadbackBeginTicks.Add(beginTicks);
+        GuestReadbackGpuWaitTicks.Add(gpuWaitTicks);
+        if (waitTick > completedAtBegin)
+        {
+            GuestReadbacksBehind.Increment();
+            GuestReadbackTicksBehind.Add((long)(waitTick - completedAtBegin));
+        }
+
+        var age = frameAtBegin - FrameTicks.FrameOf(waitTick);
+        GuestReadbackFrameAge[(int)Math.Clamp(age, 0, GuestReadbackFrameAge.Length - 1)].Increment();
+    }
 
     private bool TryBeginDownloadAsync(List<DownloadPiece> copies, out VulkanAsyncReadback.Ticket ticket, out ulong[] writeTicks, out bool busy)
     {
