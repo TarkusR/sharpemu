@@ -165,7 +165,7 @@ public sealed class TrackedRegion
         }
 
         _cpuDirty.SetRange(start, end);
-        UpdateCpuProtection();
+        UpdateCpuProtection(ProtectionCause.UploadReprotect, ProtectionCause.EmulatorWrite);
     }
 
     public void ChangeState(WriteOrigin side, bool enable, ulong address, ulong size)
@@ -282,7 +282,7 @@ public sealed class TrackedRegion
             _recentCpuUploads.SetRange(runStart, runEnd);
         }
 
-        UpdateCpuProtection();
+        UpdateCpuProtection(ProtectionCause.SweepReprotect, ProtectionCause.CpuWriteRelease);
         return taken;
     }
 
@@ -375,7 +375,9 @@ public sealed class TrackedRegion
     private ref PageMask GetDirtyMask(WriteOrigin side) => ref side == WriteOrigin.Cpu ? ref _cpuDirty : ref _gpuDirty;
 
     // Every change to the CPU-dirty mask ends here, so it also publishes the block summary.
-    private void UpdateCpuProtection()
+    private void UpdateCpuProtection() => UpdateCpuProtection(ProtectionCause.UploadReprotect, ProtectionCause.CpuWriteRelease);
+
+    private void UpdateCpuProtection(ProtectionCause protectCause, ProtectionCause releaseCause)
     {
         _protectedWhileDirty = _protectedWhileDirty & _cpuDirty;
         _summary?.Set(BaseAddress / BlockBytes, _cpuDirty.Any);
@@ -397,12 +399,12 @@ public sealed class TrackedRegion
         _writable = writable;
         if (protect.Any)
         {
-            _pages.AddWatchMask(BaseAddress, protect, blockReads: false);
+            _pages.AddWatchMask(BaseAddress, protect, blockReads: false, protectCause);
         }
 
         if (release.Any)
         {
-            _pages.RemoveWatchMask(BaseAddress, release, blockReads: false);
+            _pages.RemoveWatchMask(BaseAddress, release, blockReads: false, releaseCause);
         }
     }
 
