@@ -25,29 +25,29 @@ internal sealed class SerialRequiredException(string reason, bool resumable = fa
 
 internal static unsafe partial class VulkanVideoPresenter
 {
-    private static long _slicesRecorded;
-    private static long _segmentsRecorded;
-    private static long _usesShared;
-    private static long _segmentsEmpty;
-    private static long _slicesSerial;
-    private static long _slicesInvalid;
-    private static long _sliceItems;
-    private static long _serialItems;
-    private static long _sliceWaitTicks;
-    private static long _slicesStolen;
-    private static long _stolenItems;
-    private static long _restChunks;
-    private static long _restItems;
-    private static long _workerBusyTicks;
-    private static long _workerItems;
-    private static long _inlineTicks;
-    private static long _joinTicks;
-    private static long _validateTicks;
-    private static long _prologueTicks;
-    private static readonly long[] _stolenByOrigin = new long[3];
-    private static readonly long[] _waitByOrigin = new long[3];
-    private static readonly long[] _stolenByAge = new long[3];
-    private static readonly long[] _tailByProducer = new long[5];
+    private static readonly ThreadCounter _slicesRecorded = new();
+    private static readonly ThreadCounter _segmentsRecorded = new();
+    private static readonly ThreadCounter _usesShared = new();
+    private static readonly ThreadCounter _segmentsEmpty = new();
+    private static readonly ThreadCounter _slicesSerial = new();
+    private static readonly ThreadCounter _slicesInvalid = new();
+    private static readonly ThreadCounter _sliceItems = new();
+    private static readonly ThreadCounter _serialItems = new();
+    private static readonly ThreadCounter _sliceWaitTicks = new();
+    private static readonly ThreadCounter _slicesStolen = new();
+    private static readonly ThreadCounter _stolenItems = new();
+    private static readonly ThreadCounter _restChunks = new();
+    private static readonly ThreadCounter _restItems = new();
+    private static readonly ThreadCounter _workerBusyTicks = new();
+    private static readonly ThreadCounter _workerItems = new();
+    private static readonly ThreadCounter _inlineTicks = new();
+    private static readonly ThreadCounter _joinTicks = new();
+    private static readonly ThreadCounter _validateTicks = new();
+    private static readonly ThreadCounter _prologueTicks = new();
+    private static readonly ThreadCounter[] _stolenByOrigin = NewThreadCounters(3);
+    private static readonly ThreadCounter[] _waitByOrigin = NewThreadCounters(3);
+    private static readonly ThreadCounter[] _stolenByAge = NewThreadCounters(3);
+    private static readonly ThreadCounter[] _tailByProducer = NewThreadCounters(5);
     private static readonly ConcurrentDictionary<string, long[]> _roundTrips = new();
     private static readonly ThreadCounter _relayInWait = new();
     private static readonly ThreadCounter _relayInWaitTicks = new();
@@ -56,8 +56,8 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly ThreadCounter _validateImageTicks = new();
     private static readonly ThreadCounter _validateBufferTicks = new();
     private static readonly ThreadCounter _validateDeferredTicks = new();
-    private static long _streamCopies;
-    private static long _streamFallbacks;
+    private static readonly ThreadCounter _streamCopies = new();
+    private static readonly ThreadCounter _streamFallbacks = new();
     private static readonly ConcurrentDictionary<string, StrongBox<long>> _serialReasons = new();
     private static int _gc0;
     private static int _gc1;
@@ -65,32 +65,41 @@ internal static unsafe partial class VulkanVideoPresenter
     private static long _allocated;
     private static TimeSpan _gcPaused;
     private static long _renderAllocated;
-    private static long _workerAllocated;
+    private static readonly ThreadCounter _workerAllocated = new();
 
     internal static string TakeSliceReport() =>
-        FormattableString.Invariant($"[PERF][SLICES] slices={Interlocked.Exchange(ref _slicesRecorded, 0)} segments={Interlocked.Exchange(ref _segmentsRecorded, 0)} empty={Interlocked.Exchange(ref _segmentsEmpty, 0)} uses_shared={Interlocked.Exchange(ref _usesShared, 0)} attachments_kept={RecordingHost.TakeAttachmentsKept()} ") +
+        FormattableString.Invariant($"[PERF][SLICES] slices={_slicesRecorded.Take()} segments={_segmentsRecorded.Take()} empty={_segmentsEmpty.Take()} uses_shared={_usesShared.Take()} attachments_kept={RecordingHost.TakeAttachmentsKept()} ") +
         SharpEmu.Libs.Gpu.Rendering.RenderRecorder.TakeInPlaceReport() + FormattableString.Invariant($" textures_kept={RecordingHost.TakeTexturesKept()} ") + RecordingHost.TakeTableReport() +
         FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)} ") +
-        FormattableString.Invariant($"serial_cuts={Interlocked.Exchange(ref _slicesSerial, 0)} invalid={Interlocked.Exchange(ref _slicesInvalid, 0)} ") +
-        FormattableString.Invariant($"slice_items={Interlocked.Exchange(ref _sliceItems, 0)} serial_items={Interlocked.Exchange(ref _serialItems, 0)} join_wait_ms={Interlocked.Exchange(ref _sliceWaitTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
+        FormattableString.Invariant($"serial_cuts={_slicesSerial.Take()} invalid={_slicesInvalid.Take()} ") +
+        FormattableString.Invariant($"slice_items={_sliceItems.Take()} serial_items={_serialItems.Take()} join_wait_ms={_sliceWaitTicks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
         FormattableString.Invariant($"image_barriers={ImageAccessState.Barriers.Take()}/elided:{ImageAccessState.BarriersElided.Take()} ") +
         FormattableString.Invariant($"relay_in_wait={_relayInWait.Take()}/{_relayInWaitTicks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms ") +
-        FormattableString.Invariant($"stream_copies={Interlocked.Exchange(ref _streamCopies, 0)} stream_fallbacks={Interlocked.Exchange(ref _streamFallbacks, 0)} ") +
-        FormattableString.Invariant($"worker_busy_ms={Interlocked.Exchange(ref _workerBusyTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} worker_items={Interlocked.Exchange(ref _workerItems, 0)} inline_ms={Interlocked.Exchange(ref _inlineTicks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
-        FormattableString.Invariant($"join_ms={Ticks(ref _joinTicks):F1} validate_ms={Ticks(ref _validateTicks):F1} ") +
+        FormattableString.Invariant($"stream_copies={_streamCopies.Take()} stream_fallbacks={_streamFallbacks.Take()} ") +
+        FormattableString.Invariant($"worker_busy_ms={_workerBusyTicks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} worker_items={_workerItems.Take()} inline_ms={_inlineTicks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
+        FormattableString.Invariant($"join_ms={Ticks(_joinTicks):F1} validate_ms={Ticks(_validateTicks):F1} ") +
         FormattableString.Invariant($"validate_kind_ms=images:{Ticks(_validateImageTicks):F1},buffers:{Ticks(_validateBufferTicks):F1},deferred:{Ticks(_validateDeferredTicks):F1} validate_skipped=buffers:{_validateBuffersSkipped.Take()},deferred:{_validateDeferredSkipped.Take()} ") +
-        FormattableString.Invariant($"prologue_ms={Ticks(ref _prologueTicks):F1} stolen_origin=ahead:{Interlocked.Exchange(ref _stolenByOrigin[0], 0)},tail:{Interlocked.Exchange(ref _stolenByOrigin[1], 0)},rest:{Interlocked.Exchange(ref _stolenByOrigin[2], 0)} ") +
-        FormattableString.Invariant($"stolen_age=lt100us:{Interlocked.Exchange(ref _stolenByAge[0], 0)},lt1ms:{Interlocked.Exchange(ref _stolenByAge[1], 0)},ge1ms:{Interlocked.Exchange(ref _stolenByAge[2], 0)} ") +
-        FormattableString.Invariant($"wait_origin_ms=ahead:{Ticks(ref _waitByOrigin[0]):F1},tail:{Ticks(ref _waitByOrigin[1]):F1},rest:{Ticks(ref _waitByOrigin[2]):F1} ") +
-        FormattableString.Invariant($"stolen={Interlocked.Exchange(ref _slicesStolen, 0)} stolen_items={Interlocked.Exchange(ref _stolenItems, 0)} rest_chunks={Interlocked.Exchange(ref _restChunks, 0)} rest_items={Interlocked.Exchange(ref _restItems, 0)} ") +
-        FormattableString.Invariant($"tail_producer=busy:{Interlocked.Exchange(ref _tailByProducer[0], 0)},idle:{Interlocked.Exchange(ref _tailByProducer[1], 0)},blocked:{Interlocked.Exchange(ref _tailByProducer[2], 0)},space:{Interlocked.Exchange(ref _tailByProducer[3], 0)},run:{Interlocked.Exchange(ref _tailByProducer[4], 0)} ") +
+        FormattableString.Invariant($"prologue_ms={Ticks(_prologueTicks):F1} stolen_origin=ahead:{_stolenByOrigin[0].Take()},tail:{_stolenByOrigin[1].Take()},rest:{_stolenByOrigin[2].Take()} ") +
+        FormattableString.Invariant($"stolen_age=lt100us:{_stolenByAge[0].Take()},lt1ms:{_stolenByAge[1].Take()},ge1ms:{_stolenByAge[2].Take()} ") +
+        FormattableString.Invariant($"wait_origin_ms=ahead:{Ticks(_waitByOrigin[0]):F1},tail:{Ticks(_waitByOrigin[1]):F1},rest:{Ticks(_waitByOrigin[2]):F1} ") +
+        FormattableString.Invariant($"stolen={_slicesStolen.Take()} stolen_items={_stolenItems.Take()} rest_chunks={_restChunks.Take()} rest_items={_restItems.Take()} ") +
+        FormattableString.Invariant($"tail_producer=busy:{_tailByProducer[0].Take()},idle:{_tailByProducer[1].Take()},blocked:{_tailByProducer[2].Take()},space:{_tailByProducer[3].Take()},run:{_tailByProducer[4].Take()} ") +
         "round_trips=" + TakeRoundTrips() + " " + Presenter.TakeCommandReadReport() + " " + SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.TakeProgramReport() + " " +
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.TakeFastReport() + " " + SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakePairReport() + " " + SubmissionScheduler.TakeDeferredReport() + " " +
         "serial_reasons=" + TakeSerialReasons() + " " + GuestImageCache.TakeSliceLookupReport() + " " + TakeGcReport() + " " + Diagnostics.ItemCostTally.TakeReport() + " posts=" + TakePosts();
 
-    private static double Ticks(ref long ticks) => Interlocked.Exchange(ref ticks, 0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-
     private static double Ticks(ThreadCounter ticks) => ticks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+    private static ThreadCounter[] NewThreadCounters(int count)
+    {
+        var counters = new ThreadCounter[count];
+        for (var index = 0; index < count; index++)
+        {
+            counters[index] = new ThreadCounter();
+        }
+
+        return counters;
+    }
 
     private static string TakeGcReport()
     {
@@ -101,7 +110,7 @@ internal static unsafe partial class VulkanVideoPresenter
         var paused = GC.GetTotalPauseDuration();
         var renderAllocated = GC.GetAllocatedBytesForCurrentThread();
         var report = FormattableString.Invariant($"gc={gc0 - _gc0}/{gc1 - _gc1}/{gc2 - _gc2} alloc_mb={(allocated - _allocated) / 1048576.0:F0} gc_pause_ms={(paused - _gcPaused).TotalMilliseconds:F0} ") +
-            FormattableString.Invariant($"render_alloc_mb={(renderAllocated - _renderAllocated) / 1048576.0:F0} worker_alloc_mb={Interlocked.Exchange(ref _workerAllocated, 0) / 1048576.0:F0}");
+            FormattableString.Invariant($"render_alloc_mb={(renderAllocated - _renderAllocated) / 1048576.0:F0} worker_alloc_mb={_workerAllocated.Take() / 1048576.0:F0}");
         _renderAllocated = renderAllocated;
         _gc0 = gc0;
         _gc1 = gc1;
@@ -165,7 +174,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (!_bufferSet.Add(use))
                 {
-                    Interlocked.Increment(ref _usesShared);
+                    _usesShared.Increment();
                     return;
                 }
             }
@@ -184,7 +193,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     var known = Images[index];
                     if (ReferenceEquals(known.Expected, use.Expected) && SameRequest(known.Request, use.Request))
                     {
-                        Interlocked.Increment(ref _usesShared);
+                        _usesShared.Increment();
                         return;
                     }
                 }
@@ -300,7 +309,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 try
                 {
                     host.RecordSlice(slice);
-                    Interlocked.Add(ref _workerItems, slice.Resume);
+                    _workerItems.Add(slice.Resume);
                 }
                 catch (Exception exception)
                 {
@@ -310,10 +319,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     if (allocated != 0)
                     {
-                        Interlocked.Add(ref _workerAllocated, GC.GetAllocatedBytesForCurrentThread() - allocated);
+                        _workerAllocated.Add(GC.GetAllocatedBytesForCurrentThread() - allocated);
                     }
 
-                    Interlocked.Add(ref _workerBusyTicks, System.Diagnostics.Stopwatch.GetTimestamp() - busyStarted);
+                    _workerBusyTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - busyStarted);
                     slice.Done.Set();
                     slice.Progress.Set();
                 }
@@ -382,14 +391,14 @@ internal static unsafe partial class VulkanVideoPresenter
 
         internal static void NoteStolen(RenderSlice slice)
         {
-            Interlocked.Increment(ref _slicesStolen);
-            Interlocked.Add(ref _stolenItems, slice.Items.Count);
-            Interlocked.Increment(ref _stolenByOrigin[slice.Origin]);
+            _slicesStolen.Increment();
+            _stolenItems.Add(slice.Items.Count);
+            _stolenByOrigin[slice.Origin].Increment();
             var age = (System.Diagnostics.Stopwatch.GetTimestamp() - slice.DispatchedAt) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency;
-            Interlocked.Increment(ref _stolenByAge[age < 100 ? 0 : age < 1000 ? 1 : 2]);
+            _stolenByAge[age < 100 ? 0 : age < 1000 ? 1 : 2].Increment();
         }
 
-        internal static void NoteTail(int producerState) => Interlocked.Increment(ref _tailByProducer[producerState]);
+        internal static void NoteTail(int producerState) => _tailByProducer[producerState].Increment();
 
         internal static void NotePost(string caller) => _posts.AddOrUpdate(caller, 1, static (_, count) => count + 1);
 
@@ -400,12 +409,12 @@ internal static unsafe partial class VulkanVideoPresenter
             Interlocked.Add(ref totals[1], ticks);
         }
 
-        internal static void NoteJoin(long started) => Interlocked.Add(ref _joinTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        internal static void NoteJoin(long started) => _joinTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - started);
 
         internal static void NoteRestChunk(int items)
         {
-            Interlocked.Increment(ref _restChunks);
-            Interlocked.Add(ref _restItems, items);
+            _restChunks.Increment();
+            _restItems.Add(items);
         }
 
         // The next finished segment of the slice in order, or null once the recording thread is done with it.
@@ -425,8 +434,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
 
                     var waitedForDone = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted - relayTicks;
-                    Interlocked.Add(ref _sliceWaitTicks, waitedForDone);
-                    Interlocked.Add(ref _waitByOrigin[slice.Origin], waitedForDone);
+                    _sliceWaitTicks.Add(waitedForDone);
+                    _waitByOrigin[slice.Origin].Add(waitedForDone);
                     if (slice.Failure is { } failure)
                     {
                         throw new InvalidOperationException("A render worker failed.", failure);
@@ -468,8 +477,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var waited = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted - relayTicks;
-            Interlocked.Add(ref _sliceWaitTicks, waited);
-            Interlocked.Add(ref _waitByOrigin[slice.Origin], waited);
+            _sliceWaitTicks.Add(waited);
+            _waitByOrigin[slice.Origin].Add(waited);
             return segment;
         }
 
@@ -500,24 +509,24 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (segment.Count == 0)
                 {
-                    Interlocked.Increment(ref _segmentsEmpty);
+                    _segmentsEmpty.Increment();
                     _scheduler.DiscardRecording(segment.Buffer!);
                     return false;
                 }
 
                 var validateStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 var valid = ValidateSegment(slice, segment);
-                Interlocked.Add(ref _validateTicks, System.Diagnostics.Stopwatch.GetTimestamp() - validateStarted);
+                _validateTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - validateStarted);
                 if (!valid)
                 {
-                    Interlocked.Increment(ref _slicesInvalid);
+                    _slicesInvalid.Increment();
                     _scheduler.DiscardRecording(segment.Buffer!);
                     return false;
                 }
 
                 var prologueStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 RecordSlicePrologue(segment.Requests);
-                Interlocked.Add(ref _prologueTicks, System.Diagnostics.Stopwatch.GetTimestamp() - prologueStarted);
+                _prologueTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - prologueStarted);
                 var uploads = _spareSubmissionResources is { Count: not 0 } spare ? spare.Pop() : new SubmissionUploadResources();
                 uploads.DebugName = "SharpEmu slice";
                 _batchResources.Add(uploads);
@@ -542,11 +551,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 slice.Submitted = true;
                 _bufferCache.OnBatchSubmitted();
-                Interlocked.Increment(ref _segmentsRecorded);
-                Interlocked.Add(ref _sliceItems, segment.Count);
+                _segmentsRecorded.Increment();
+                _sliceItems.Add(segment.Count);
                 if (segment.SerialReason is not null)
                 {
-                    Interlocked.Increment(ref _slicesSerial);
+                    _slicesSerial.Increment();
                 }
 
                 return true;
@@ -619,7 +628,7 @@ internal static unsafe partial class VulkanVideoPresenter
         internal void FinishSlice(RenderSlice slice)
         {
             slice.Done.Wait();
-            Interlocked.Increment(ref _slicesRecorded);
+            _slicesRecorded.Increment();
             _scheduler.NoteSliceJoined(slice.Generation);
             if (slice.Chunks.Count == 0)
             {
@@ -925,14 +934,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 var thread = _presenter._commandThread!;
                 if (thread.HasPendingRange(address, size))
                 {
-                    Interlocked.Increment(ref _streamFallbacks);
+                    _streamFallbacks.Increment();
                 }
                 else if (_arena!.TryReserve(size, _bufferCache.StreamOffsetAlignment, out var reservation))
                 {
                     if (thread.ReadOverlayBefore(address, reservation.Destination, _itemSequence))
                     {
                         _arena.Commit(in reservation);
-                        Interlocked.Increment(ref _streamCopies);
+                        _streamCopies.Increment();
                         return (reservation.Chunk.Buffer, reservation.Offset, (size + 3) & ~3UL);
                     }
                 }

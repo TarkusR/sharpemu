@@ -788,7 +788,7 @@ internal static partial class VulkanVideoPresenter
                 _units.Add(new Unit { Item = item });
             }
 
-            Interlocked.Add(ref _serialItems, slice.Items.Count);
+            _serialItems.Add(slice.Items.Count);
             return false;
         }
 
@@ -930,8 +930,8 @@ internal static partial class VulkanVideoPresenter
             CompleteItem(item);
             NoteItemCost(item, Diagnostics.ItemCostTally.Inline, started);
             betweenItems();
-            Interlocked.Increment(ref _serialItems);
-            Interlocked.Add(ref _inlineTicks, Stopwatch.GetTimestamp() - started);
+            _serialItems.Increment();
+            _inlineTicks.Add(Stopwatch.GetTimestamp() - started);
         }
 
         private void CompleteItem(Item item)

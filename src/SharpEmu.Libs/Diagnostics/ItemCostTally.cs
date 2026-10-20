@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.HLE.Diagnostics;
 
 namespace SharpEmu.Libs.Diagnostics;
 
@@ -21,14 +22,25 @@ internal static class ItemCostTally
 
     private static readonly string[] KindNames = ["dispatch", "indirect_draw", "direct_draw", "resolved_draw", "other", "barrier"];
     private static readonly string[] StageNames = ["resolve", "record", "inline", "joined"];
-    private static readonly long[] Counts = new long[KindNames.Length * StageNames.Length];
-    private static readonly long[] Ticks = new long[KindNames.Length * StageNames.Length];
+    private static readonly ThreadCounter[] Counts = NewCounters();
+    private static readonly ThreadCounter[] Ticks = NewCounters();
+
+    private static ThreadCounter[] NewCounters()
+    {
+        var counters = new ThreadCounter[KindNames.Length * StageNames.Length];
+        for (var slot = 0; slot < counters.Length; slot++)
+        {
+            counters[slot] = new ThreadCounter();
+        }
+
+        return counters;
+    }
 
     public static void Note(int kind, int stage, long ticks)
     {
         var slot = kind * StageNames.Length + stage;
-        Interlocked.Increment(ref Counts[slot]);
-        Interlocked.Add(ref Ticks[slot], ticks);
+        Counts[slot].Increment();
+        Ticks[slot].Add(ticks);
     }
 
     public static string TakeReport()
@@ -40,8 +52,8 @@ internal static class ItemCostTally
             for (var stage = 0; stage < StageNames.Length; stage++)
             {
                 var slot = kind * StageNames.Length + stage;
-                var count = Interlocked.Exchange(ref Counts[slot], 0);
-                var ticks = Interlocked.Exchange(ref Ticks[slot], 0);
+                var count = Counts[slot].Take();
+                var ticks = Ticks[slot].Take();
                 if (count == 0)
                 {
                     continue;

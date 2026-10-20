@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 
@@ -30,26 +31,26 @@ public sealed partial class GuestImageCache
 
     private readonly LookupEvent[] _lookupEvents = new LookupEvent[LookupEventSlots];
     private int _lookupEventCursor;
-    private static long _totalLookupRevalidations;
+    private static readonly ThreadCounter _totalLookupRevalidations = new();
 
     private LookupMemo[]? _lookups;
     private ulong _lookupGeneration = 1;
     private long _lookupHits;
     private long _lookupMisses;
-    private static long _totalLookupHits;
-    private static long _totalLookupMisses;
-    private static long _totalGenerationBumps;
-    private static long _totalBindingHits;
-    private static long _totalBindingMisses;
+    private static readonly ThreadCounter _totalLookupHits = new();
+    private static readonly ThreadCounter _totalLookupMisses = new();
+    private static readonly ThreadCounter _totalGenerationBumps = new();
+    private static readonly ThreadCounter _totalBindingHits = new();
+    private static readonly ThreadCounter _totalBindingMisses = new();
 
-    public static void CountBindingMemo(bool hit) => Interlocked.Increment(ref hit ? ref _totalBindingHits : ref _totalBindingMisses);
+    public static void CountBindingMemo(bool hit) => (hit ? _totalBindingHits : _totalBindingMisses).Increment();
 
     public (long Hits, long Misses) LookupMemoCounters => (_lookupHits, _lookupMisses);
 
     public static string TakeLookupReport() =>
-        FormattableString.Invariant($"[PERF][IMAGE_LOOKUP] memo_hits={Interlocked.Exchange(ref _totalLookupHits, 0)} memo_misses={Interlocked.Exchange(ref _totalLookupMisses, 0)} ") +
-        FormattableString.Invariant($"generation_bumps={Interlocked.Exchange(ref _totalGenerationBumps, 0)} revalidated={Interlocked.Exchange(ref _totalLookupRevalidations, 0)} ") +
-        FormattableString.Invariant($"binding_hits={Interlocked.Exchange(ref _totalBindingHits, 0)} binding_misses={Interlocked.Exchange(ref _totalBindingMisses, 0)}");
+        FormattableString.Invariant($"[PERF][IMAGE_LOOKUP] memo_hits={_totalLookupHits.Take()} memo_misses={_totalLookupMisses.Take()} ") +
+        FormattableString.Invariant($"generation_bumps={_totalGenerationBumps.Take()} revalidated={_totalLookupRevalidations.Take()} ") +
+        FormattableString.Invariant($"binding_hits={_totalBindingHits.Take()} binding_misses={_totalBindingMisses.Take()}");
 
     private void InvalidateLookups() => InvalidateLookups(0, ulong.MaxValue);
 
@@ -57,7 +58,7 @@ public sealed partial class GuestImageCache
     {
         _lookupGeneration++;
         _lookupEvents[_lookupEventCursor++ & (LookupEventSlots - 1)] = new LookupEvent(_lookupGeneration, begin, end);
-        Interlocked.Increment(ref _totalGenerationBumps);
+        _totalGenerationBumps.Increment();
     }
 
     // Changes whenever an image a lookup could find is created, removed or replaced, so a caller
@@ -151,7 +152,7 @@ public sealed partial class GuestImageCache
             }
         }
 
-        Interlocked.Increment(ref _totalLookupRevalidations);
+        _totalLookupRevalidations.Increment();
         return true;
     }
 
@@ -223,13 +224,13 @@ public sealed partial class GuestImageCache
             _slots.TryGet(memo.Result) is not { Registered: true, Parked: false } image)
         {
             _lookupMisses++;
-            Interlocked.Increment(ref _totalLookupMisses);
+            _totalLookupMisses.Increment();
             return false;
         }
 
         memo.Generation = _lookupGeneration;
         _lookupHits++;
-        Interlocked.Increment(ref _totalLookupHits);
+        _totalLookupHits.Increment();
         request.View = memo.View;
         image.LastAccessTick = _scheduler.CurrentTick;
         TouchImage(image);
