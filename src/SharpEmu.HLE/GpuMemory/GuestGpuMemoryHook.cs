@@ -191,6 +191,22 @@ public static class GuestGpuMemoryHook
         current.MarkCpuWriteLanded(address, size);
     }
 
+    public static void PrepareEmulatorWrite(ulong address, ulong size)
+    {
+        if (size != 0 && _current is { } current)
+        {
+            current.PrepareEmulatorWrite(address, size);
+        }
+    }
+
+    public static void NoteEmulatorWrite(ulong address, ulong size)
+    {
+        if (size != 0 && _current is { } current)
+        {
+            current.NoteEmulatorWrite(address, size);
+        }
+    }
+
     // Shutdown can skip disposal. Report the counts once for each attached session.
     public static bool TryTakeShutdownSummary(out string summary)
     {

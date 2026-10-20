@@ -188,6 +188,38 @@ public sealed class GuestGpuMemory : IDisposable
         _ = Images?.MarkCpuWrite(address, size);
     }
 
+    public void PrepareEmulatorWrite(ulong address, ulong size)
+    {
+        if (!CoversWrites(address, size))
+        {
+            return;
+        }
+
+        if (Buffers is { } buffers && buffers.MayHoldGpuData(address, size))
+        {
+            _ = buffers.MarkCpuWrite(address, size);
+        }
+
+        _ = Images?.MarkCpuWrite(address, size);
+    }
+
+    public void NoteEmulatorWrite(ulong address, ulong size)
+    {
+        if (!CoversWrites(address, size))
+        {
+            return;
+        }
+
+        if (!Covers(address, size))
+        {
+            Interlocked.Increment(ref _lazyCoveredWrites);
+        }
+
+        Interlocked.MemoryBarrier();
+        _ = Buffers?.NoteEmulatorWrite(address, size);
+        _ = Images?.MarkCpuWrite(address, size);
+    }
+
     public bool Covers(ulong address, ulong size)
     {
         if (!new GuestSpan(address, size).IsValid)

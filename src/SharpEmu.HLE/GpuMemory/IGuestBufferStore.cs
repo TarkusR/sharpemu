@@ -16,7 +16,13 @@ public interface IGuestBufferStore
 
     bool DownloadToCpu(ulong address, ulong size);
 
-    bool NoteEmulatorWrite(ulong address, ulong size) => MarkCpuWrite(address, size);
+    bool NoteEmulatorWrite(ulong address, ulong size)
+    {
+        MarkCpuWriteLanded(address, size);
+        return true;
+    }
+
+    bool MayHoldGpuData(ulong address, ulong size) => true;
 
     // True for current CPU data or an untracked range; false when required recovery fails.
     bool TrySynchronizeCpuRead(ulong address, ulong size) => DownloadToCpu(address, size);

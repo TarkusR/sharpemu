@@ -186,10 +186,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             GuestGpuMemoryHook.Trace(address, size, $"buffer-write-landed tracked={tracked}");
     }
 
+    bool IGuestBufferStore.MayHoldGpuData(ulong address, ulong size) => _tracker.MayHaveGpuDirtyPages(address, size);
+
     bool IGuestBufferStore.NoteEmulatorWrite(ulong address, ulong size)
     {
         var tracked = _tracker.MarkCpuWriteKeepingProtection(address, size, out var needsGpuFlush);
-        return needsGpuFlush ? ((IGuestBufferStore)this).MarkCpuWrite(address, size) : tracked;
+        return needsGpuFlush ? _tracker.MarkLandedCpuWrite(address, size) : tracked;
     }
 
     public bool TrySynchronizeCpuRead(ulong address, ulong size) =>
