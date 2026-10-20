@@ -725,102 +725,104 @@ public sealed class GuestPageTracker
         return new SweepPlan { Spans = copy, Blocks = blocks, FirstWord = firstWord };
     }
 
-    private SweepPlan? _sweepPlan;
-    private Action<ulong, ulong>? _sweepVisit;
-    private int _sweepNextSpan;
-
-    public GuestSpan SweepSpan { get; private set; }
-
-    public void ForEachCoveredCpuDirtyPageRun(SweepPlan plan, PageCoverage coverage, Action<ulong, ulong> visit)
+    public void ForEachCoveredCpuDirtyPageRun(SweepPlan plan, PageCoverage coverage, Action<ulong, ulong> visit, Action? blockVisited = null)
     {
-        _sweepPlan = plan;
-        _sweepVisit = visit;
-        _sweepNextSpan = 0;
-        try
+        var nextSpan = 0;
+        for (var offset = 0; offset < plan.Blocks.Length; offset++)
         {
-            for (var offset = 0; offset < plan.Blocks.Length; offset++)
+            var word = plan.FirstWord + offset;
+            var pending = plan.Blocks[offset] & coverage.BlockWord(word) &
+                (~(ulong)Volatile.Read(ref _presentRegions[word]) | _cpuDirtySummary.Word(word));
+            while (pending != 0)
             {
-                var word = plan.FirstWord + offset;
-                var pending = plan.Blocks[offset] & coverage.BlockWord(word) &
-                    (~(ulong)Volatile.Read(ref _presentRegions[word]) | _cpuDirtySummary.Word(word));
-                while (pending != 0)
+                var block = (ulong)word * 64 + (ulong)System.Numerics.BitOperations.TrailingZeroCount(pending);
+                pending &= pending - 1;
+                if (coverage.BlockAt(block) is not { } covered)
                 {
-                    var block = (ulong)word * 64 + (ulong)System.Numerics.BitOperations.TrailingZeroCount(pending);
-                    pending &= pending - 1;
-                    if (coverage.BlockAt(block) is not { } covered)
+                    continue;
+                }
+
+                var region = Volatile.Read(ref _regions[block]);
+                if (region is not null)
+                {
+                    var version = region.CpuDirtyVersion;
+                    if (covered.CleanRegionVersion == version && covered.CleanCoverageVersion == covered.Version)
                     {
                         continue;
                     }
 
-                    PageMask runs;
-                    if (Volatile.Read(ref _regions[block]) is { } region)
+                    if (region.CpuDirtyPages(in covered.Pages).None)
                     {
-                        var version = region.CpuDirtyVersion;
-                        if (covered.CleanRegionVersion == version && covered.CleanCoverageVersion == covered.Version)
-                        {
-                            continue;
-                        }
-
-                        runs = region.CpuDirtyPages(in covered.Pages);
-                        if (runs.None)
-                        {
-                            covered.CleanRegionVersion = version;
-                            covered.CleanCoverageVersion = covered.Version;
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        runs = covered.Pages;
-                    }
-
-                    foreach (var (runStart, runEnd) in runs)
-                    {
-                        ClipSweepRun(block * BlockBytes + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+                        covered.CleanRegionVersion = version;
+                        covered.CleanCoverageVersion = covered.Version;
+                        continue;
                     }
                 }
+
+                var candidates = covered.Pages & SpanPages(plan.Spans, ref nextSpan, block);
+                if (region is not null && region.CpuDirtyPages(in candidates).None)
+                {
+                    continue;
+                }
+
+                region ??= GetOrCreateRegion(block);
+                PageMask taken;
+                using (region.Lock.Hold())
+                {
+                    taken = region.TakeCpuDirtyPages(in candidates);
+                }
+
+                try
+                {
+                    foreach (var (runStart, runEnd) in taken)
+                    {
+                        visit(block * BlockBytes + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+                    }
+
+                    blockVisited?.Invoke();
+                }
+                catch
+                {
+                    using (region.Lock.Hold())
+                    {
+                        region.ReturnCpuDirtyPages(in taken);
+                    }
+
+                    throw;
+                }
             }
-        }
-        finally
-        {
-            _sweepPlan = null;
-            _sweepVisit = null;
         }
     }
 
-    private void ClipSweepRun(ulong runAddress, ulong runSize)
+    private static PageMask SpanPages(GuestSpan[] spans, ref int nextSpan, ulong block)
     {
-        var spans = _sweepPlan!.Spans;
-        var runEnd = runAddress + runSize;
-        var index = _sweepNextSpan;
-        if (index < spans.Length && spans[index].End <= runAddress)
+        var blockStart = block * BlockBytes;
+        var blockEnd = blockStart + BlockBytes;
+        var low = nextSpan;
+        var high = spans.Length;
+        while (low < high)
         {
-            var low = index + 1;
-            var high = spans.Length;
-            while (low < high)
+            var middle = low + ((high - low) >> 1);
+            if (spans[middle].End <= blockStart)
             {
-                var middle = low + ((high - low) >> 1);
-                if (spans[middle].End <= runAddress)
-                {
-                    low = middle + 1;
-                }
-                else
-                {
-                    high = middle;
-                }
+                low = middle + 1;
             }
-
-            index = low;
+            else
+            {
+                high = middle;
+            }
         }
 
-        _sweepNextSpan = index;
-        for (; index < spans.Length && spans[index].Address < runEnd; index++)
+        nextSpan = low;
+        var pages = new PageMask();
+        for (var index = low; index < spans.Length && spans[index].Address < blockEnd; index++)
         {
-            var span = spans[index];
-            var start = Math.Max(runAddress, span.Address);
-            SweepSpan = span;
-            _sweepVisit!(start, Math.Min(runEnd, span.End) - start);
+            var start = Math.Max(spans[index].Address, blockStart) - blockStart;
+            var end = Math.Min(spans[index].End, blockEnd) - blockStart;
+            pages.SetRange((int)(start / PageBytes), (int)((end + PageBytes - 1) / PageBytes));
         }
+
+        return pages;
     }
 
     private bool IsKnownCpuClean(ulong vaddr, ulong size)

@@ -961,9 +961,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                     if (_bdaSweepPlan is { } plan && _bufferPages.Complete)
                     {
                         // Only a registered buffer has anything to upload, so only the pages buffers cover are looked at.
-                        _sweepSpan = default;
-                        _sweepLastIndex = -1;
-                        _tracker.ForEachCoveredCpuDirtyPageRun(plan, _bufferPages, _uploadBuffersUnderDirtyRun ??= UploadBuffersUnderDirtyRun);
+                        _tracker.ForEachCoveredCpuDirtyPageRun(plan, _bufferPages, _uploadClearedRun ??= UploadClearedRun,
+                            _flushClearedRuns ??= FlushClearedRuns);
                     }
                     else
                     {
@@ -974,6 +973,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 }
                 finally
                 {
+                    DiscardClearedRuns();
                     _sweepActive = false;
                     try
                     {
@@ -1214,32 +1214,65 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
     }
 
-    private Action<ulong, ulong>? _uploadBuffersUnderDirtyRun;
-    private GuestSpan _sweepSpan;
-    private int _sweepLastIndex;
+    private Action<ulong, ulong>? _uploadClearedRun;
+    private Action? _flushClearedRuns;
+    private readonly UploadCollector _clearedRuns = new();
+    private GpuBuffer? _clearedRunsBuffer;
+    private long _clearedRunsStarted;
 
-    private void UploadBuffersUnderDirtyRun(ulong runAddress, ulong runSize)
+    private void UploadClearedRun(ulong runAddress, ulong runSize)
     {
-        var blockStart = runAddress & ~(TrackerLayout.BlockBytes - 1);
-        var containing = _tracker.SweepSpan;
-        var lower = Math.Max(containing.Address, blockStart);
-        var span = new GuestSpan(lower, Math.Min(containing.End, blockStart + TrackerLayout.BlockBytes) - lower);
-        if (span != _sweepSpan)
-        {
-            _sweepSpan = span;
-            _sweepLastIndex = -1;
-        }
-
         var runEnd = runAddress + runSize;
-        var index = Math.Max(_registry.FindFirstOverlappingIndex(runAddress), _sweepLastIndex + 1);
+        var index = _registry.FindFirstOverlappingIndex(runAddress);
         for (; index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < runEnd; index++)
         {
-            _sweepLastIndex = index;
             var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(index));
-            var start = Math.Max(buffer.CpuAddress, span.Address);
-            var finish = Math.Min(buffer.CpuAddress + buffer.Size, span.End);
-            if (start < finish && _tracker.MayHaveCpuDirtyPages(start, finish - start))
-                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
+            var start = Math.Max(buffer.CpuAddress, runAddress);
+            var finish = Math.Min(buffer.CpuAddress + buffer.Size, runEnd);
+            if (start >= finish)
+            {
+                continue;
+            }
+
+            if (!ReferenceEquals(buffer, _clearedRunsBuffer))
+            {
+                FlushClearedRuns();
+                _clearedRunsBuffer = buffer;
+                _clearedRunsStarted = BufferUploadProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                _clearedRuns.Begin(this, buffer, start, finish - start, defer: _sweepActive);
+            }
+
+            _clearedRuns.Extend(finish);
+            _clearedRuns.Collect(start, finish - start);
+        }
+    }
+
+    private void FlushClearedRuns()
+    {
+        if (_clearedRunsBuffer is not { } buffer)
+        {
+            return;
+        }
+
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferDirtySyncUpload);
+        try
+        {
+            var trackingStarted = RenderPhaseProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            _clearedRuns.Upload();
+            RecordCollectedUpload(_clearedRuns, buffer, _clearedRuns.GuestAddress, _clearedRuns.Size, trackingStarted, _clearedRunsStarted);
+        }
+        finally
+        {
+            DiscardClearedRuns();
+        }
+    }
+
+    private void DiscardClearedRuns()
+    {
+        if (_clearedRunsBuffer is not null)
+        {
+            _clearedRunsBuffer = null;
+            _clearedRuns.End();
         }
     }
 
@@ -2597,6 +2630,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             _defer = defer;
         }
 
+        public ulong GuestAddress => _guestAddress;
+
+        public ulong Size => _size;
+
+        public void Extend(ulong end) => _size = Math.Max(_size, end - _guestAddress);
+
         public void End()
         {
             InUse = false;
@@ -2613,9 +2652,15 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private bool SynchronizeBufferCore(UploadCollector collector, GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten,
         bool isTexelBuffer, bool preserveCpuWriteHotPages, long startedAt)
     {
-        var copies = collector.Copies;
         var trackingStarted = RenderPhaseProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         _tracker.ForEachUploadRange(guestAddress, size, isWritten, collector.Collect, collector.Upload, preserveCpuWriteHotPages);
+        RecordCollectedUpload(collector, buffer, guestAddress, size, trackingStarted, startedAt);
+        return isTexelBuffer && SynchronizeTexelFromImage(buffer, guestAddress, size);
+    }
+
+    private void RecordCollectedUpload(UploadCollector collector, GpuBuffer buffer, ulong guestAddress, ulong size, long trackingStarted, long startedAt)
+    {
+        var copies = collector.Copies;
         var recordStarted = trackingStarted != 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         var source = collector.Source;
         var totalSize = collector.TotalSize;
@@ -2641,8 +2686,6 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 hotBytes += _tracker.CountCpuWriteHotBytes(buffer.CpuAddress + copy.DstOffset, copy.Size);
             BufferUploadProfile.Record(guestAddress, size, copies.Count, totalSize, hotBytes, elapsedTicks);
         }
-
-        return isTexelBuffer && SynchronizeTexelFromImage(buffer, guestAddress, size);
     }
 
     // Records the copy of staged guest bytes into the buffer, ordered after earlier work on the buffer

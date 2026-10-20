@@ -885,6 +885,43 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void DeviceAddressSweep_UploadsTheDirtyPagesOfEveryBufferInABlockAndProtectsThem()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        var (first, firstOffset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x8000, isWritten: false));
+        var (second, secondOffset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x20000, 0x8000, isWritten: false));
+        Assert.NotSame(first, second);
+        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, 0x40000)]));
+
+        harness.Write(address + 0x1000, Pattern(0x20, 1));
+        Assert.True(harness.Store.NoteEmulatorWrite(address + 0x1000, 0x20));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x5000, 8));
+        harness.Write(address + 0x5000, Pattern(0x20, 2));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x21000, 8));
+        harness.Write(address + 0x21000, Pattern(0x20, 3));
+        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address + 0x5000));
+
+        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, 0x40000)]));
+
+        Assert.False(harness.Cache.HasCpuDirtyPages(address, 0x8000));
+        Assert.False(harness.Cache.HasCpuDirtyPages(address + 0x20000, 0x8000));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x1000));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x5000));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address + 0x21000));
+        Assert.Equal(Pattern(0x20, 1), harness.ReadBack(first, firstOffset + 0x1000, 0x20));
+        Assert.Equal(Pattern(0x20, 2), harness.ReadBack(first, firstOffset + 0x5000, 0x20));
+        Assert.Equal(Pattern(0x20, 3), harness.ReadBack(second, secondOffset + 0x1000, 0x20));
+
+        harness.Write(address + 0x1000, Pattern(0x20, 4));
+        Assert.True(harness.Store.NoteEmulatorWrite(address + 0x1000, 0x20));
+        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, 0x40000)]));
+        Assert.Equal(Pattern(0x20, 4), harness.ReadBack(first, firstOffset + 0x1000, 0x20));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void DeviceAddressPreparationTracksHotWritesAndPreservesStreamedReads()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

@@ -265,6 +265,40 @@ public sealed class TrackedRegion
         }
     }
 
+    public PageMask TakeCpuDirtyPages(in PageMask candidates)
+    {
+        var taken = _cpuDirty & candidates;
+        if (taken.None)
+        {
+            return taken;
+        }
+
+        foreach (var (runStart, runEnd) in taken)
+        {
+            _cpuDirty.UnsetRange(runStart, runEnd);
+            _recentCpuUploads.SetRange(runStart, runEnd);
+        }
+
+        UpdateCpuProtection();
+        return taken;
+    }
+
+    public void ReturnCpuDirtyPages(in PageMask pages)
+    {
+        foreach (var (runStart, runEnd) in pages)
+        {
+            _recentCpuUploads.UnsetRange(runStart, runEnd);
+        }
+
+        foreach (var (runStart, runEnd) in pages & ~_gpuDirty)
+        {
+            _protectedWhileDirty.UnsetRange(runStart, runEnd);
+            _cpuDirty.SetRange(runStart, runEnd);
+        }
+
+        UpdateCpuProtection();
+    }
+
     public (ulong Address, ulong Size) ExtendCpuDirtyRun(ulong address, ulong size, ulong lowerBound, ulong upperBound, bool preserveHotPages, int budgetPages)
     {
         var (start, end) = GetPageRange(address, size);
