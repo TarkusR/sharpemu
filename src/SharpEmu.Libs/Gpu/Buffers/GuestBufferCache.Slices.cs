@@ -104,6 +104,10 @@ public sealed unsafe partial class GuestBufferCache
 
     public bool MayHaveImageBytes(ulong guestAddress, ulong size) => RequireImageCache().MayHaveImageBytes(guestAddress, size);
 
+    public bool MayHaveCpuDirtyPages(ulong guestAddress, ulong size) => _tracker.MayHaveCpuDirtyPages(guestAddress, size);
+
+    public long RegionStamp(ulong guestAddress, ulong size) => _registry.RegionStamp(guestAddress, size);
+
     // Whether TryCopyWordsOnHost would copy, without copying.
     public bool WouldCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words)
     {

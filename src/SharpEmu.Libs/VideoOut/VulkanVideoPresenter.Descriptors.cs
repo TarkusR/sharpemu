@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.IO.Hashing;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
@@ -197,7 +198,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private const int ImageBindingMemoCapacity = 1 << 16;
         private Dictionary<ImageBindingKey, ImageBindingMemo>? _imageBindingMemos;
 
-        private readonly record struct BufferSourceMemo(ulong Address, ulong Requested, long Serial, long Spans, ResourceSlotIdentifier Buffer, ulong Size);
+        private readonly record struct BufferSourceMemo(ulong Address, ulong Requested, long RegionStamp, long Spans, ResourceSlotIdentifier Buffer, ulong Size);
         private Dictionary<ShaderProgramInfo, BufferSourceMemo[]>? _bufferSourceMemos;
         private ShaderProgramInfo? _lastBufferMemoProgram;
         private BufferSourceMemo[] _lastBufferMemos = [];
@@ -857,7 +858,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private const int FoundRangeSetSlots = 16;
-        private (DeviceAddressRange[]? Ranges, long Serial, long Spans)[]? _foundRangeSets;
+        private (DeviceAddressRange[]? Ranges, long RegionStamp, long Spans)[]? _foundRangeSets;
         private int _foundRangeSetNext;
 
         private void FindDeviceAddressBuffers(PreparedStageBindings prepared)
@@ -868,17 +869,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            var serial = _bufferCache.RegistrationSerial;
             var spans = GuestGpuMemoryHook.Current?.SpanVersion ?? 0;
             var foundSets = _worker ? null : _foundRangeSets ??= new (DeviceAddressRange[]?, long, long)[FoundRangeSetSlots];
             var found = false;
             if (foundSets is not null)
             {
+                long? stamp = null;
                 foreach (var set in foundSets)
                 {
-                    if (set.Ranges is { } known && set.Serial == serial && set.Spans == spans &&
-                        (ReferenceEquals(known, ranges) || known.AsSpan().SequenceEqual(ranges)))
+                    if (set.Ranges is { } known && set.Spans == spans &&
+                        (ReferenceEquals(known, ranges) || known.AsSpan().SequenceEqual(ranges)) &&
+                        set.RegionStamp == (stamp ??= RegionStampOf(ranges)))
                     {
+                        _foundSetsHit.Increment();
                         found = true;
                         break;
                     }
@@ -908,7 +911,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (!found && foundSets is not null)
             {
-                foundSets[_foundRangeSetNext] = (ranges, _bufferCache.RegistrationSerial, spans);
+                foundSets[_foundRangeSetNext] = (ranges, RegionStampOf(ranges), spans);
                 _foundRangeSetNext = (_foundRangeSetNext + 1) % FoundRangeSetSlots;
             }
         }
@@ -959,6 +962,17 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private long RegionStampOf(DeviceAddressRange[] ranges)
+        {
+            var stamp = 0L;
+            foreach (var range in ranges)
+            {
+                stamp += _bufferCache.RegionStamp(range.Base, range.Size);
+            }
+
+            return stamp;
+        }
+
         // The cache buffer each descriptor's range lives in; a null descriptor has none.
         private void FindBuffers(PreparedStageBindings prepared)
         {
@@ -990,7 +1004,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var remembered = memo.Address == descriptor.Address && memo.Requested == requested && memo.Spans == spans;
                 var size = remembered ? memo.Size : ClampMappedSize(descriptor.Address, requested, prepared, index);
                 PublishImagesUnderWrite(prepared.Resources.Info.Buffers[index], descriptor.Address, size);
-                if (remembered && memo.Serial == _bufferCache.RegistrationSerial)
+                if (remembered && memo.RegionStamp == _bufferCache.RegionStamp(descriptor.Address, requested))
                 {
                     sources[index] = (descriptor, memo.Buffer, memo.Size);
                     continue;
@@ -998,7 +1012,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 var buffer = FindBuffer(descriptor.Address, size);
                 sources[index] = (descriptor, buffer, size);
-                memo = new BufferSourceMemo(descriptor.Address, requested, _bufferCache.RegistrationSerial, spans, buffer, size);
+                memo = new BufferSourceMemo(descriptor.Address, requested, _bufferCache.RegionStamp(descriptor.Address, requested), spans, buffer, size);
             }
 
             prepared.BufferSources = sources;
@@ -1185,9 +1199,14 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint[] _tableBlockWords = new uint[64];
         private static long _tableBlocks;
         private static long _descriptorsShadowed;
+        private static readonly ThreadCounter _foundSetsHit = new();
+        private static readonly ThreadCounter _sliceUseHits = new();
+        private static readonly ThreadCounter _sliceUseMisses = new();
+        private static readonly ThreadCounter _sliceUseStale = new();
 
         internal static string TakeTableReport() =>
-            FormattableString.Invariant($"table_blocks={Interlocked.Exchange(ref _tableBlocks, 0)} descriptors_shadowed={Interlocked.Exchange(ref _descriptorsShadowed, 0)} ");
+            FormattableString.Invariant($"table_blocks={Interlocked.Exchange(ref _tableBlocks, 0)} descriptors_shadowed={Interlocked.Exchange(ref _descriptorsShadowed, 0)} ") +
+            FormattableString.Invariant($"vsharp_cache=hit:{_sliceUseHits.Take()},miss:{_sliceUseMisses.Take()},stale:{_sliceUseStale.Take()} found_sets_hit={_foundSetsHit.Take()} ");
 
         private ulong NullBufferAddress => _nullBufferAddress != 0 ? _nullBufferAddress : _nullBufferAddress = _bufferCache.GetBuffer(GuestBufferCache.NullBufferId).DeviceAddress;
 

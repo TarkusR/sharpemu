@@ -898,6 +898,25 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("pending publication", resumable: true);
             }
 
+            var cache = _sliceUses ??= new SliceUseEntry[SliceUseSlots];
+            ref var entry = ref cache[(int)(((address >> 4) ^ (address >> 17) ^ (size * 0x9E3779B1UL)) & (SliceUseSlots - 1))];
+            if (entry.Buffer is { } cached && entry.Address == address && entry.Size == size && entry.Written == isWritten &&
+                entry.Texel == isTexelBuffer && entry.InvalidateImages == invalidateImages)
+            {
+                if (ReferenceEquals(entry.Snapshot, _buffers) && (isWritten || !_bufferCache.MayHaveCpuDirtyPages(address, size)))
+                {
+                    _sliceUseHits.Increment();
+                    Requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, cached));
+                    return (cached, cached.Offset(address), cached.Size - cached.Offset(address));
+                }
+
+                _sliceUseStale.Increment();
+            }
+            else
+            {
+                _sliceUseMisses.Increment();
+            }
+
             var imageBytes = isTexelBuffer && _bufferCache.MayHaveImageBytes(address, size);
             if (!isWritten && !imageBytes && _bufferCache.PrefersStreamCopy(address, size, isTexelBuffer) &&
                 _presenter._translation.PendingWrites is { } pending && !pending.MayHavePending(address, size))
@@ -923,6 +942,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("buffer lookup", resumable: true);
             }
 
+            entry = new SliceUseEntry(address, size, isWritten, isTexelBuffer, invalidateImages, _buffers, buffer);
             Requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
             return (buffer, buffer.Offset(address), buffer.Size - buffer.Offset(address));
         }
@@ -958,6 +978,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _imageCache.ApplyNativeColorClear(imageIdentifier, request);
         }
+
+        private const int SliceUseSlots = 4096;
+        private SliceUseEntry[]? _sliceUses;
+
+        private readonly record struct SliceUseEntry(ulong Address, ulong Size, bool Written, bool Texel, bool InvalidateImages, BufferSnapshot Snapshot, GpuBuffer Buffer);
 
         private void TransitionImage(CachedImage image, AccessFlags access, SubresourceRange? range, CommandBuffer command)
         {

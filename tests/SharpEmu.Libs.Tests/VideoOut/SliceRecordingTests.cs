@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
@@ -255,6 +256,63 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
             Assert.Equal(before + 2, skipped.Total);
         });
         harness.Shutdown();
+    }
+
+    [Fact]
+    public void WorkerBufferUseCacheNeverHandsOutABufferAMergeRetired()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        var page = GuestBufferCache.CachingPageSize;
+        var host = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.RecordingHostType);
+        SetHostField(host, "_worker", true);
+        SetHostField(host, "_bufferCache", harness.Cache);
+        SetHostField(host, "_presenter", presenter.Instance);
+        var segment = Activator.CreateInstance(SegmentType, nonPublic: true)!;
+        SetHostField(host, "_segment", segment);
+        var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+        var uses = (List<BufferSliceUse>)requests.GetType().GetField("Buffers")!.GetValue(requests)!;
+        var hits = HostCounter("_sliceUseHits");
+        var stale = HostCounter("_sliceUseStale");
+        presenter.Run(() =>
+        {
+            var first = harness.Cache.ObtainBuffer(address, 4, isWritten: true).Buffer;
+            SetHostField(host, "_buffers", harness.Cache.RefreshSnapshot());
+            Assert.Same(first, ObtainForSlice(host, address));
+            var hitsBefore = hits.Total;
+            Assert.Same(first, ObtainForSlice(host, address));
+            Assert.Equal(hitsBefore + 1, hits.Total);
+
+            _ = harness.Cache.ObtainBuffer(address + 2 * page, 4, isWritten: true);
+            _ = harness.Cache.FindBuffer(address, 2 * page + 4);
+            var merged = harness.Cache.GetBuffer(harness.Cache.FindBuffer(address, 4));
+            Assert.NotSame(first, merged);
+            SetHostField(host, "_buffers", harness.Cache.RefreshSnapshot());
+
+            var staleBefore = stale.Total;
+            Assert.Same(merged, ObtainForSlice(host, address));
+            Assert.Equal(staleBefore + 1, stale.Total);
+            Assert.Same(merged, uses[^1].Buffer);
+            Assert.Same(merged, ObtainForSlice(host, address));
+            Assert.Equal(hitsBefore + 2, hits.Total);
+        });
+        harness.Shutdown();
+    }
+
+    private static void SetHostField(object host, string name, object value) =>
+        PresenterUnderTest.RecordingHostType.GetField(name, PresenterUnderTest.InstanceMembers)!.SetValue(host, value);
+
+    private static ThreadCounter HostCounter(string name) =>
+        (ThreadCounter)PresenterUnderTest.RecordingHostType.GetField(name, BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+
+    private static GpuBuffer ObtainForSlice(object host, ulong address)
+    {
+        var obtained = (ValueTuple<GpuBuffer, ulong>)PresenterUnderTest.RecordingHostType.GetMethod("ObtainBufferForSlice", PresenterUnderTest.InstanceMembers)!
+            .Invoke(host, [address, 4UL, true, false, false])!;
+        Assert.Equal(obtained.Item1.Offset(address), obtained.Item2);
+        return obtained.Item1;
     }
 
     private static readonly Type SliceType = typeof(VulkanVideoPresenter).GetNestedType("RenderSlice", BindingFlags.NonPublic)!;
