@@ -184,7 +184,7 @@ public sealed class TrackedRegion
         bool preserveHotPages,
         ulong address,
         ulong size,
-        Action<ulong, ulong> visitCleared,
+        List<(TrackedRegion Region, ulong Address, ulong Size)> cleared,
         Action<ulong, ulong> visitUpload,
         long uploadBatch = -1)
     {
@@ -213,10 +213,10 @@ public sealed class TrackedRegion
             }
         }
 
-        var cleared = preserveHotPages ? upload & ~_hotCpuWrites : upload;
-        foreach (var (runStart, runEnd) in cleared)
+        var clearedPages = preserveHotPages ? upload & ~_hotCpuWrites : upload;
+        foreach (var (runStart, runEnd) in clearedPages)
         {
-            visitCleared(BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+            cleared.Add((this, BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes));
             _cpuDirty.UnsetRange(runStart, runEnd);
             _recentCpuUploads.SetRange(runStart, runEnd);
         }

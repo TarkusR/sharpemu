@@ -1058,6 +1058,55 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
+    [NativePageProtectionFact]
+    public void UploadOfACleanRangeAllocatesNothingAndStillRunsTheUploadCallback()
+    {
+        var address = Allocate(2);
+        _tracker.ForEachUploadRange(address, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        var uploads = 0;
+        var ranges = 0;
+        Action<ulong, ulong> countRange = (_, _) => ranges++;
+        Action countUpload = () => uploads++;
+
+        var allocated = AllocationMeasurement.SteadyState(
+            () => _tracker.ForEachUploadRange(address, Page * 2, false, countRange, countUpload),
+            () => _tracker.ForEachUploadRange(address, Page * 2, false, countRange, countUpload));
+
+        Assert.Equal(0, allocated);
+        Assert.Equal(0, ranges);
+        Assert.True(uploads >= 2);
+        _tracker.UntrackMemory(address, Page * 2);
+        Release(address, Page * 2);
+    }
+
+    [NativePageProtectionFact]
+    public void UploadOfDirtyPagesAllocatesNothingBeyondTheCallbacks()
+    {
+        var address = Allocate(2);
+        _tracker.ForEachUploadRange(address, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        var least = long.MaxValue;
+        var ranges = 0;
+        Action<ulong, ulong> countRange = (_, _) => ranges++;
+        var thread = new Thread(() =>
+        {
+            for (var round = 0; round < 6; round++)
+            {
+                _tracker.MarkCpuDirtyPages(address, Page * 2);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                _tracker.ForEachUploadRange(address, Page * 2, false, countRange, NoUpload, preserveCpuWriteHotPages: false);
+                least = Math.Min(least, GC.GetAllocatedBytesForCurrentThread() - before);
+            }
+        });
+        thread.Start();
+        thread.Join();
+
+        Assert.Equal(0, least);
+        Assert.Equal(6, ranges);
+        Assert.False(_tracker.HasCpuDirtyPages(address, Page * 2));
+        _tracker.UntrackMemory(address, Page * 2);
+        Release(address, Page * 2);
+    }
+
     private static void NoRange(ulong address, ulong size)
     {
     }

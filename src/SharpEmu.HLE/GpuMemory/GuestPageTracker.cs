@@ -366,8 +366,14 @@ public sealed class GuestPageTracker
         bool preserveCpuWriteHotPages = true)
     {
         RejectUploadCallbackReentry();
+        if (!isWritten && !MayHaveCpuDirtyPages(vaddr, size))
+        {
+            uploadFunc();
+            return;
+        }
+
         using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRegionSetup) : default)
-            VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
+            CreateRegions(vaddr, size);
         var scratch = _availableUploadScratch ?? new UploadScratch();
         // Nested uploads on another tracker must use separate storage.
         _availableUploadScratch = null;
@@ -378,39 +384,39 @@ public sealed class GuestPageTracker
         _uploadOwner = this;
         try
         {
-            TrackedRegion? currentRegion = null;
-            Action<ulong, ulong> recordCleared = (address, bytes) => cleared.Add((currentRegion!, address, bytes));
             using (GpuMemoryAccessProfile.Measure(GpuMemoryAccessProfile.Operation.UploadTracking, size))
             {
-                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+                var remaining = size;
+                var index = vaddr / BlockBytes;
+                var offset = vaddr % BlockBytes;
+                while (remaining != 0)
                 {
-                    if (isWritten && region.IsGpuOwned(offset, bytes))
+                    var bytes = Math.Min(BlockBytes - offset, remaining);
+                    var region = Volatile.Read(ref _regions[index])!;
+                    if (!isWritten || !region.IsGpuOwned(offset, bytes))
                     {
-                        return false;
+                        using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadLockWait) : default)
+                            region.Lock.Enter();
+                        held.Add(region);
+                        using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRangeScan) : default)
+                            region.ForEachCpuUploadRange(
+                                preserveHotPages: !isWritten && preserveCpuWriteHotPages,
+                                region.BaseAddress + offset,
+                                bytes,
+                                cleared,
+                                rangeFunc,
+                                UploadBatch);
+                        if (!isWritten)
+                        {
+                            region.Lock.Exit();
+                            held.RemoveAt(held.Count - 1);
+                        }
                     }
 
-                    using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadLockWait) : default)
-                        region.Lock.Enter();
-                    held.Add(region);
-                    currentRegion = region;
-                    var address = region.BaseAddress + offset;
-                    using var scan = isWritten
-                        ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRangeScan) : default;
-                    region.ForEachCpuUploadRange(
-                        preserveHotPages: !isWritten && preserveCpuWriteHotPages,
-                        address,
-                        bytes,
-                        recordCleared,
-                        rangeFunc,
-                        UploadBatch);
-                    if (!isWritten)
-                    {
-                        region.Lock.Exit();
-                        held.RemoveAt(held.Count - 1);
-                    }
-
-                    return false;
-                });
+                    remaining -= bytes;
+                    offset = 0;
+                    index++;
+                }
             }
             using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadSource) : default)
                 uploadFunc();
@@ -793,6 +799,19 @@ public sealed class GuestPageTracker
         }
 
         return true;
+    }
+
+    private void CreateRegions(ulong vaddr, ulong size)
+    {
+        ValidateRange(vaddr, size);
+        var last = (vaddr + size - 1) / BlockBytes;
+        for (var index = vaddr / BlockBytes; index <= last; index++)
+        {
+            if (Volatile.Read(ref _regions[index]) == null)
+            {
+                _ = GetOrCreateRegion(index);
+            }
+        }
     }
 
     // Visits (region, offset, bytes) per 4 MiB chunk; a true result stops the walk early.
