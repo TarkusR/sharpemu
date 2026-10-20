@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.VideoOut;
 using System.Numerics;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -294,6 +295,161 @@ public unsafe class GpuBuffer : IDisposable
         VulkanSynchronization.PipelineBarrier(vk,
             native, PipelineStageFlags.TransferBit, GetAccessStage(sourceAfter | destinationAfter), DependencyFlags.ByRegionBit,
             0, null, 2, after, 0, null);
+    }
+
+    public sealed class CopyRun
+    {
+        private static readonly ThreadCounter _runs = new();
+        private static readonly ThreadCounter _copies = new();
+
+        private readonly record struct PendingCopy(GpuBuffer Source, ulong SourceOffset, GpuBuffer Destination, ulong DestinationOffset, ulong Size);
+
+        private readonly List<PendingCopy> _pending = [];
+        private BufferMemoryBarrier2[] _barriers = new BufferMemoryBarrier2[16];
+        private BufferCopy[] _regions = new BufferCopy[8];
+        private RecordingBuffer? _command;
+        private AccessFlags _sourceBefore;
+        private AccessFlags _destinationBefore;
+        private AccessFlags _sourceAfter;
+        private AccessFlags _destinationAfter;
+
+        public int Count => _pending.Count;
+
+        public int Flushes { get; private set; }
+
+        public void Begin(
+            RecordingBuffer command,
+            AccessFlags sourceBefore = AccessFlags.MemoryWriteBit,
+            AccessFlags destinationBefore = MemoryAccess,
+            AccessFlags sourceAfter = MemoryAccess,
+            AccessFlags destinationAfter = MemoryAccess)
+        {
+            if (_pending.Count != 0)
+            {
+                throw SubmissionScheduler.Fatal("A buffer copy run began before the previous run was recorded.");
+            }
+
+            _command = command;
+            _sourceBefore = sourceBefore;
+            _destinationBefore = destinationBefore;
+            _sourceAfter = sourceAfter;
+            _destinationAfter = destinationAfter;
+        }
+
+        public void Add(GpuBuffer source, ulong sourceOffset, GpuBuffer destination, ulong destinationOffset, ulong size)
+        {
+            if (_command == null)
+            {
+                throw SubmissionScheduler.Fatal("The buffer copy run has no command buffer.");
+            }
+
+            if (size == 0 || sourceOffset > source.Size || size > source.Size - sourceOffset ||
+                destinationOffset > destination.Size || size > destination.Size - destinationOffset)
+            {
+                throw SubmissionScheduler.Fatal("The buffer copy range is invalid.");
+            }
+
+            if (Overlaps(source, sourceOffset, size, destination, destinationOffset, size))
+            {
+                throw SubmissionScheduler.Fatal("Cannot copy overlapping ranges of the same buffer.");
+            }
+
+            foreach (var pending in _pending)
+            {
+                if (Overlaps(pending.Destination, pending.DestinationOffset, pending.Size, source, sourceOffset, size) ||
+                    Overlaps(pending.Destination, pending.DestinationOffset, pending.Size, destination, destinationOffset, size) ||
+                    Overlaps(pending.Source, pending.SourceOffset, pending.Size, destination, destinationOffset, size))
+                {
+                    Flush();
+                    break;
+                }
+            }
+
+            _pending.Add(new PendingCopy(source, sourceOffset, destination, destinationOffset, size));
+        }
+
+        public void Flush()
+        {
+            var count = _pending.Count;
+            if (count == 0)
+            {
+                return;
+            }
+
+            var command = _command ?? throw SubmissionScheduler.Fatal("The buffer copy run has no command buffer.");
+            command.EndRendering();
+            if (_barriers.Length < count * 2)
+            {
+                _barriers = new BufferMemoryBarrier2[Math.Max(count * 2, _barriers.Length * 2)];
+            }
+
+            if (_regions.Length < count)
+            {
+                _regions = new BufferCopy[Math.Max(count, _regions.Length * 2)];
+            }
+
+            var vk = _pending[0].Destination._device.Vk;
+            var native = new CommandBuffer(command.TransferHandle);
+            fixed (BufferMemoryBarrier2* barriers = _barriers)
+            fixed (BufferCopy* regions = _regions)
+            {
+                for (var index = 0; index < count; index++)
+                {
+                    var copy = _pending[index];
+                    barriers[index * 2] = copy.Source.CreateBarrier(copy.SourceOffset, copy.Size, _sourceBefore, AccessFlags.TransferReadBit);
+                    barriers[index * 2 + 1] = copy.Destination.CreateBarrier(copy.DestinationOffset, copy.Size, _destinationBefore, AccessFlags.TransferWriteBit);
+                }
+
+                VulkanSynchronization.PipelineBarrier(vk,
+                    native, GetAccessStage(_sourceBefore | _destinationBefore), PipelineStageFlags.TransferBit, DependencyFlags.ByRegionBit,
+                    0, null, (uint)count * 2, barriers, 0, null);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    for (var first = 0; first < count;)
+                    {
+                        var pair = _pending[first];
+                        var end = first;
+                        while (end < count && ReferenceEquals(_pending[end].Source, pair.Source) && ReferenceEquals(_pending[end].Destination, pair.Destination))
+                        {
+                            var copy = _pending[end];
+                            copy.Destination.NoteGpuWrite(copy.DestinationOffset, copy.Size);
+                            regions[end - first] = new BufferCopy(copy.SourceOffset, copy.DestinationOffset, copy.Size);
+                            end++;
+                        }
+
+                        vk.CmdCopyBuffer(native, pair.Source.Handle, pair.Destination.Handle, (uint)(end - first), regions);
+                        first = end;
+                    }
+                }
+
+                for (var index = 0; index < count; index++)
+                {
+                    var copy = _pending[index];
+                    barriers[index * 2] = copy.Source.CreateBarrier(copy.SourceOffset, copy.Size, AccessFlags.TransferReadBit, _sourceAfter);
+                    barriers[index * 2 + 1] = copy.Destination.CreateBarrier(copy.DestinationOffset, copy.Size, AccessFlags.TransferWriteBit, _destinationAfter);
+                }
+
+                VulkanSynchronization.PipelineBarrier(vk,
+                    native, PipelineStageFlags.TransferBit, GetAccessStage(_sourceAfter | _destinationAfter), DependencyFlags.ByRegionBit,
+                    0, null, (uint)count * 2, barriers, 0, null);
+            }
+
+            _runs.Increment();
+            _copies.Add(count);
+            Flushes++;
+            _pending.Clear();
+        }
+
+        public void End()
+        {
+            Flush();
+            _command = null;
+        }
+
+        public static string TakeReport() => FormattableString.Invariant($"copy_runs={_runs.Take()}/{_copies.Take()}");
+
+        private static bool Overlaps(GpuBuffer first, ulong firstOffset, ulong firstSize, GpuBuffer second, ulong secondOffset, ulong secondSize) =>
+            first.Handle.Handle == second.Handle.Handle && firstOffset < secondOffset + secondSize && secondOffset < firstOffset + firstSize;
     }
 
     public void Fill(ulong offset, ulong size, uint value)

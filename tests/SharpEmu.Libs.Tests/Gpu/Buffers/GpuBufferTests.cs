@@ -173,4 +173,93 @@ public sealed class GpuBufferTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Contains("Cannot copy overlapping ranges of the same buffer.", fatal.Messages);
         worker.Run(() => worker.Scheduler.Shutdown());
     }
+
+    [Fact]
+    public void CopyRun_RecordsIndependentCopiesBetweenOnePairOfBarriers()
+    {
+        if (_vulkan is null) return;
+        using var worker = new CacheWorker(_vulkan);
+        var info = _vulkan.DeviceInfo;
+        using var device = new GpuBuffer(info, worker.Scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, 0x1000);
+        using var upload = new GpuBuffer(info, worker.Scheduler, GpuBufferUsage.Upload, 0, GpuBuffer.AllFlags, 0x1000);
+        using var download = new GpuBuffer(info, worker.Scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, 0x1000);
+        var pattern = Enumerable.Range(0, 0x300).Select(index => (byte)(index * 7 + 1)).ToArray();
+        var run = new GpuBuffer.CopyRun();
+
+        worker.Run(() =>
+        {
+            worker.Scheduler.Begin(new SubmissionContext());
+            device.Fill(0, 0x1000, 0);
+            upload.Write(0, pattern);
+            run.Begin(worker.Scheduler.Current, AccessFlags.HostWriteBit, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit | AccessFlags.HostReadBit);
+            run.Add(upload, 0x000, device, 0x800, 0x100);
+            run.Add(upload, 0x100, device, 0x100, 0x100);
+            run.Add(upload, 0x200, download, 0xF00, 0x100);
+            Assert.Equal(3, run.Count);
+            run.End();
+            Assert.Equal(1, run.Flushes);
+            Assert.NotEqual(0UL, device.LastGpuWriteTickIn(0x800, 0x100));
+
+            run.Begin(worker.Scheduler.Current, AccessFlags.MemoryWriteBit, AccessFlags.None, AccessFlags.MemoryReadBit, AccessFlags.HostReadBit);
+            run.Add(device, 0x000, download, 0x000, 0xF00);
+            run.End();
+            Assert.Equal(2, run.Flushes);
+            worker.Scheduler.Finish();
+            download.Invalidate(0, 0x1000);
+        });
+
+        var bytes = download.Mapped.ToArray();
+        Assert.Equal(pattern[0x100..0x200], bytes[0x100..0x200]);
+        Assert.Equal(pattern[0x000..0x100], bytes[0x800..0x900]);
+        Assert.Equal(pattern[0x200..0x300], bytes[0xF00..0x1000]);
+        Assert.All(bytes[0x200..0x800], value => Assert.Equal(0, value));
+        Assert.Contains("copy_runs=", GpuBuffer.CopyRun.TakeReport(), StringComparison.Ordinal);
+        worker.Run(() => worker.Scheduler.Shutdown());
+    }
+
+    [Fact]
+    public void CopyRun_ACopyReadingAPendingDestinationRecordsTheRunFirst()
+    {
+        if (_vulkan is null) return;
+        using var worker = new CacheWorker(_vulkan);
+        var info = _vulkan.DeviceInfo;
+        using var device = new GpuBuffer(info, worker.Scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, 0x1000);
+        using var upload = new GpuBuffer(info, worker.Scheduler, GpuBufferUsage.Upload, 0, GpuBuffer.AllFlags, 0x1000);
+        using var download = new GpuBuffer(info, worker.Scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, 0x1000);
+        var pattern = Enumerable.Range(0, 0x100).Select(index => (byte)(index ^ 0x5A)).ToArray();
+        var run = new GpuBuffer.CopyRun();
+
+        worker.Run(() =>
+        {
+            worker.Scheduler.Begin(new SubmissionContext());
+            upload.Write(0, pattern);
+            run.Begin(worker.Scheduler.Current, AccessFlags.HostWriteBit, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit | AccessFlags.HostReadBit);
+            run.Add(upload, 0, device, 0x200, 0x100);
+            run.Add(device, 0x280, download, 0x000, 0x80);
+            Assert.Equal(1, run.Flushes);
+            run.Add(upload, 0, device, 0x600, 0x100);
+            run.Add(upload, 0x80, device, 0x640, 0x10);
+            Assert.Equal(2, run.Flushes);
+            run.Add(device, 0x000, upload, 0x800, 0x100);
+            Assert.Equal(2, run.Flushes);
+            run.End();
+            Assert.Equal(3, run.Flushes);
+            worker.Scheduler.Finish();
+            download.Invalidate(0, 0x1000);
+        });
+
+        Assert.Equal(pattern[0x80..0x100], download.Mapped.ToArray()[..0x80]);
+
+        using var fatal = new FatalScope();
+        worker.Run(() =>
+        {
+            run.Begin(worker.Scheduler.Current);
+            Assert.Throws<SchedulerFatalException>(() => run.Add(device, 0, device, 0x80, 0x100));
+            run.End();
+        });
+        Assert.Contains("Cannot copy overlapping ranges of the same buffer.", fatal.Messages);
+        worker.Run(() => worker.Scheduler.Shutdown());
+    }
 }
