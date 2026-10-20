@@ -160,6 +160,23 @@ public sealed class ShaderProgramCacheTests : IDisposable
     }
 
     [Fact]
+    public void Materializations_AreTalliedByOutcome()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.FormatLoadProgram);
+        _ = MaterializationTally.TakeReport();
+        var cursor = 0u;
+        _ = Compile(CodeA, PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint), ref cursor, out _);
+        cursor = 0;
+        _ = Compile(CodeA, PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint), ref cursor, out var stage);
+        _ = _guest.Programs.Revalidate(stage);
+
+        var report = MaterializationTally.TakeReport();
+        Assert.StartsWith("materialize=", report);
+        Assert.Matches(@"(FastHit|FastMiss|FastFallback|CacheHit|CacheRebaseHit|TableRefresh|Volatile|Full)=[1-9]", report);
+        Assert.Matches(@"(KeptRevalidated|KeptStale|RevalidateRefused)=[1-9]", report);
+    }
+
+    [Fact]
     public void ConcurrentLookups_BuildOneEntryAndOneCompilePerKey()
     {
         _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.FormatLoadProgram);

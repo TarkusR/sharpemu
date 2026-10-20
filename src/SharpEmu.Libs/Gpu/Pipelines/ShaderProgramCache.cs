@@ -185,9 +185,22 @@ internal sealed class ShaderProgramCache
     public static ResourceMaterializationCache? Materializations =>
         MaterializationCacheEnabled ? _threadMaterializations ??= new ResourceMaterializationCache(limitChurn: true) : null;
 
-    public bool Revalidate(in ShaderStageResources stage) =>
-        stage.Program is not null && (ResourceMaterializer.RevalidateFast(stage.Resources) ??
-            (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes)));
+    public bool Revalidate(in ShaderStageResources stage)
+    {
+        if (stage.Program is null)
+        {
+            return false;
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var fast = ResourceMaterializer.RevalidateFast(stage.Resources);
+        var current = fast ?? (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes));
+        var outcome = current ? MaterializationTally.Outcome.KeptRevalidated
+            : fast is not null && ResourceMaterializer.LastRevalidateRefused ? MaterializationTally.Outcome.RevalidateRefused
+            : MaterializationTally.Outcome.KeptStale;
+        MaterializationTally.Note(outcome, System.Diagnostics.Stopwatch.GetTimestamp() - started, stage.Resources);
+        return current;
+    }
 
     // Read once: the draw path asked the environment on every draw and dispatch
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
@@ -414,13 +427,29 @@ internal sealed class ShaderProgramCache
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.
             ResourceMaterializationFailure materializationFailure;
-            var materialized = captureIndirectImageFailure is null && ResourceMaterializer.CanMaterializeFast(entry.Plan)
-                ? ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure)
-                : Materializations is { } materializations && captureIndirectImageFailure is null
-                    ? materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
-                        out materializationFailure)
-                    : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
-                        captureIndirectImageFailure);
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool materialized;
+            MaterializationTally.Outcome outcome;
+            if (captureIndirectImageFailure is null && ResourceMaterializer.CanMaterializeFast(entry.Plan))
+            {
+                materialized = ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
+                outcome = ResourceMaterializer.LastFastOutcome;
+            }
+            else if (Materializations is { } materializations && captureIndirectImageFailure is null)
+            {
+                materialized = materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
+                    out materializationFailure);
+                outcome = MaterializationTally.FromCache(materializations.LastOutcome);
+            }
+            else
+            {
+                materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                    captureIndirectImageFailure);
+                outcome = MaterializationTally.Outcome.Full;
+            }
+
+            MaterializationTally.Note(materialized ? outcome : MaterializationTally.Outcome.Failed,
+                System.Diagnostics.Stopwatch.GetTimestamp() - started, materialized ? snapshot : null);
             if (!materialized)
             {
                 var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";

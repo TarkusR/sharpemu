@@ -169,6 +169,16 @@ public static partial class ResourceMaterializer
 
     private sealed record FastOrigin(ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs);
 
+    [ThreadStatic]
+    private static MaterializationTally.Outcome _lastFastOutcome;
+
+    [ThreadStatic]
+    private static bool _lastRevalidateRefused;
+
+    public static MaterializationTally.Outcome LastFastOutcome => _lastFastOutcome;
+
+    public static bool LastRevalidateRefused => _lastRevalidateRefused;
+
     // A fast snapshot is still current when its plan evaluates to the same words again; null when
     // the snapshot did not come from the fast path.
     public static bool? RevalidateFast(ResourceSnapshot snapshot)
@@ -179,7 +189,8 @@ public static partial class ResourceMaterializer
         }
 
         var plan = origin.Plan;
-        if (origin.Inputs.TablePhase is not null)
+        _lastRevalidateRefused = origin.Inputs.TablePhase is not null;
+        if (_lastRevalidateRefused)
         {
             return false;
         }
@@ -322,6 +333,7 @@ public static partial class ResourceMaterializer
     {
         using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
         failure = ResourceMaterializationFailure.Other;
+        _lastFastOutcome = MaterializationTally.Outcome.FastFallback;
         if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
         {
             return false;
@@ -343,6 +355,7 @@ public static partial class ResourceMaterializer
 
             _programRuns.Increment();
             _fastMaterializations.Increment();
+            _lastFastOutcome = MaterializationTally.Outcome.FastMiss;
             return MaterializeFromOutput(plan, inputs, output, ref snapshot, ref specialization, out failure);
         }
         finally
@@ -386,6 +399,7 @@ public static partial class ResourceMaterializer
         if (memo is not null)
         {
             _fastSpecializationHits.Increment();
+            _lastFastOutcome = MaterializationTally.Outcome.FastHit;
             uint[]? statistics = null;
             if (statisticsDiffer)
             {

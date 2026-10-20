@@ -1092,6 +1092,7 @@ public sealed partial class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
+        _outcome = MaterializeOutcome.Failed;
         var timing = new MaterializationTiming(MissDiagnosticsEnabled);
         try
         {
@@ -1119,6 +1120,8 @@ public sealed partial class ResourceMaterializationCache
             timing.Complete(plan);
         }
     }
+
+    public MaterializeOutcome LastOutcome => _outcome;
 
     public static string TakeOutcomeReport()
     {
