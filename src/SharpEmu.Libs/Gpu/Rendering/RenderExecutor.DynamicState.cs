@@ -29,34 +29,36 @@ public sealed partial class RenderExecutor
     }
 
     // The dynamic state of a draw from the context bank and the resolved targets.
-    private DynamicDrawState ResolveDynamicState(RegisterBanks banks, in DrawState state, ulong submitId, ulong packetAddress)
+    private DynamicDrawState ResolveDynamicState(RegisterBanks banks, in DrawState state, uint writtenColors, ulong submitId, ulong packetAddress)
     {
         var resolution = _drawResolution;
         var boundSlots = 0u;
-        for (var index = 0; index < state.ColorCount; index++)
+        for (var remaining = writtenColors; remaining != 0; remaining &= remaining - 1)
         {
-            boundSlots |= 1u << (int)state.Colors[index].Slot;
+            boundSlots |= 1u << (int)state.Colors[System.Numerics.BitOperations.TrailingZeroCount(remaining)].Slot;
         }
+
+        var colorCount = (uint)System.Numerics.BitOperations.PopCount(writtenColors);
 
         var key = new DynamicStateKey(
             banks.ContextStamp,
             banks.Stamp(RegisterStamp.ContextDynamic),
             resolution.TargetVersion,
-            state.ColorCount,
+            colorCount,
             boundSlots,
-            state.ColorCount > 0,
+            colorCount > 0,
             state.Depth.HasTarget);
         if (key == resolution.DynamicKey && ScissorTrace.Instance is not { Active: true })
         {
             return resolution.Dynamic;
         }
 
-        resolution.Dynamic = BuildDynamicState(banks, in state, submitId, packetAddress);
+        resolution.Dynamic = BuildDynamicState(banks, in state, writtenColors, submitId, packetAddress);
         resolution.DynamicKey = key;
         return resolution.Dynamic;
     }
 
-    private DynamicDrawState BuildDynamicState(RegisterBanks banks, in DrawState state, ulong submitId, ulong packetAddress)
+    private DynamicDrawState BuildDynamicState(RegisterBanks banks, in DrawState state, uint writtenColors, ulong submitId, ulong packetAddress)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawDynamicStatePreparation);
         var context = banks.Context;
@@ -64,10 +66,11 @@ public sealed partial class RenderExecutor
         var limits = _host.Limits;
         uint framebufferWidth;
         uint framebufferHeight;
-        if (state.ColorCount > 0)
+        if (writtenColors != 0)
         {
-            framebufferWidth = state.Colors[0].Resolution.Extent.Width;
-            framebufferHeight = state.Colors[0].Resolution.Extent.Height;
+            ref readonly var first = ref state.Colors[System.Numerics.BitOperations.TrailingZeroCount(writtenColors)];
+            framebufferWidth = first.Resolution.Extent.Width;
+            framebufferHeight = first.Resolution.Extent.Height;
         }
         else if (state.Depth.HasTarget)
         {
@@ -131,11 +134,12 @@ public sealed partial class RenderExecutor
         }
 
         byte colorWriteMask = 0;
-        for (var i = 0; i < state.ColorCount; i++)
+        var position = 0;
+        for (var remaining = writtenColors; remaining != 0; remaining &= remaining - 1, position++)
         {
-            if (context.RenderTargetMaskForSlot(state.Colors[i].Slot) != 0)
+            if (context.RenderTargetMaskForSlot(state.Colors[System.Numerics.BitOperations.TrailingZeroCount(remaining)].Slot) != 0)
             {
-                colorWriteMask |= (byte)(1 << i);
+                colorWriteMask |= (byte)(1 << position);
             }
         }
 
@@ -163,7 +167,7 @@ public sealed partial class RenderExecutor
             depthState.StencilTestEnabled,
             depthState.FrontMasks,
             depthState.BackMasks,
-            state.ColorCount,
+            (uint)position,
             colorWriteMask,
             context.DepthCountControl);
         if (ScissorTrace.Instance is { Active: true } trace)

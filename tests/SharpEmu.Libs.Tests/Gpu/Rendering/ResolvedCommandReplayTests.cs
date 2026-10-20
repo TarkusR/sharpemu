@@ -81,4 +81,49 @@ public sealed class ResolvedCommandReplayTests : IDisposable
         Assert.Equal(["get_compute_program threadDimensions=False", "get_graphics_programs pixelActive=True", "get_graphics_programs pixelActive=True"],
             pipelines.Calls.Take(3).Order());
     }
+
+    [Fact]
+    public void ARecordRecordedASecondTimeMakesTheSameHostCalls()
+    {
+        var (host, pipelines) = Arrange();
+        var sink = new CapturingSink();
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorTargets[1] = SharpEmu.Libs.Tests.Gpu.Images.RegisterWords.Color(SecondColorBase, 64, 64);
+        banks.Context.RenderTargetMask = 0xFF;
+        new RenderExecutor(host, pipelines, sink).DrawIndexed(7, banks, Indexed(6));
+        var draw = Assert.IsType<ResolvedDraw>(Assert.Single(sink.Records));
+
+        new RenderRecorder(host, pipelines, strictDrawResources: true, returnsRecords: false).Record(draw);
+        var first = host.Calls.ToList();
+        host.Calls.Clear();
+        new RenderRecorder(host, pipelines, strictDrawResources: true, returnsRecords: false).Record(draw);
+
+        static string[] Targets(IEnumerable<string> calls) =>
+            calls.Where(static call => call.StartsWith("find_image", StringComparison.Ordinal) || call.StartsWith("acquire_", StringComparison.Ordinal) ||
+                call.StartsWith("begin_rendering", StringComparison.Ordinal) || call.StartsWith("draw_indexed", StringComparison.Ordinal)).ToArray();
+        Assert.Contains(first, call => call.StartsWith("begin_rendering", StringComparison.Ordinal));
+        Assert.Equal(Targets(first), Targets(host.Calls));
+    }
+
+    [Fact]
+    public void AResetRecordStartsFromAnEmptyDrawState()
+    {
+        var record = new ResolvedDraw();
+        record.State.ColorCount = 3;
+        record.State.DepthResolved = true;
+        record.State.PixelActive = false;
+        record.State.StartInstanceUserData = 4;
+        record.State.Programs = Programs();
+        record.State.Rendering.ColorAttachmentCount = 3;
+
+        record.Reset();
+
+        Assert.Equal(0u, record.State.ColorCount);
+        Assert.False(record.State.DepthResolved);
+        Assert.False(record.State.Depth.HasTarget);
+        Assert.True(record.State.PixelActive);
+        Assert.Equal(-1, record.State.StartInstanceUserData);
+        Assert.Null(record.State.Programs);
+        Assert.Equal(0u, record.State.Rendering.ColorAttachmentCount);
+    }
 }

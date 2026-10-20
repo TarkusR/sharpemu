@@ -36,6 +36,17 @@ internal struct DrawState
 
     public static DrawState Create() => new() { PixelActive = true, Programs = null!, StartInstanceUserData = -1 };
 
+    public void Begin(int startInstanceUserData)
+    {
+        ColorCount = 0;
+        Depth = default;
+        DepthResolved = false;
+        PixelActive = true;
+        Rendering.ColorAttachmentCount = 0;
+        Programs = null!;
+        StartInstanceUserData = startInstanceUserData;
+    }
+
     public static ReadOnlySpan<ColorTargetState> BoundColors(ref DrawState state) =>
         ((ReadOnlySpan<ColorTargetState>)state.Colors)[..(int)state.ColorCount];
 }
@@ -105,7 +116,7 @@ internal sealed class ResolvedDraw
         TargetsResolved = false;
         SubmitId = 0;
         Draw = default;
-        State = DrawState.Create();
+        State.Begin(-1);
         Topology = default;
         PrimitiveRestart = false;
         PrimitiveType = default;

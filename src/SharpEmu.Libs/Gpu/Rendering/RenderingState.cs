@@ -73,7 +73,7 @@ public struct RenderingState : IEquatable<RenderingState>
             return false;
         }
 
-        for (var i = 0; i < ColorAttachmentCapacity; i++)
+        for (var i = 0; i < ColorAttachmentCount; i++)
         {
             if (!ColorAttachments[i].Equals(other.ColorAttachments[i]))
             {
@@ -89,7 +89,7 @@ public struct RenderingState : IEquatable<RenderingState>
     public override readonly int GetHashCode()
     {
         var hash = HashCode.Combine(Width, Height, Layers, ColorAttachmentCount, Samples, DepthStencilAttachment);
-        for (var i = 0; i < ColorAttachmentCapacity; i++)
+        for (var i = 0; i < ColorAttachmentCount; i++)
         {
             hash = HashCode.Combine(hash, ColorAttachments[i]);
         }

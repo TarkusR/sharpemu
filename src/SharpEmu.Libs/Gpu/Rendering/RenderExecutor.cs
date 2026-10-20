@@ -316,8 +316,8 @@ public sealed partial class RenderExecutor
             expandedIndices,
             expandedIndices is null ? indexSize : (ulong)expandedIndices.Length,
             indexType);
-        var state = DrawState.Create();
-        state.StartInstanceUserData = arguments.StartInstanceUserData;
+        ref var state = ref record.State;
+        state.Begin(arguments.StartInstanceUserData);
         if (!TryResolveDrawTargets(banks, in draw, ref state, record))
         {
             TraceDisposition("no-targets");
@@ -329,7 +329,6 @@ public sealed partial class RenderExecutor
         record.TargetsResolved = true;
         if (arguments.IndirectArgumentsAddress != 0 && state.ColorCount == 0 && !state.Depth.HasTarget)
         {
-            record.State = state;
             Record(record);
             DrawIndexedWithCpuArguments(submitId, banks, in arguments);
             return;
@@ -339,7 +338,6 @@ public sealed partial class RenderExecutor
         if (!ApplyProgramAdaptations(banks, in draw, ref state, new TargetlessDrawArguments(submitId, true, arguments, default), record))
         {
             TraceDisposition("adapted");
-            record.State = state;
             record.ResetBindings = true;
             Record(record);
             return;
@@ -432,8 +430,8 @@ public sealed partial class RenderExecutor
 
         ValidateChangedDrawRegisters(banks);
         var draw = new DrawCall("DrawAuto", RecordedOperation.DrawIndexAuto, arguments.VertexCount, arguments.InstanceCount, arguments.FirstInstance);
-        var state = DrawState.Create();
-        state.StartInstanceUserData = arguments.StartInstanceUserData;
+        ref var state = ref record.State;
+        state.Begin(arguments.StartInstanceUserData);
         if (!TryResolveDrawTargets(banks, in draw, ref state, record))
         {
             TraceDrawTargets(banks, "no-targets");
@@ -447,7 +445,6 @@ public sealed partial class RenderExecutor
         {
             TraceDrawDisposition(banks, in draw, "no-primitive-topology");
             TraceDrawTargets(banks, "no-topology");
-            record.State = state;
             record.ResetBindings = true;
             Record(record);
             return;
@@ -467,7 +464,6 @@ public sealed partial class RenderExecutor
             }
 
             TraceDrawTargets(banks, "rectangle-list-without-exports");
-            record.State = state;
             record.ResetBindings = true;
             Record(record);
             return;
@@ -476,7 +472,6 @@ public sealed partial class RenderExecutor
         if (!ApplyProgramAdaptations(banks, in draw, ref state, new TargetlessDrawArguments(submitId, false, default, arguments), record))
         {
             TraceDrawTargets(banks, "adapted");
-            record.State = state;
             record.ResetBindings = true;
             Record(record);
             return;
@@ -506,8 +501,6 @@ public sealed partial class RenderExecutor
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var pixelProgram = state.PixelActive ? pixelInput.Stage.Program : null;
-        var dropped = state;
-        DropUnwrittenColorTargets(context, ref dropped, pixelProgram);
         var writeStages = PipelineStageFlags.None;
         if (HasBufferWrites(vertexInput.Stage))
         {
@@ -520,7 +513,6 @@ public sealed partial class RenderExecutor
         }
 
         record.Draw = draw;
-        record.State = state;
         record.Topology = topology;
         record.PrimitiveRestart = primitiveRestart;
         record.PrimitiveType = (GuestPrimitiveType)banks.UserConfig.PrimitiveType;
@@ -530,7 +522,7 @@ public sealed partial class RenderExecutor
         record.ContextStamp = banks.ContextStamp;
         record.DynamicStamp = banks.Stamp(RegisterStamp.ContextDynamic);
         record.TargetVersion = _drawResolution.TargetVersion;
-        record.Dynamic = ResolveDynamicState(banks, in dropped, record.SubmitId, record.PacketAddress);
+        record.Dynamic = ResolveDynamicState(banks, in state, WrittenColorTargets(context, in state, pixelProgram), record.SubmitId, record.PacketAddress);
         record.WritesMemory = DrawWritesMemory(vertexInput.Stage) || (state.PixelActive && DrawWritesMemory(pixelInput.Stage));
         record.WriteStages = writeStages;
         record.SetBindDebug = setBindDebug;

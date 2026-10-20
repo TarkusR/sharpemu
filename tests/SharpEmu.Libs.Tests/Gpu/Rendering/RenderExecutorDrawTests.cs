@@ -120,6 +120,27 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void ADrawAfterATwoTargetDrawBindsOnlyItsOwnTarget()
+    {
+        _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
+        var banks = Banks();
+        banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
+        banks.Context.RenderTargetMask = 0xFF;
+        banks.MarkWritten(1u << (int)RegisterStamp.ColorTargets);
+        _executor.DrawIndexed(7, banks, Indexed(6));
+        Assert.Equal(2, _host.Calls.Count(call => call.StartsWith("acquire_color", StringComparison.Ordinal)));
+        Assert.Contains("begin_rendering 64x64x1 colors=2 samples=1", _host.Calls);
+
+        _host.Calls.Clear();
+        banks.Context.RenderTargetMask = 0xF;
+        banks.MarkWritten(1u << (int)RegisterStamp.ColorTargets);
+        _executor.DrawIndexed(8, banks, Indexed(6));
+
+        Assert.Single(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+        Assert.Contains("begin_rendering 64x64x1 colors=1 samples=1", _host.Calls);
+    }
+
     private const ulong IndirectArguments = RecordingRenderHost.MemoryBase + 0x60_0000;
 
     private void WriteIndirectArguments(params uint[] words)

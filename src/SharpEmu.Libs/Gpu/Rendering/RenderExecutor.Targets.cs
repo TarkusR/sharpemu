@@ -231,6 +231,28 @@ public sealed partial class RenderExecutor
         state.ColorCount = kept;
     }
 
+    internal static uint WrittenColorTargets(ContextRegisters context, in DrawState state, ShaderProgramInfo? pixelProgram)
+    {
+        var all = (1u << (int)state.ColorCount) - 1;
+        if (!state.Depth.HasTarget && !state.Programs.DropUnwrittenColorTargets)
+        {
+            return all;
+        }
+
+        var exportMasks = pixelProgram?.PixelColorExportMasks ?? 0u;
+        var written = 0u;
+        for (var i = 0; i < state.ColorCount; i++)
+        {
+            ref readonly var target = ref state.Colors[i];
+            if (!IsUnwrittenColorTarget(context, target.Slot, target.Resolution.ExportMapping, exportMasks))
+            {
+                written |= 1u << i;
+            }
+        }
+
+        return written;
+    }
+
     internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks) =>
         exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0 ||
         ((pixelColorExportMasks >> (int)(slot * 4)) & 0xFu) == 0;
