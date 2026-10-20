@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
 using SharpEmu.Libs.Gpu.Images;
@@ -984,6 +985,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 {
                     if (_bdaSweepPlan is { } plan && _bufferPages.Complete)
                     {
+                        _handleWindows.Sort();
                         // Only a registered buffer has anything to upload, so only the pages buffers cover are looked at.
                         _tracker.ForEachCoveredCpuDirtyPageRun(plan, _bufferPages, _uploadClearedRun ??= UploadClearedRun,
                             _flushClearedRuns ??= FlushClearedRuns);
@@ -1024,6 +1026,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             }
         }
 
+        _handleWindows.Clear();
         if (traceAddress != 0)
             GuestGpuMemoryHook.Trace(traceAddress, 1,
                 $"device-address-preparation covered={traceCovered} registered={IsRegionRegistered(traceAddress, 1)} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
@@ -1246,6 +1249,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private void UploadClearedRun(ulong runAddress, ulong runSize)
     {
+        CountSweptPages(runAddress, runSize);
         var runEnd = runAddress + runSize;
         var index = _registry.FindFirstOverlappingIndex(runAddress);
         for (; index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < runEnd; index++)
@@ -2281,6 +2285,47 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private static long _reportedKnownApplied;
     private static long _reportedKnownUnbacked;
+
+    private static readonly ThreadCounter SweptPages = new();
+    private static readonly ThreadCounter SweptPagesInHandleWindows = new();
+    private const ulong HandleWindowBytes = 16 * MiB;
+    private readonly List<ulong> _handleWindows = [];
+
+    public static string TakeDirtyTrackingReport() => GuestPageTracker.TakeDirtyTrackingReport() + FormattableString.Invariant(
+        $" swept_pages={SweptPages.Take()} pages_in_handle_windows={SweptPagesInHandleWindows.Take()} stream_copies={StreamCopyShares.Copies.Take()} stream_shared={StreamCopyShares.Shared.Take()}");
+
+    public void NoteDeviceAddressWindow(ulong handleBase)
+    {
+        if (handleBase != 0 && _handleWindows.Count < 64)
+        {
+            _handleWindows.Add(handleBase);
+        }
+    }
+
+    private void CountSweptPages(ulong runAddress, ulong runSize)
+    {
+        SweptPages.Add((long)(runSize / TrackerLayout.PageBytes));
+        if (_handleWindows.Count == 0)
+        {
+            return;
+        }
+
+        var runEnd = runAddress + runSize;
+        var covered = 0UL;
+        var cursor = runAddress;
+        foreach (var window in _handleWindows)
+        {
+            var start = Math.Max(window, cursor);
+            var end = Math.Min(window + HandleWindowBytes, runEnd);
+            if (start < end)
+            {
+                covered += end - start;
+                cursor = end;
+            }
+        }
+
+        SweptPagesInHandleWindows.Add((long)(covered / TrackerLayout.PageBytes));
+    }
 
     public static string TakeKnownContentsReport() => FormattableString.Invariant(
         $"[PERF][KNOWN_GPU] applied={Interlocked.Exchange(ref _reportedKnownApplied, 0)} unbacked={Interlocked.Exchange(ref _reportedKnownUnbacked, 0)}");

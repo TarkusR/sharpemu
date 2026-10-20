@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GuestMemory;
 
 namespace SharpEmu.HLE.GpuMemory;
@@ -29,6 +30,20 @@ public sealed class GuestPageTracker
     private readonly object _regionGate = new();
     private readonly CpuDirtySummary _cpuDirtySummary = new();
 
+    private static readonly ThreadCounter SweepBlocks = new();
+    private static readonly ThreadCounter SweepBlocksClean = new();
+    private static readonly ThreadCounter SweepBlocksTaken = new();
+    private static readonly ThreadCounter SweepPagesTaken = new();
+    private static readonly ThreadCounter EmulatorWritesKept = new();
+    private static readonly ThreadCounter EmulatorWritesOverGpuData = new();
+    private static readonly ThreadCounter GpuProtectionsDeferred = new();
+    private static readonly ThreadCounter GpuProtectionFlushes = new();
+
+    public static string TakeDirtyTrackingReport() => FormattableString.Invariant(
+        $"sweep_blocks={SweepBlocks.Take()} sweep_clean={SweepBlocksClean.Take()} sweep_taken={SweepBlocksTaken.Take()} sweep_pages={SweepPagesTaken.Take()} ") +
+        FormattableString.Invariant(
+        $"emulator_kept={EmulatorWritesKept.Take()} emulator_over_gpu={EmulatorWritesOverGpuData.Take()} gpu_protect_deferred={GpuProtectionsDeferred.Take()} gpu_protect_flushes={GpuProtectionFlushes.Take()}");
+
     private readonly object _pendingGpuGate = new();
     private readonly object _applyGpuGate = new();
     private List<TrackedRegion> _pendingGpuProtections = [];
@@ -40,6 +55,7 @@ public sealed class GuestPageTracker
 
     internal void QueueGpuProtection(TrackedRegion region)
     {
+        GpuProtectionsDeferred.Increment();
         lock (_pendingGpuGate)
         {
             _pendingGpuProtections.Add(region);
@@ -62,6 +78,8 @@ public sealed class GuestPageTracker
                 _pendingGpuProtections = _applyingGpuProtections;
                 _applyingGpuProtections = regions;
             }
+
+            GpuProtectionFlushes.Increment();
 
             foreach (var region in regions)
             {
@@ -406,10 +424,12 @@ public sealed class GuestPageTracker
                     if (region.IsModified(WriteOrigin.Gpu, offset, bytes))
                     {
                         needsGpuFlush = true;
+                        EmulatorWritesOverGpuData.Increment();
                     }
                     else
                     {
                         region.MarkCpuWriteKeepingProtection(region.BaseAddress + offset, bytes);
+                        EmulatorWritesKept.Increment();
                     }
                 }
             }
@@ -791,12 +811,14 @@ public sealed class GuestPageTracker
                     continue;
                 }
 
+                SweepBlocks.Increment();
                 var region = Volatile.Read(ref _regions[block]);
                 if (region is not null)
                 {
                     var version = region.CpuDirtyVersion;
                     if (covered.CleanRegionVersion == version && covered.CleanCoverageVersion == covered.Version)
                     {
+                        SweepBlocksClean.Increment();
                         continue;
                     }
 
@@ -804,6 +826,7 @@ public sealed class GuestPageTracker
                     {
                         covered.CleanRegionVersion = version;
                         covered.CleanCoverageVersion = covered.Version;
+                        SweepBlocksClean.Increment();
                         continue;
                     }
                 }
@@ -821,10 +844,16 @@ public sealed class GuestPageTracker
                     taken = region.TakeCpuDirtyPages(in candidates);
                 }
 
+                if (taken.Any)
+                {
+                    SweepBlocksTaken.Increment();
+                }
+
                 try
                 {
                     foreach (var (runStart, runEnd) in taken)
                     {
+                        SweepPagesTaken.Add(runEnd - runStart);
                         visit(block * BlockBytes + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
                     }
 

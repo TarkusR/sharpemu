@@ -914,6 +914,31 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void DeviceAddressSweep_CountsTheSweptPagesInsideTheHandleWindows()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        _ = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x40000, isWritten: false));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x1000, 8));
+        Assert.True(harness.Store.MarkCpuWrite(address + 0x30000, 8));
+        _ = GuestBufferCache.TakeDirtyTrackingReport();
+
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.NoteDeviceAddressWindow(address + 0x20000);
+            harness.Cache.PrepareBda([new GuestSpan(address, 0x40000)]);
+        });
+
+        var report = GuestBufferCache.TakeDirtyTrackingReport();
+        Assert.Matches(@"sweep_pages=[1-9]", report);
+        Assert.Matches(@"swept_pages=[1-9]", report);
+        Assert.Matches(@"pages_in_handle_windows=[1-9]", report);
+        Assert.Contains("stream_shared=", report);
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void DeviceAddressSweep_UploadsTheDirtyPagesOfEveryBufferInABlockAndProtectsThem()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
