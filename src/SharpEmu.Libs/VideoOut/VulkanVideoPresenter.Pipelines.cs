@@ -338,19 +338,19 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
-        internal static readonly long[] CommandReadCounts = new long[12];
+        internal static readonly SharpEmu.HLE.Diagnostics.ThreadCounter[] CommandReadCounts =
+            Enumerable.Range(0, 12).Select(_ => new SharpEmu.HLE.Diagnostics.ThreadCounter()).ToArray();
 
         internal static string TakeCommandReadReport()
         {
             var counts = new long[CommandReadCounts.Length];
             for (var index = 0; index < counts.Length; index++)
             {
-                counts[index] = Interlocked.Exchange(ref CommandReadCounts[index], 0);
+                counts[index] = CommandReadCounts[index].Take();
             }
 
-            var frequency = (double)System.Diagnostics.Stopwatch.Frequency;
-            return FormattableString.Invariant($"cmd_reads=resident:{counts[0]}/fast:{counts[1]}/slow_ms:{counts[2] * 1000.0 / frequency:F1},") +
-                FormattableString.Invariant($"word:{counts[3]}/fast:{counts[4]}/slow_ms:{counts[5] * 1000.0 / frequency:F1} ") +
+            return FormattableString.Invariant($"cmd_reads=resident:{counts[0]}/fast:{counts[1]}/slow:{counts[0] - counts[1]},") +
+                FormattableString.Invariant($"word:{counts[3]}/fast:{counts[4]}/slow:{counts[3] - counts[4]} ") +
                 FormattableString.Invariant($"unclean=untagged:{counts[6]},gpu_dirty:{counts[7]},stores:{counts[8]},pending:{counts[9]},shadow:{counts[10]},alias:{counts[11]}");
         }
 
@@ -358,7 +358,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (Reads is not { } pages || !TryGetCleanReadPage(address, size, out var page, out var slot) || pages.Tags[slot] != page + 1)
             {
-                Interlocked.Increment(ref CommandReadCounts[6]);
+                CommandReadCounts[6].Increment();
                 return;
             }
 
@@ -367,55 +367,39 @@ internal static unsafe partial class VulkanVideoPresenter
                 thread.HasPendingStores(page, CleanReadPageBytes) ? 8 :
                 _translation.PendingWrites is { } pending && pending.MayHavePending(page, CleanReadPageBytes) ? 9 :
                 thread.HasShadow(page, CleanReadPageBytes) ? 10 : 11;
-            Interlocked.Increment(ref CommandReadCounts[reason]);
+            CommandReadCounts[reason].Increment();
         }
 
         private bool ReadWordOnCommandThread(ulong address, out uint word)
         {
-            Interlocked.Increment(ref CommandReadCounts[3]);
+            CommandReadCounts[3].Increment();
             Span<byte> bytes = stackalloc byte[sizeof(uint)];
             if (!HasPendingMemoryPublication(address, sizeof(uint)) && IsCleanReadPage(address, sizeof(uint)) && TryReadAliasBytes(address, bytes))
             {
-                Interlocked.Increment(ref CommandReadCounts[4]);
+                CommandReadCounts[4].Increment();
                 word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
                 return true;
             }
 
             NoteUncleanRead(address, sizeof(uint));
-            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             if (!ReadOnCommandThread(address, bytes))
             {
-                Interlocked.Add(ref CommandReadCounts[5], System.Diagnostics.Stopwatch.GetTimestamp() - started);
                 word = 0;
                 return false;
             }
 
-            Interlocked.Add(ref CommandReadCounts[5], System.Diagnostics.Stopwatch.GetTimestamp() - started);
             word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
             return true;
         }
 
         private bool ReadResidentBytesOnCommandThread(ulong address, Span<byte> destination, bool clean)
         {
-            Interlocked.Increment(ref CommandReadCounts[0]);
-            var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            try
-            {
-                return ReadResidentBytesOnCommandThreadCore(address, destination, clean);
-            }
-            finally
-            {
-                Interlocked.Add(ref CommandReadCounts[2], System.Diagnostics.Stopwatch.GetTimestamp() - started);
-            }
-        }
-
-        private bool ReadResidentBytesOnCommandThreadCore(ulong address, Span<byte> destination, bool clean)
-        {
+            CommandReadCounts[0].Increment();
             var size = (ulong)destination.Length;
             CompletePendingPublicationsForResourceRead(address, size);
             if (!clean && IsCleanReadPage(address, size) && TryReadAliasBytes(address, destination))
             {
-                Interlocked.Increment(ref CommandReadCounts[1]);
+                CommandReadCounts[1].Increment();
                 return true;
             }
 
