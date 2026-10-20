@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.CompilerServices;
+using SharpEmu.HLE.Diagnostics;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
@@ -449,16 +450,16 @@ public sealed partial class ResourceMaterializationCache
 
         private enum LearnOutcome { NoPrevious, Shape, NonCandidateWord, Identical, RejectedWord, Unpredicted, BasesDisagree, PredictionRejected, PredictionConfirmed, Rejected, Confirmed, Activated, Count }
 
-        private static readonly long[] _learnOutcomes = new long[(int)LearnOutcome.Count];
+        private static readonly ThreadCounter[] _learnOutcomes = Enumerable.Range(0, (int)LearnOutcome.Count).Select(_ => new ThreadCounter()).ToArray();
 
-        private static void Note(LearnOutcome outcome) => Interlocked.Increment(ref _learnOutcomes[(int)outcome]);
+        private static void Note(LearnOutcome outcome) => _learnOutcomes[(int)outcome].Increment();
 
         public static string TakeLearnReport()
         {
             var parts = new List<string>();
             for (var index = 0; index < (int)LearnOutcome.Count; index++)
             {
-                var count = Interlocked.Exchange(ref _learnOutcomes[index], 0);
+                var count = _learnOutcomes[index].Take();
                 if (count != 0)
                     parts.Add(FormattableString.Invariant($"{(LearnOutcome)index}:{count}"));
             }
@@ -836,15 +837,15 @@ public sealed partial class ResourceMaterializationCache
         _sightings = limitChurn ? new ulong[SightingSlots] : null;
     }
 
-    private static long _totalHits;
-    private static long _totalMisses;
-    private static long _totalUncacheable;
+    private static readonly ThreadCounter _totalHits = new();
+    private static readonly ThreadCounter _totalMisses = new();
+    private static readonly ThreadCounter _totalUncacheable = new();
     private const int MaxVariants = 8;
-    private static long _totalStale;
-    private static long _totalStaleUnreadable;
-    private static long _totalRefreshes;
-    private static long _totalNotFound;
-    private static readonly long[] _refreshRefusals = new long[6];
+    private static readonly ThreadCounter _totalStale = new();
+    private static readonly ThreadCounter _totalStaleUnreadable = new();
+    private static readonly ThreadCounter _totalRefreshes = new();
+    private static readonly ThreadCounter _totalNotFound = new();
+    private static readonly ThreadCounter[] _refreshRefusals = Enumerable.Range(0, 6).Select(_ => new ThreadCounter()).ToArray();
     private static readonly string[] RefreshRefusalNames = ["not_refreshable", "unreadable", "descriptor_words", "unchanged", "table_eval", "rebased"];
     private int _lastRefreshRefusal;
 
@@ -869,11 +870,11 @@ public sealed partial class ResourceMaterializationCache
         CountDiagnostic(reason);
         return false;
     }
-    private static long _totalFirstSightings;
-    private static long _totalVolatile;
-    private static long _totalChurnLearnable;
-    private static long _totalChurnUnlearnable;
-    private static long _totalChurnMulti;
+    private static readonly ThreadCounter _totalFirstSightings = new();
+    private static readonly ThreadCounter _totalVolatile = new();
+    private static readonly ThreadCounter _totalChurnLearnable = new();
+    private static readonly ThreadCounter _totalChurnUnlearnable = new();
+    private static readonly ThreadCounter _totalChurnMulti = new();
     private const int DrawHistoryCapacity = 65536;
     private readonly Dictionary<ulong, uint[]> _drawHistories = new();
 
@@ -906,23 +907,23 @@ public sealed partial class ResourceMaterializationCache
         if (differing != 1)
         {
             if (differing > 1)
-                Interlocked.Increment(ref _totalChurnMulti);
+                _totalChurnMulti.Increment();
             return;
         }
 
         if (rebase.IsLearnable(changed))
-            Interlocked.Increment(ref _totalChurnLearnable);
+            _totalChurnLearnable.Increment();
         else
-            Interlocked.Increment(ref _totalChurnUnlearnable);
+            _totalChurnUnlearnable.Increment();
     }
 
     private static string TakeChurnReport() =>
-        FormattableString.Invariant($" churn_learnable={Interlocked.Exchange(ref _totalChurnLearnable, 0)} churn_unlearnable={Interlocked.Exchange(ref _totalChurnUnlearnable, 0)} churn_multi={Interlocked.Exchange(ref _totalChurnMulti, 0)}") +
+        FormattableString.Invariant($" churn_learnable={_totalChurnLearnable.Take()} churn_unlearnable={_totalChurnUnlearnable.Take()} churn_multi={_totalChurnMulti.Take()}") +
         AddressRebase.TakeLearnReport();
 
-    private static long _totalRevalidated;
-    private static long _totalRevalidateStale;
-    private static long _totalRevalidateUnlinked;
+    private static readonly ThreadCounter _totalRevalidated = new();
+    private static readonly ThreadCounter _totalRevalidateStale = new();
+    private static readonly ThreadCounter _totalRevalidateUnlinked = new();
 
 
     [ThreadStatic]
@@ -943,16 +944,16 @@ public sealed partial class ResourceMaterializationCache
     // Process-wide counters since the previous call, for the periodic render report.
     public static string TakeReport()
     {
-        var hits = Interlocked.Exchange(ref _totalHits, 0);
-        var misses = Interlocked.Exchange(ref _totalMisses, 0);
-        var uncacheable = Interlocked.Exchange(ref _totalUncacheable, 0);
-        var stale = Interlocked.Exchange(ref _totalStale, 0);
-        var staleUnreadable = Interlocked.Exchange(ref _totalStaleUnreadable, 0);
-        var refreshes = Interlocked.Exchange(ref _totalRefreshes, 0);
-        var notFound = Interlocked.Exchange(ref _totalNotFound, 0);
-        var firstSightings = Interlocked.Exchange(ref _totalFirstSightings, 0);
-        var volatileLookups = Interlocked.Exchange(ref _totalVolatile, 0);
-        var refusals = string.Join(",", RefreshRefusalNames.Select((name, index) => FormattableString.Invariant($"{name}:{Interlocked.Exchange(ref _refreshRefusals[index], 0)}")));
+        var hits = _totalHits.Take();
+        var misses = _totalMisses.Take();
+        var uncacheable = _totalUncacheable.Take();
+        var stale = _totalStale.Take();
+        var staleUnreadable = _totalStaleUnreadable.Take();
+        var refreshes = _totalRefreshes.Take();
+        var notFound = _totalNotFound.Take();
+        var firstSightings = _totalFirstSightings.Take();
+        var volatileLookups = _totalVolatile.Take();
+        var refusals = string.Join(",", RefreshRefusalNames.Select((name, index) => FormattableString.Invariant($"{name}:{_refreshRefusals[index].Take()}")));
         var total = hits + misses;
         var diagnostics = DiagnosticsEnabled
             ? " " + string.Join(" ", Enumerable.Range(0, (int)Diagnostic.Count).Select(index =>
@@ -960,7 +961,7 @@ public sealed partial class ResourceMaterializationCache
             : string.Empty;
         return FormattableString.Invariant(
             $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} not_found={notFound} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} refused={refusals} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}{diagnostics}") +
-            FormattableString.Invariant($" revalidated={Interlocked.Exchange(ref _totalRevalidated, 0)} revalidate_stale={Interlocked.Exchange(ref _totalRevalidateStale, 0)} revalidate_unlinked={Interlocked.Exchange(ref _totalRevalidateUnlinked, 0)} stats_masked_hits={Interlocked.Exchange(ref _totalStatisticsMaskedHits, 0)}") +
+            FormattableString.Invariant($" revalidated={_totalRevalidated.Take()} revalidate_stale={_totalRevalidateStale.Take()} revalidate_unlinked={_totalRevalidateUnlinked.Take()} stats_masked_hits={_totalStatisticsMaskedHits.Take()}") +
             TakeChurnReport() +
             TakeStaleDifferenceReport() + TakeMissReport() + TakeDetailReport();
     }
@@ -1063,10 +1064,10 @@ public sealed partial class ResourceMaterializationCache
     private static readonly bool OutcomeTimingEnabled = Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE") == "1";
     private const int OutcomeSides = 3;
     private static readonly string[] OutcomeSideNames = ["render", "stream", "pool"];
-    private static readonly long[] _outcomeCounts = new long[OutcomeSides * (int)MaterializeOutcome.Count];
-    private static readonly long[] _outcomeTicks = new long[OutcomeSides * (int)MaterializeOutcome.Count];
-    private static readonly long[] _outcomeLookupTicks = new long[OutcomeSides];
-    private static readonly long[] _outcomeValidatedVariants = new long[OutcomeSides];
+    private static readonly ThreadCounter[] _outcomeCounts = Enumerable.Range(0, OutcomeSides * (int)MaterializeOutcome.Count).Select(_ => new ThreadCounter()).ToArray();
+    private static readonly ThreadCounter[] _outcomeTicks = Enumerable.Range(0, OutcomeSides * (int)MaterializeOutcome.Count).Select(_ => new ThreadCounter()).ToArray();
+    private static readonly ThreadCounter[] _outcomeLookupTicks = Enumerable.Range(0, OutcomeSides).Select(_ => new ThreadCounter()).ToArray();
+    private static readonly ThreadCounter[] _outcomeValidatedVariants = Enumerable.Range(0, OutcomeSides).Select(_ => new ThreadCounter()).ToArray();
     [ThreadStatic]
     private static int _outcomeSide;
     private MaterializeOutcome _outcome;
@@ -1107,10 +1108,10 @@ public sealed partial class ResourceMaterializationCache
             var outcome = result ? _outcome : MaterializeOutcome.Failed;
             var side = OutcomeSide();
             var slot = side * (int)MaterializeOutcome.Count + (int)outcome;
-            Interlocked.Increment(ref _outcomeCounts[slot]);
-            Interlocked.Add(ref _outcomeTicks[slot], ended - started);
-            Interlocked.Add(ref _outcomeLookupTicks[side], _lookupTicks - started);
-            Interlocked.Add(ref _outcomeValidatedVariants[side], _validatedVariants);
+            _outcomeCounts[slot].Increment();
+            _outcomeTicks[slot].Add(ended - started);
+            _outcomeLookupTicks[side].Add(_lookupTicks - started);
+            _outcomeValidatedVariants[side].Add(_validatedVariants);
             return result;
         }
         finally
@@ -1128,15 +1129,15 @@ public sealed partial class ResourceMaterializationCache
             var parts = new List<string>();
             for (var index = 0; index < (int)MaterializeOutcome.Count; index++)
             {
-                var count = Interlocked.Exchange(ref _outcomeCounts[side * (int)MaterializeOutcome.Count + index], 0);
-                var ticks = Interlocked.Exchange(ref _outcomeTicks[side * (int)MaterializeOutcome.Count + index], 0);
+                var count = _outcomeCounts[side * (int)MaterializeOutcome.Count + index].Take();
+                var ticks = _outcomeTicks[side * (int)MaterializeOutcome.Count + index].Take();
                 if (count != 0)
                     parts.Add(FormattableString.Invariant($"{(MaterializeOutcome)index}={count}/{Ms(ticks)}ms"));
             }
 
             lines.Add("[PERF][RESOURCE_OUTCOMES] thread=" + OutcomeSideNames[side] + " " +
-                FormattableString.Invariant($"lookup_ms={Ms(Interlocked.Exchange(ref _outcomeLookupTicks[side], 0))} ") +
-                FormattableString.Invariant($"validated_variants={Interlocked.Exchange(ref _outcomeValidatedVariants[side], 0)} ") +
+                FormattableString.Invariant($"lookup_ms={Ms(_outcomeLookupTicks[side].Take())} ") +
+                FormattableString.Invariant($"validated_variants={_outcomeValidatedVariants[side].Take()} ") +
                 string.Join(" ", parts));
         }
 
@@ -1166,7 +1167,7 @@ public sealed partial class ResourceMaterializationCache
             {
                 _outcome = MaterializeOutcome.Volatile;
                 cached.VolatileLookups--;
-                Interlocked.Increment(ref _totalVolatile);
+                _totalVolatile.Increment();
                 return MaterializeUnrecorded(plan, inputs, ref snapshot, ref specialization, out failure);
             }
 
@@ -1204,12 +1205,12 @@ public sealed partial class ResourceMaterializationCache
                     variant.StaleLookups = 0;
                     variant.VolatilePeriod = 0;
                     Hits++;
-                    Interlocked.Increment(ref _totalHits);
+                    _totalHits.Increment();
                     snapshot = rebase.Apply(WithCurrentUserData(variant.Snapshot, inputs.UserData), inputs.UserData);
                     if (_statisticsDiffer)
                     {
                         snapshot = WithMipStatistics(snapshot, MipStatisticsOf(variant));
-                        Interlocked.Increment(ref _totalStatisticsMaskedHits);
+                        _totalStatisticsMaskedHits.Increment();
                     }
 
                     specialization = variant.Specialization;
@@ -1263,7 +1264,7 @@ public sealed partial class ResourceMaterializationCache
 
                     _outcome = MaterializeOutcome.RebaseHit;
                     Hits++;
-                    Interlocked.Increment(ref _totalHits);
+                    _totalHits.Increment();
                     snapshot = rebased;
                     specialization = refreshedFrom.Specialization;
                     failure = default;
@@ -1293,7 +1294,7 @@ public sealed partial class ResourceMaterializationCache
                     Store(key, refreshed);
                     _outcome = MaterializeOutcome.TableRefresh;
                     TableRefreshes++;
-                    Interlocked.Increment(ref _totalRefreshes);
+                    _totalRefreshes.Increment();
                     snapshot = rebase.Apply(WithCurrentUserData(refreshed.Snapshot, inputs.UserData), inputs.UserData);
                     specialization = refreshed.Specialization;
                     failure = default;
@@ -1302,10 +1303,10 @@ public sealed partial class ResourceMaterializationCache
 
             }
 
-            Interlocked.Increment(ref _totalStale);
-            Interlocked.Increment(ref _refreshRefusals[refreshedFrom is not null ? 5 : _lastRefreshRefusal]);
+            _totalStale.Increment();
+            _refreshRefusals[refreshedFrom is not null ? 5 : _lastRefreshRefusal].Increment();
             if (unreadable)
-                Interlocked.Increment(ref _totalStaleUnreadable);
+                _totalStaleUnreadable.Increment();
             if (_sightings is not null && ++cached.StaleLookups >= VolatileStaleLookups)
             {
                 _outcome = MaterializeOutcome.BecameVolatile;
@@ -1313,7 +1314,7 @@ public sealed partial class ResourceMaterializationCache
                 cached.VolatileLookups = cached.VolatilePeriod;
                 cached.StaleLookups = VolatileStaleLookups - 2;
                 cached.Next = null;
-                Interlocked.Increment(ref _totalVolatile);
+                _totalVolatile.Increment();
                 return MaterializeUnrecorded(plan, inputs, ref snapshot, ref specialization, out failure);
             }
         }
@@ -1325,7 +1326,7 @@ public sealed partial class ResourceMaterializationCache
             {
                 _outcome = MaterializeOutcome.FirstSighting;
                 sighting = key;
-                Interlocked.Increment(ref _totalFirstSightings);
+                _totalFirstSightings.Increment();
                 return MaterializeUnrecorded(plan, inputs, ref snapshot, ref specialization, out failure);
             }
 
@@ -1333,14 +1334,14 @@ public sealed partial class ResourceMaterializationCache
         }
         else
         {
-            Interlocked.Increment(ref _totalNotFound);
+            _totalNotFound.Increment();
         }
 
         timing.ChangePhase(MaterializationPhase.Materialization);
         _outcome = MaterializeOutcome.Miss;
         Misses++;
         RecordMiss(plan, key, found);
-        Interlocked.Increment(ref _totalMisses);
+        _totalMisses.Increment();
         var recorder = TakeRecorder();
         try
         {
@@ -1362,7 +1363,7 @@ public sealed partial class ResourceMaterializationCache
             {
                 _outcome = MaterializeOutcome.Uncacheable;
                 Uncacheable++;
-                Interlocked.Increment(ref _totalUncacheable);
+                _totalUncacheable.Increment();
                 return true;
             }
 
@@ -1632,18 +1633,18 @@ public sealed partial class ResourceMaterializationCache
     {
         if (snapshot.Origin is not Entry entry || entry.VolatileLookups > 0)
         {
-            Interlocked.Increment(ref _totalRevalidateUnlinked);
+            _totalRevalidateUnlinked.Increment();
             return false;
         }
 
         var rebase = RebaseOf(DrawKeyOf(entry.Plan, entry.ShaderBase, entry.ComputeState, entry.UserData.Length), entry.Plan);
         if (!Validate(entry, residentReader, rebase, snapshot.UserData, out _))
         {
-            Interlocked.Increment(ref _totalRevalidateStale);
+            _totalRevalidateStale.Increment();
             return false;
         }
 
-        Interlocked.Increment(ref _totalRevalidated);
+        _totalRevalidated.Increment();
         return true;
     }
 
@@ -2131,7 +2132,7 @@ public sealed partial class ResourceMaterializationCache
     private int _validation;
     private uint[] _currentStatistics = [];
     private int[] _statisticsCapturedAt = [];
-    private static long _totalStatisticsMaskedHits;
+    private static readonly ThreadCounter _totalStatisticsMaskedHits = new();
 
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase, IReadOnlyList<uint> userData,
         out bool unreadable, out bool descriptorChanged, out RejectionSample rejection)

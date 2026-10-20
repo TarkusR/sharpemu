@@ -4,6 +4,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using SharpEmu.HLE.Diagnostics;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
@@ -159,12 +160,12 @@ public static partial class ResourceMaterializer
 
     internal static Action<ShaderResourcePlan, ResourceRuntimeInputs, ResourceSnapshot, ResourceSpecialization>? MaterializedCheck;
 
-    private static long _fastMaterializations;
-    private static long _fastSpecializationHits;
-    private static long _fastStatisticsHits;
+    private static readonly ThreadCounter _fastMaterializations = new();
+    private static readonly ThreadCounter _fastSpecializationHits = new();
+    private static readonly ThreadCounter _fastStatisticsHits = new();
 
     public static string TakeFastReport() => FormattableString.Invariant(
-        $"fast_materializations={Interlocked.Exchange(ref _fastMaterializations, 0)} fast_specialization_hits={Interlocked.Exchange(ref _fastSpecializationHits, 0)} fast_statistics_hits={Interlocked.Exchange(ref _fastStatisticsHits, 0)}");
+        $"fast_materializations={_fastMaterializations.Take()} fast_specialization_hits={_fastSpecializationHits.Take()} fast_statistics_hits={_fastStatisticsHits.Take()}");
 
     private sealed record FastOrigin(ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs);
 
@@ -336,12 +337,12 @@ public static partial class ResourceMaterializer
         {
             if (!EvaluateInto(plan, inputs, output))
             {
-                Interlocked.Increment(ref _programFallbacks);
+                _programFallbacks.Increment();
                 return MaterializeFastFromSnapshot(plan, inputs, ref snapshot, ref specialization, out failure);
             }
 
-            Interlocked.Increment(ref _programRuns);
-            Interlocked.Increment(ref _fastMaterializations);
+            _programRuns.Increment();
+            _fastMaterializations.Increment();
             return MaterializeFromOutput(plan, inputs, output, ref snapshot, ref specialization, out failure);
         }
         finally
@@ -384,11 +385,11 @@ public static partial class ResourceMaterializer
         var userData = inputs.UserData is uint[] array ? array : inputs.UserData.ToArray();
         if (memo is not null)
         {
-            Interlocked.Increment(ref _fastSpecializationHits);
+            _fastSpecializationHits.Increment();
             uint[]? statistics = null;
             if (statisticsDiffer)
             {
-                Interlocked.Increment(ref _fastStatisticsHits);
+                _fastStatisticsHits.Increment();
                 statistics = new uint[imageCount];
                 for (var index = 0; index < imageCount; index++)
                 {
@@ -483,7 +484,7 @@ public static partial class ResourceMaterializer
             return false;
         }
 
-        Interlocked.Increment(ref _fastMaterializations);
+        _fastMaterializations.Increment();
         var ranges = programRanges ?? DeviceAddressRangePlanner.Evaluate(plan, inputs);
         foreach (var range in ranges)
         {
@@ -524,11 +525,11 @@ public static partial class ResourceMaterializer
                 }
             }
 
-            Interlocked.Increment(ref _fastSpecializationHits);
+            _fastSpecializationHits.Increment();
             uint[]? statistics = null;
             if (statisticsDiffer)
             {
-                Interlocked.Increment(ref _fastStatisticsHits);
+                _fastStatisticsHits.Increment();
                 statistics = new uint[materialized.Images.Length];
                 for (var index = 0; index < statistics.Length; index++)
                 {
@@ -696,8 +697,8 @@ public static partial class ResourceMaterializer
 
     internal static Action<ShaderResourcePlan, ResourceRuntimeInputs, List<DescriptorWords>, uint[], DeviceAddressRange[]>? ProgramCheck;
 
-    private static long _programRuns;
-    private static long _programFallbacks;
+    private static readonly ThreadCounter _programRuns = new();
+    private static readonly ThreadCounter _programFallbacks = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long[]> _programIneligible = new();
 
     public static string TakeProgramReport()
@@ -712,7 +713,7 @@ public static partial class ResourceMaterializer
             }
         }
 
-        return FormattableString.Invariant($"program_runs={Interlocked.Exchange(ref _programRuns, 0)} program_fallbacks={Interlocked.Exchange(ref _programFallbacks, 0)} ") +
+        return FormattableString.Invariant($"program_runs={_programRuns.Take()} program_fallbacks={_programFallbacks.Take()} ") +
             "program_ineligible=" + string.Join(",", parts);
     }
 
@@ -738,7 +739,7 @@ public static partial class ResourceMaterializer
         var program = inputs.TablePhase is null && !captureSelectorDiagnostic ? plan.MaterializationProgram : null;
         if (program is not null && program.TryRun(plan, inputs, additionalTableWords, out values, out table, out var programRanges, out activeSources))
         {
-            Interlocked.Increment(ref _programRuns);
+            _programRuns.Increment();
             ProgramCheck?.Invoke(plan, inputs, values, table, programRanges);
             ranges = programRanges;
         }
@@ -746,7 +747,7 @@ public static partial class ResourceMaterializer
         {
             if (program is not null)
             {
-                Interlocked.Increment(ref _programFallbacks);
+                _programFallbacks.Increment();
             }
             else
             {

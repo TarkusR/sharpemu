@@ -140,8 +140,20 @@ internal sealed class ProgramSourceEntry
     public BoundedCopy? BoundedCopy { get; init; }
     public EmbeddedVertexFetchPlan? EmbeddedFetch { get; init; }
     public ShaderVertexInput[] VertexInputs { get; init; } = [];
-    public List<ProgramPermutation> Permutations { get; } = new(8);
+    private ProgramPermutation[] _permutations = [];
+
+    public IReadOnlyList<ProgramPermutation> Permutations => Volatile.Read(ref _permutations);
+
     public ProgramPermutation? LastPermutation;
+
+    public void AddPermutation(ProgramPermutation permutation)
+    {
+        var current = _permutations;
+        var grown = new ProgramPermutation[current.Length + 1];
+        current.CopyTo(grown, 0);
+        grown[^1] = permutation;
+        Volatile.Write(ref _permutations, grown);
+    }
 }
 
 // Programs keyed by identity and static state; each draw materializes its resources and reuses
@@ -154,9 +166,9 @@ internal sealed class ShaderProgramCache
     private readonly CpuContext _context;
     private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
-    private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
     private readonly Dictionary<(ProgramKey Key, string Library), ProgramSourceEntry> _linkedPrograms = new();
-    private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), Gen5ShaderProgram> _decoded = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), Gen5ShaderProgram> _decoded = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
     private readonly object _gate = new();
     [ThreadStatic]
@@ -207,20 +219,13 @@ internal sealed class ShaderProgramCache
     public Gen5ShaderProgram Decode(ShaderSource source)
     {
         var key = (source.Hash, source.CodeSize, source.ContinuationAddressOffset);
-        lock (_decoded)
+        if (_decoded.TryGetValue(key, out var decoded))
         {
-            if (_decoded.TryGetValue(key, out var decoded))
-            {
-                return decoded;
-            }
+            return decoded;
         }
 
         var program = DecodeCore(source, key);
-        lock (_decoded)
-        {
-            _decoded.TryAdd(key, program);
-        }
-
+        _decoded.TryAdd(key, program);
         return program;
     }
 
@@ -323,33 +328,50 @@ internal sealed class ShaderProgramCache
     {
         ProgramKey? key = null;
         ProgramSourceEntry? entry;
-        bool sourceWasCached;
-        lock (_gate)
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
         {
-            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
-            {
-                BuildStaticState(source.Stage, options);
-                var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
-                    source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(StaticState));
-                _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out key, out entry);
-            }
+            entry = FindEntry(source, options, out key);
+        }
 
-            sourceWasCached = entry is not null;
-            if (RenderTrace.Enabled && RenderTrace.Pipeline())
-            {
-                RenderTrace.Write($"ProgramCache lookup stage={source.Label} hash=0x{source.Hash:X16} cached={entry is not null} permutations={entry?.Permutations.Count ?? 0}");
-            }
+        var sourceWasCached = entry is not null;
+        if (RenderTrace.Enabled && RenderTrace.Pipeline())
+        {
+            RenderTrace.Write($"ProgramCache lookup stage={source.Label} hash=0x{source.Hash:X16} cached={entry is not null} permutations={entry?.Permutations.Count ?? 0}");
+        }
 
-            if (entry is null)
+        if (entry is null)
+        {
+            lock (_gate)
             {
-                entry = CreateEntry(source, options);
-                key = BuildProgramKey(source);
-                _programs.Add(key, entry);
-                ShaderCacheCounters.CountProgram();
+                entry = FindEntry(source, options, out key);
+                sourceWasCached = entry is not null;
+                if (entry is null)
+                {
+                    entry = CreateEntry(source, options);
+                    BuildStaticState(source.Stage, options);
+                    key = BuildProgramKey(source);
+                    _programs.TryAdd(key, entry);
+                    ShaderCacheCounters.CountProgram();
+                }
             }
         }
 
         return CompleteProgram(entry, sourceWasCached, key, source, options, ref pushDataCursor, out stage);
+    }
+
+    private ProgramSourceEntry? FindEntry(ShaderSource source, StageCompileOptions options, out ProgramKey? key)
+    {
+        BuildStaticState(source.Stage, options);
+        var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
+            source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(StaticState));
+        if (_programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out var found, out var entry))
+        {
+            key = found;
+            return entry;
+        }
+
+        key = null;
+        return null;
     }
 
     private ShaderProgram CompleteProgram(ProgramSourceEntry entry, bool sourceWasCached, ProgramKey? key, ShaderSource source, StageCompileOptions options,
@@ -459,34 +481,20 @@ internal sealed class ShaderProgramCache
             return last.Handle;
         }
 
+        if (TryReusePermutation(entry, specialization, snapshot, source, options, ref pushDataCursor, out stage) is { } reused)
+        {
+            return reused;
+        }
+
         lock (_gate)
         {
-            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
+            if (TryReusePermutation(entry, specialization, snapshot, source, options, ref pushDataCursor, out stage) is { } found)
             {
-                foreach (var candidate in entry.Permutations)
-                {
-                    var layout = candidate.Bindings;
-                    if (layout.PushDataStartDword == PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount) && candidate.Specialization.Equals(specialization))
-                    {
-                        if (ReferenceEquals(candidate.Specialization, specialization))
-                        {
-                            Volatile.Write(ref entry.LastPermutation, candidate);
-                        }
-
-                        stage = CreateStageResources(candidate.Program, snapshot, source, options);
-                        layout.AdvancePushData(ref pushDataCursor);
-                        if (RenderTrace.Enabled && RenderTrace.Pipeline())
-                        {
-                            RenderTrace.Write($"ProgramCache hit stage={source.Label} hash=0x{source.Hash:X16} id=0x{candidate.Handle.Id:X16}");
-                        }
-
-                        return candidate.Handle;
-                    }
-                }
+                return found;
             }
 
             var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? KeyFor(source, options), sourceWasCached, snapshot);
-            entry.Permutations.Add(permutation);
+            entry.AddPermutation(permutation);
             if (ReferenceEquals(permutation.Specialization, specialization))
             {
                 Volatile.Write(ref entry.LastPermutation, permutation);
@@ -507,6 +515,37 @@ internal sealed class ShaderProgramCache
     {
         BuildStaticState(source.Stage, options);
         return BuildProgramKey(source);
+    }
+
+    private ShaderProgram? TryReusePermutation(ProgramSourceEntry entry, ResourceSpecialization specialization, ResourceSnapshot snapshot,
+        ShaderSource source, StageCompileOptions options, ref uint pushDataCursor, out ShaderStageResources stage)
+    {
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
+        {
+            foreach (var candidate in entry.Permutations)
+            {
+                var layout = candidate.Bindings;
+                if (layout.PushDataStartDword == PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount) && candidate.Specialization.Equals(specialization))
+                {
+                    if (ReferenceEquals(candidate.Specialization, specialization))
+                    {
+                        Volatile.Write(ref entry.LastPermutation, candidate);
+                    }
+
+                    stage = CreateStageResources(candidate.Program, snapshot, source, options);
+                    layout.AdvancePushData(ref pushDataCursor);
+                    if (RenderTrace.Enabled && RenderTrace.Pipeline())
+                    {
+                        RenderTrace.Write($"ProgramCache hit stage={source.Label} hash=0x{source.Hash:X16} id=0x{candidate.Handle.Id:X16}");
+                    }
+
+                    return candidate.Handle;
+                }
+            }
+        }
+
+        stage = default;
+        return null;
     }
 
     // The key of the entry the static state was just built for.
