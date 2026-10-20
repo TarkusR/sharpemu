@@ -112,6 +112,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
         StreamOffsetAlignment = device.MinUniformBufferOffsetAlignment;
         MappedBudget = device.MappedDeviceLocalBudget;
+        AllocatesMappedBuffers = device.ResizableBar && MappedBudget != 0;
         _gds.Mapped.Clear();
         _gds.Flush(0, _gds.Size);
         var nullId = _registry.AllocateBuffer(new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AddressedFlags, 16), 0, 16);
@@ -2116,6 +2117,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             pieces.Add(piece);
         }
 
+        if (AllocatesMappedBuffers && PieceBytes(pieces) > MaxDirectReadBytes)
+        {
+            DirectFallbackTooLarge.Increment();
+            return false;
+        }
+
         var bytes = 0UL;
         foreach (var piece in pieces)
         {
@@ -2167,8 +2174,21 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     private const int PromotionReadbacks = 2;
+    private const ulong MaxDirectReadBytes = 256 * 1024;
     private const ulong MaxPromotedBufferBytes = 32 * MiB;
     private readonly List<DownloadPiece> _directPieces = [];
+
+    private static ulong PieceBytes(List<DownloadPiece> pieces)
+    {
+        var bytes = 0UL;
+        foreach (var piece in pieces)
+        {
+            bytes += piece.Size;
+        }
+
+        return bytes;
+    }
+
     private ulong _promotedBytes;
     private ulong _promotionCeiling = ulong.MaxValue;
 
@@ -2184,8 +2204,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private static bool IsPromoted(GpuBuffer buffer) => buffer.Usage == GpuBufferUsage.MappedDeviceLocal && buffer.IsMapped;
 
+    internal bool AllocatesMappedBuffers { get; set; }
+
     private bool FitsMappedBudget(ulong size, ulong released = 0) =>
-        size <= MaxPromotedBufferBytes && _promotedBytes - released + size <= Math.Min(MappedBudget, _promotionCeiling);
+        (AllocatesMappedBuffers || size <= MaxPromotedBufferBytes) && _promotedBytes - released + size <= Math.Min(MappedBudget, _promotionCeiling);
 
     private GpuBuffer PromoteReadBuffer(GpuBuffer buffer)
     {
@@ -2218,10 +2240,16 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         return promoted;
     }
 
-    private void NotePromotion(GpuBuffer buffer)
+    private void NotePromotion(GpuBuffer buffer, bool atCreation = false)
     {
         if (IsPromoted(buffer))
         {
+            if (atCreation)
+            {
+                MappedCreations.Increment();
+                return;
+            }
+
             Promotions.Increment();
             PromotedBufferBytes.Add((long)buffer.Size);
             return;
@@ -2687,6 +2715,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     public static readonly ThreadCounter Promotions = new();
     public static readonly ThreadCounter PromotedBufferBytes = new();
     public static readonly ThreadCounter PromotionsBudgetFull = new();
+    public static readonly ThreadCounter MappedCreations = new();
+    public static readonly ThreadCounter DirectFallbackTooLarge = new();
     public static long PromotedLiveBytes;
     public static readonly ThreadCounter RelayHopBegin = new();
     public static readonly ThreadCounter RelayHopBeginTicks = new();
@@ -2973,18 +3003,20 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             PromotionsBudgetFull.Increment();
         }
 
+        var mappedAtCreation = !keepsPromotion && AllocatesMappedBuffers && FitsMappedBudget(mergedSize, promotedOverlap);
+        var mapped = keepsPromotion || mappedAtCreation;
         var bufferIdentifier = _registry.AllocateBuffer(new GpuBuffer(
-            _device, _scheduler, keepsPromotion ? GpuBufferUsage.MappedDeviceLocal : GpuBufferUsage.DeviceLocal, overlap.Begin,
-            GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, mergedSize, allowSlab: !keepsPromotion), overlap.Begin, mergedSize);
+            _device, _scheduler, mapped ? GpuBufferUsage.MappedDeviceLocal : GpuBufferUsage.DeviceLocal, overlap.Begin,
+            GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, mergedSize, allowSlab: !mapped || AllocatesMappedBuffers), overlap.Begin, mergedSize);
         foreach (var oldId in overlapping)
         {
             MergeOverlappingBuffer(bufferIdentifier, oldId, !overlap.HasStreamLeap);
         }
 
         Register(bufferIdentifier);
-        if (keepsPromotion)
+        if (mapped)
         {
-            NotePromotion(_registry.GetBuffer(bufferIdentifier));
+            NotePromotion(_registry.GetBuffer(bufferIdentifier), mappedAtCreation);
         }
 
         return bufferIdentifier;

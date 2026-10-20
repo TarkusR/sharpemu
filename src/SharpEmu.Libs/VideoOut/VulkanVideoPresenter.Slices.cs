@@ -1019,7 +1019,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (isWritten && buffer.IsMapped)
             {
-                _workerBuffer!.NoteMappedMemoryWrite();
+                _workerBuffer?.NoteMappedMemoryWrite();
             }
         }
 

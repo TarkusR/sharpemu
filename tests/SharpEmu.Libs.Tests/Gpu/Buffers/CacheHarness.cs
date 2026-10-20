@@ -167,6 +167,7 @@ internal sealed class CacheHarness : IDisposable
         Cache = new GuestBufferCache(vulkan.DeviceInfo, Worker.Scheduler, Worker.Relay, Gpu.Pages, Memory, space);
         Images = new GuestImageCache(vulkan.DeviceInfo, Worker.Scheduler, Gpu.Pages, Cache, space, readbackLinearImages);
         Cache.ImageCache = Images;
+        Cache.AllocatesMappedBuffers = false;
         Gpu.AttachStores(Cache, Images);
         Gpu.AttachGpuQueue(Worker.Relay, Worker.Scheduler);
     }

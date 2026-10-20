@@ -270,4 +270,70 @@ public sealed class GuestBufferDirectReadTests(HeadlessVulkanFixture fixture) : 
         Assert.Equal(0x80808080u, ReadWord(harness, address + 0x10));
         Stop(harness);
     }
+
+    private CacheHarness? StartMapped(out ulong address, ulong bufferBytes)
+    {
+        address = 0;
+        if (_vulkan is null || !GatePrerequisites.Ready(_vulkan))
+        {
+            return null;
+        }
+
+        var harness = new CacheHarness(_vulkan);
+        if (harness.Cache.MappedBudget < 2 * bufferBytes)
+        {
+            harness.Dispose();
+            return null;
+        }
+
+        harness.Cache.AllocatesMappedBuffers = true;
+        Attach(harness, _vulkan);
+        address = harness.MapBacked(bufferBytes, ReadWrite);
+        CoverWithOneBuffer(harness, address, bufferBytes);
+        return harness;
+    }
+
+    [Fact]
+    public void WithResizableBarANewBufferIsMappedAtOnceAndReadDirectly()
+    {
+        using var harness = StartMapped(out var address, BufferBytes);
+        if (harness is null) return;
+        using var fatal = new FatalScope();
+        Assert.True(IsMapped(harness, address));
+        Assert.Equal(BufferBytes, harness.Cache.PromotedBytes);
+
+        GpuWrite(harness, address, 0x90909090);
+        Finish(harness);
+        Assert.True(harness.Cache.DownloadToCpu(address, 4));
+
+        Assert.Equal(1, harness.Cache.DirectReadsApplied);
+        Assert.Equal(0x90909090u, ReadWord(harness, address + 0x10));
+        Stop(harness);
+    }
+
+    [Fact]
+    public void WithResizableBarADirectReadAboveTheWindowCapFallsBackToTheReadbackQueue()
+    {
+        const ulong large = 0x80000;
+        using var harness = StartMapped(out var address, large);
+        if (harness is null) return;
+        using var fatal = new FatalScope();
+        Assert.True(IsMapped(harness, address));
+        var applied = harness.Cache.PendingReadbacksApplied;
+
+        GpuWrite(harness, address, 0xA0A0A0A0, 0x48000);
+        Finish(harness);
+        Assert.True(harness.Cache.DownloadToCpu(address, 0x48000));
+
+        Assert.Equal(0, harness.Cache.DirectReadsApplied);
+        Assert.Equal(0xA0A0A0A0u, ReadWord(harness, address + 0x47FF0));
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x48000));
+
+        GpuWrite(harness, address, 0xB0B0B0B0, 0x1000);
+        Finish(harness);
+        Assert.True(harness.Cache.DownloadToCpu(address, 0x1000));
+        Assert.Equal(1, harness.Cache.DirectReadsApplied);
+        Assert.Equal(0xB0B0B0B0u, ReadWord(harness, address + 0x800));
+        Stop(harness);
+    }
 }

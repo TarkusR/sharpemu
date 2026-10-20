@@ -46,6 +46,8 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
 
     public ulong MappedDeviceLocalBudget { get; }
 
+    public bool ResizableBar { get; private set; }
+
     public uint MemoryHeapCount => _memoryProperties.MemoryHeapCount;
 
     public uint GetMemoryHeapIndex(uint memoryType)
@@ -93,11 +95,11 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
         var memoryType = mappedTypes[0];
         var mappedHeap = GetMemoryHeapIndex(memoryType);
         var heapSize = GetMemoryHeapSize(mappedHeap);
-        var resizableBar = heapSize >= largestDeviceLocalHeap / 2 || heapSize >= ResizableBarHeapBytes;
-        var budget = resizableBar
+        ResizableBar = heapSize >= largestDeviceLocalHeap / 2 || heapSize >= ResizableBarHeapBytes;
+        var budget = ResizableBar
             ? Math.Min(heapSize / 4, MaxMappedDeviceLocalBudget)
             : heapSize / 4 > SmallBarReserve ? heapSize / 4 - SmallBarReserve : 0;
-        NoteMappedDeviceLocalBudget(FormattableString.Invariant($"Mapped device-local buffers use memory type {memoryType} ({GetMemoryTypeFlags(memoryType)}) on heap {mappedHeap} of {heapSize / MiB} MiB (largest device-local heap {largestDeviceLocalHeap / MiB} MiB, resizable BAR {resizableBar}): budget {budget / MiB} MiB"));
+        NoteMappedDeviceLocalBudget(FormattableString.Invariant($"Mapped device-local buffers use memory type {memoryType} ({GetMemoryTypeFlags(memoryType)}) on heap {mappedHeap} of {heapSize / MiB} MiB (largest device-local heap {largestDeviceLocalHeap / MiB} MiB, resizable BAR {ResizableBar}): budget {budget / MiB} MiB"));
         return budget;
     }
 

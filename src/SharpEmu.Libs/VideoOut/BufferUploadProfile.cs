@@ -190,8 +190,8 @@ internal static class BufferUploadProfile
         var direct = Gpu.Buffers.GuestBufferCache.DirectReads.Take();
         var guestDirect = Gpu.Buffers.GuestBufferCache.GuestDirectReads.Take();
         return FormattableString.Invariant($"direct:{direct},direct_bytes:{Gpu.Buffers.GuestBufferCache.DirectBytes.Take()},direct_us:{PerSample(Gpu.Buffers.GuestBufferCache.DirectTicks, direct):F1} ") +
-            FormattableString.Invariant($"direct_fallback=unmapped:{Gpu.Buffers.GuestBufferCache.DirectFallbackUnmapped.Take()},writer_pending:{Gpu.Buffers.GuestBufferCache.DirectFallbackWriterPending.Take()},no_writer:{Gpu.Buffers.GuestBufferCache.DirectFallbackNoWriter.Take()} ") +
-            FormattableString.Invariant($"promoted={Gpu.Buffers.GuestBufferCache.Promotions.Take()}/{Gpu.Buffers.GuestBufferCache.PromotedBufferBytes.Take()},budget_full:{Gpu.Buffers.GuestBufferCache.PromotionsBudgetFull.Take()},live_bytes:{Interlocked.Read(ref Gpu.Buffers.GuestBufferCache.PromotedLiveBytes)} ") +
+            FormattableString.Invariant($"direct_fallback=unmapped:{Gpu.Buffers.GuestBufferCache.DirectFallbackUnmapped.Take()},writer_pending:{Gpu.Buffers.GuestBufferCache.DirectFallbackWriterPending.Take()},no_writer:{Gpu.Buffers.GuestBufferCache.DirectFallbackNoWriter.Take()},too_large:{Gpu.Buffers.GuestBufferCache.DirectFallbackTooLarge.Take()} ") +
+            FormattableString.Invariant($"promoted={Gpu.Buffers.GuestBufferCache.Promotions.Take()}/{Gpu.Buffers.GuestBufferCache.PromotedBufferBytes.Take()},mapped_at_create:{Gpu.Buffers.GuestBufferCache.MappedCreations.Take()},budget_full:{Gpu.Buffers.GuestBufferCache.PromotionsBudgetFull.Take()},live_bytes:{Interlocked.Read(ref Gpu.Buffers.GuestBufferCache.PromotedLiveBytes)} ") +
             FormattableString.Invariant($"guest_direct_reads={guestDirect} direct_read_us={PerSample(Gpu.Buffers.GuestBufferCache.GuestDirectReadTicks, guestDirect):F1}");
     }
 
