@@ -350,6 +350,7 @@ public static partial class AgcExports
 
         private bool TryRunExecutorDraw(ulong submitId, SubmittedDcbState state, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
         {
+            Diagnostics.DispatchRunTally.NoteDraw();
             if (_executor is null)
             {
                 return false;
@@ -531,7 +532,11 @@ public static partial class AgcExports
             if (_executor is { } executor)
             {
                 state.FrameDispatchCount++;
-                ExecuteDispatch(executor, submitId, RequireTypedRegisters(state), endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress);
+                var banks = RequireTypedRegisters(state);
+                var compute = banks.Shader.Compute;
+                Diagnostics.DispatchRunTally.NoteDispatch(state, compute.Address, compute.ThreadsX, compute.ThreadsY, compute.ThreadsZ, compute.LocalDataShareSize,
+                    compute.UserScalars.ValueSpan((int)Math.Min(compute.UserScalarCount, (uint)UserScalarRegisters.Capacity)), endX, endY, endZ, indirectArgumentsAddress != 0);
+                ExecuteDispatch(executor, submitId, banks, endX, endY, endZ, dispatchInitiator, indirectArgumentsAddress);
                 return;
             }
 

@@ -53,6 +53,13 @@ internal sealed partial class RenderRecorder
                 consumed = TryConsume(record, program);
             }
 
+            var kinds = (record.MetadataClear is not null ? 1 : 0) | (record.ConstantFill is not null ? 2 : 0) | (record.BoundedFill is not null ? 4 : 0) |
+                (record.BoundedCopy is not null ? 8 : 0) | (record.ImageClear is not null ? 16 : 0);
+            if (kinds != 0)
+            {
+                Diagnostics.DispatchRunTally.NoteConsume(program.Hash, kinds, consumed);
+            }
+
             if (consumed)
             {
                 _host.ResetBindings();

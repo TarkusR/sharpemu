@@ -171,6 +171,7 @@ public sealed partial class GpuCommandInterpreter
         if (cacheAction)
         {
             _acquireMemoryBarriers.Increment();
+            Diagnostics.DispatchRunTally.NoteSync();
             _host.EmitGlobalBarrier();
         }
     }

@@ -342,6 +342,7 @@ public sealed partial class GpuCommandInterpreter
         {
             if (eopEventType != 0x28 || gcrControl != 0)
             {
+                Diagnostics.DispatchRunTally.NoteSync();
                 _host.EmitGlobalBarrier();
             }
 
@@ -351,6 +352,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (ReleaseMemGcrNeedsBarrier(eopEventType, gcrControl))
         {
+            Diagnostics.DispatchRunTally.NoteSync();
             _host.EmitGlobalBarrier();
         }
 
@@ -419,6 +421,7 @@ public sealed partial class GpuCommandInterpreter
             case 0x07:
             case 0x0F:
             case 0x10:
+                Diagnostics.DispatchRunTally.NoteSync();
                 _host.EmitGlobalBarrier();
                 break;
             case 0x16:
@@ -431,6 +434,7 @@ public sealed partial class GpuCommandInterpreter
                     throw _host.Fatal($"The event type is unknown: type=0x{eventType:X8} index=0x{eventIndex:X8}.");
                 }
 
+                Diagnostics.DispatchRunTally.NoteSync();
                 _host.EmitGlobalBarrier();
                 break;
             case 0x0D:

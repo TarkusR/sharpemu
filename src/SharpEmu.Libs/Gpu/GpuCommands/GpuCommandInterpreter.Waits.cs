@@ -171,6 +171,7 @@ public sealed partial class GpuCommandInterpreter
 
     private uint WaitRegisterMemoryPacket(in PacketContext packet, ReadOnlySpan<uint> payload, bool is64Bit)
     {
+        Diagnostics.DispatchRunTally.NoteWait();
         var valueDwords = is64Bit ? 2u : 1u;
         var payloadDwords = 4u + (valueDwords * 2u);
         var opcode = is64Bit ? PacketOpcode.WaitRegisterMemory64 : PacketOpcode.WaitRegisterMemory;

@@ -148,6 +148,11 @@ public sealed partial class RenderExecutor
         record.GroupsZ = groupsZ;
         record.IndirectArgumentsAddress = indirectArgumentsAddress;
         record.HasStorageWrites = hasStorageWrites;
+        var resources = input.Stage.Resources;
+        Diagnostics.DispatchRunTally.NoteResolved(computeProgram.Program.Id, resources.Images, resources.Samplers, program.Bindings?.UsesTableBlock == true,
+            program.Bindings?.Find(ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is not null,
+            record.MetadataClear is not null || record.ConstantFill is not null || record.BoundedFill is not null || record.BoundedCopy is not null || record.ImageClear is not null,
+            computeProgram.KnownWrite is not null);
         Record(record);
     }
 
