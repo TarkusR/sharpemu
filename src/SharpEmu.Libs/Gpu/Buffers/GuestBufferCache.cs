@@ -111,7 +111,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 64 * MiB);
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
         StreamOffsetAlignment = device.MinUniformBufferOffsetAlignment;
-        MappedBudget = device.MappedDeviceLocalBudget;
+        MappedBudget = RenderDocCapture.IsAvailable ? 0 : device.MappedDeviceLocalBudget;
         AllocatesMappedBuffers = device.ResizableBar && MappedBudget != 0;
         _gds.Mapped.Clear();
         _gds.Flush(0, _gds.Size);
