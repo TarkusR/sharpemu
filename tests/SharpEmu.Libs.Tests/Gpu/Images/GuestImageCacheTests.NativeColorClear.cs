@@ -56,6 +56,31 @@ public sealed partial class GuestImageCacheTests
         _vulkan.AssertNoValidationMessages();
     }
 
+    [Fact]
+    public void RepeatedNativeColorClearRegistrationKeepsTheMetadataGeneration()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var metadataAddress = address + 0x10000;
+        var target = AsColorTarget(LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
+        target.Description.Metadata.NativeColorClear = true;
+        target.Description.Metadata.PackedColorClearSupported = true;
+        target.Description.Metadata.PackedColorClear = new ClearColorValue(0f, 0f, 1f, 1f);
+        harness.Write(metadataAddress, Enumerable.Repeat((byte)0xFF, 4096).ToArray());
+        var identifier = harness.Find(ref target);
+        harness.Worker.Run(() => harness.Images.ApplyNativeColorClear(identifier, target));
+        var generation = harness.Images.MetadataGeneration;
+
+        harness.Worker.Run(() => harness.Images.ApplyNativeColorClear(identifier, target));
+
+        Assert.Equal(generation, harness.Images.MetadataGeneration);
+        harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(0u, false, true)]
     [InlineData(0u, true, false)]

@@ -42,15 +42,23 @@ public sealed unsafe partial class GuestImageCache
         {
             IncludeMetadataWriteRange(metadata.Range.Address, metadata.Range.Size);
             // A new metadata use must not retain another surface's clear state or ownership.
+            var changed = false;
             if (!_surfaceMetadata.TryGetValue(metadata.Range.Address, out var registration) ||
                 registration.Invalidated || registration.Kind != metadataKind || !registration.NativeColorClear)
             {
                 registration = new SurfaceMetadata { Kind = metadataKind };
                 _surfaceMetadata[metadata.Range.Address] = registration;
+                changed = true;
             }
+            changed |= !ReferenceEquals(_slots[imageIdentifier].MetadataRegistration, registration) || registration.DccSliceCount != layers ||
+                registration.ClearMask != 0 || registration.FillSize != 0 || registration.FillValue != uint.MaxValue ||
+                registration.RangeSize < metadata.Range.Size || registration.Size < metadata.Range.Size;
             registration.NativeColorClear = true;
             registration.DccSliceCount = layers;
-            NoteMetadataChange(metadata.Range.Address);
+            if (changed)
+            {
+                NoteMetadataChange(metadata.Range.Address);
+            }
             // Native bytes own the clear state. Do not reuse deferred fill flags.
             registration.ClearMask = 0;
             registration.FillSize = 0;
