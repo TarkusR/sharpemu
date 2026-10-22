@@ -68,7 +68,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly ThreadCounter _workerAllocated = new();
 
     internal static string TakeSliceReport() =>
-        FormattableString.Invariant($"[PERF][SLICES] slices={_slicesRecorded.Take()} segments={_segmentsRecorded.Take()} empty={_segmentsEmpty.Take()} uses_shared={_usesShared.Take()} attachments_kept={RecordingHost.TakeAttachmentsKept()} ") +
+        FormattableString.Invariant($"[PERF][SLICES] slices={_slicesRecorded.Take()} segments={_segmentsRecorded.Take()} empty={_segmentsEmpty.Take()} uses_shared={_usesShared.Take()} attachments_kept={RecordingHost.TakeAttachmentsKept()} worker_queries={RecordingHost.TakeWorkerQueries()} ") +
         SharpEmu.Libs.Gpu.Rendering.RenderRecorder.TakeInPlaceReport() + FormattableString.Invariant($" textures_kept={RecordingHost.TakeTexturesKept()} ") + RecordingHost.TakeTableReport() +
         FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)} ") +
         FormattableString.Invariant($"serial_cuts={_slicesSerial.Take()} invalid={_slicesInvalid.Take()} ") +
@@ -232,6 +232,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public int Count;
         public string? SerialReason;
         public RecordingBuffer? Buffer;
+        public List<VulkanOcclusionQueries.Block>? QueryBlocks;
         public int DrawCount;
     }
 
@@ -550,6 +551,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     _ = _scheduler.FlushDeferred([segment.Buffer!]);
                 }
 
+                if (segment.QueryBlocks is { } blocks)
+                {
+                    segment.QueryBlocks = null;
+                    foreach (var block in blocks)
+                    {
+                        _occlusionQueries!.Adopt(block, _occlusionQueueId);
+                    }
+                }
+
                 EnsureBatchedGuestCommands();
                 RequestGuestMemoryBarrier(RecordingHost.GlobalMemoryBarrier);
 
@@ -566,6 +576,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
+                if (segment.QueryBlocks is { } unused)
+                {
+                    segment.QueryBlocks = null;
+                    unused.ForEach(_occlusionQueries!.ReturnBlock);
+                }
+
                 if (segment.Buffer is { } buffer)
                 {
                     segment.Buffer = null;
@@ -838,6 +854,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _workerBindings.Clear();
             _hasBoundDepth = false;
             _attachments.Clear();
+            _workerQueryBlock = null;
             _depthClearRecordedSeparately = false;
             _boundGraphicsPipeline = null;
             _sliceDrawCount = 0;

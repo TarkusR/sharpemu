@@ -1147,7 +1147,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 PDepthAttachment = depthStencil.HasDepth ? &depth : null,
                 PStencilAttachment = depthStencil.HasStencil ? &stencil : null,
             };
-            if (_occlusionCounting)
+            if (_occlusionCounting && _worker)
+                BeginWorkerQuery(command);
+            else if (_occlusionCounting)
                 _presenter._occlusionQueries?.Begin(command, _presenter._occlusionQueueId, Gpu.GpuCommands.VisibilityResultTrace.Enabled
                     ? _presenter.CommandStream.GetInterpreter(_presenter._occlusionQueueId).TypedRegisters.Context.DepthCountControl : 0);
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
@@ -1190,7 +1192,11 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _vk.CmdEndRendering(command);
             }
-            if (!_worker)
+            if (_worker)
+            {
+                EndWorkerQuery(command);
+            }
+            else
             {
                 _presenter._occlusionQueries?.End(command);
             }

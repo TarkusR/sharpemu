@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -217,19 +218,47 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed partial class RecordingHost
     {
         private bool _occlusionCounting;
+        private VulkanOcclusionQueries.Block? _workerQueryBlock;
+        private bool _workerQueryActive;
+        private static readonly ThreadCounter _workerQueries = new();
+
+        internal static long TakeWorkerQueries() => _workerQueries.Take();
 
         private void SetOcclusionCounting(uint control)
         {
             const uint incrementDisabled = 1u;
             const uint counterZeroEnabled = 1u << 8;
             var enabled = (control & (incrementDisabled | counterZeroEnabled)) == counterZeroEnabled;
-            if (enabled && _worker && _presenter._supportsPreciseOcclusion)
+            if (enabled && _worker && _presenter._supportsPreciseOcclusion && _presenter._occlusionQueries is null)
                 throw Serial("occlusion counting", resumable: true);
             if (enabled != _occlusionCounting)
                 EndRendering();
             if (enabled && _presenter._supportsPreciseOcclusion)
                 _ = _presenter.OcclusionQueries();
             _occlusionCounting = enabled;
+        }
+
+        private void BeginWorkerQuery(CommandBuffer command)
+        {
+            if (_presenter._occlusionQueries is not { } queries)
+                return;
+            if (_workerQueryBlock is null || VulkanOcclusionQueries.IsFull(_workerQueryBlock))
+            {
+                _workerQueryBlock = queries.RentBlock(command);
+                (_segment!.QueryBlocks ??= []).Add(_workerQueryBlock);
+            }
+
+            queries.BeginInBlock(command, _workerQueryBlock);
+            _workerQueryActive = true;
+            _workerQueries.Increment();
+        }
+
+        private void EndWorkerQuery(CommandBuffer command)
+        {
+            if (!_workerQueryActive)
+                return;
+            _presenter._occlusionQueries!.EndInBlock(command, _workerQueryBlock!);
+            _workerQueryActive = false;
         }
 
         private void TraceOcclusionDraw(uint? indexCount = null)
