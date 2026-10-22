@@ -1194,6 +1194,11 @@ public sealed partial class ResourceMaterializationCache
                 var validated = Validate(variant, residentReader, rebase, inputs.UserData,
                     out var variantUnreadable, out var descriptorChanged, out rejection);
                 _validatedVariants++;
+                if (validated && _statisticsDiffer && !KeepsImageGroups(variant))
+                {
+                    validated = false;
+                    descriptorChanged = true;
+                }
 
                 if (validated)
                 {
@@ -2277,6 +2282,39 @@ public sealed partial class ResourceMaterializationCache
         }
 
         return statistics;
+    }
+
+    private bool KeepsImageGroups(Entry entry)
+    {
+        var probes = entry.ImageStatisticsWords!;
+        var images = entry.Snapshot.Images;
+        var current = new uint[images.Length][];
+        for (var image = 0; image < images.Length; image++)
+        {
+            var words = images[image];
+            if (image >= probes.Length || probes[image] < 0 || words.Length < 7)
+            {
+                current[image] = words;
+                continue;
+            }
+
+            var patched = (uint[])words.Clone();
+            if (_statisticsCapturedAt.Length > image * 2 && _statisticsCapturedAt[image * 2] == _validation)
+            {
+                patched[5] = (patched[5] & ~ResourceSnapshot.MipStatisticsEnableWordMask) |
+                    (_currentStatistics[image * 2] & ResourceSnapshot.MipStatisticsEnableWordMask);
+            }
+
+            if (_statisticsCapturedAt.Length > image * 2 + 1 && _statisticsCapturedAt[image * 2 + 1] == _validation)
+            {
+                patched[6] = (patched[6] & ~ResourceSnapshot.MipStatisticsSlotWordMask) |
+                    (_currentStatistics[image * 2 + 1] & ResourceSnapshot.MipStatisticsSlotWordMask);
+            }
+
+            current[image] = patched;
+        }
+
+        return DescriptorBindingAliases.Group(current, entry.Specialization.Images).SequenceEqual(entry.Specialization.ImageDescriptorGroups);
     }
 
     private static ResourceSnapshot WithMipStatistics(ResourceSnapshot snapshot, uint[] statistics) => new()

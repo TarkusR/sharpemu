@@ -378,7 +378,8 @@ public static partial class ResourceMaterializer
         {
             foreach (var candidate in memos)
             {
-                if (candidate is SpecializationMemo entry && MatchesOutput(entry, output, bufferCount, imageCount, samplerCount, out statisticsDiffer))
+                if (candidate is SpecializationMemo entry && MatchesOutput(entry, output, bufferCount, imageCount, samplerCount, out statisticsDiffer) &&
+                    (!statisticsDiffer || entry.Specialization.ImageDescriptorGroups.SequenceEqual(OutputImageGroups(output, bufferCount, imageCount))))
                 {
                     memo = entry;
                     break;
@@ -442,6 +443,17 @@ public static partial class ResourceMaterializer
 
         var materialized = new MaterializedSnapshot { Buffers = buffers, Images = images, Samplers = samplers, FlattenedTable = table, UserData = userData };
         return SpecializeAndRemember(plan, inputs, materialized, ranges, memos, ref snapshot, ref specialization, out failure);
+    }
+
+    private static List<uint> OutputImageGroups(MaterializationProgram.Output output, int bufferCount, int imageCount)
+    {
+        var images = new uint[imageCount][];
+        for (var index = 0; index < imageCount; index++)
+        {
+            images[index] = output.Source(bufferCount + index).ToArray();
+        }
+
+        return DescriptorBindingAliases.Group(images);
     }
 
     private static bool MatchesOutput(SpecializationMemo memo, MaterializationProgram.Output output, int bufferCount, int imageCount, int samplerCount,
