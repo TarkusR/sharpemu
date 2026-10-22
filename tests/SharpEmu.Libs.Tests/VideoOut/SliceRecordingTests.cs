@@ -359,6 +359,39 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
         harness.Shutdown();
     }
 
+    [Fact]
+    public void SegmentImageUsesAndKeptAttachmentsCompareRequestsByValue()
+    {
+        var image = new ResourceSlotIdentifier(1, 1);
+        var request = TracedColorTarget("descriptor");
+        var equal = TracedColorTarget(new string("descriptor".AsSpan()));
+        var cleared = TracedColorTarget("descriptor");
+        cleared.Description.Metadata.DccClearWord = 1;
+
+        var segment = Activator.CreateInstance(SegmentType, nonPublic: true)!;
+        var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+        var addImage = requests.GetType().GetMethod("AddImage")!;
+        foreach (var use in new[] { request, equal, cleared })
+        {
+            addImage.Invoke(requests, [new ImageSliceUse(image, null!, use)]);
+        }
+
+        Assert.Equal(2, ((List<ImageSliceUse>)requests.GetType().GetField("Images")!.GetValue(requests)!).Count);
+
+        var host = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.RecordingHostType);
+        SetHostField(host, "_attachments", new List<(ResourceSlotIdentifier, ImageRequest, ImageView, CachedImage)> { (image, request, default, null!) });
+        Assert.True(KeptAttachment(host, image, equal));
+        Assert.False(KeptAttachment(host, image, cleared));
+        Assert.False(KeptAttachment(host, new ResourceSlotIdentifier(2, 1), equal));
+    }
+
+    private static ImageRequest TracedColorTarget(string descriptor) =>
+        new(CachedImageTests.Color2D(16, 16), ImageViewDescription.Default, ImageRole.ColorTarget) { TraceTextureDescriptor = descriptor };
+
+    private static bool KeptAttachment(object host, ResourceSlotIdentifier image, ImageRequest request) =>
+        (bool)PresenterUnderTest.RecordingHostType.GetMethod("TryKeptAttachment", PresenterUnderTest.InstanceMembers)!
+            .Invoke(host, [image, request, null, null])!;
+
     private static void SetHostField(object host, string name, object value) =>
         PresenterUnderTest.RecordingHostType.GetField(name, PresenterUnderTest.InstanceMembers)!.SetValue(host, value);
 

@@ -185,29 +185,33 @@ internal static unsafe partial class VulkanVideoPresenter
         public void AddImage(in ImageSliceUse use)
         {
             var key = (use.Image, use.Request.Role, use.Request.View);
-            if (!System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<ImageRequest>())
+            _imageIndex ??= new();
+            if (_imageIndex.TryGetValue(key, out var index))
             {
-                _imageIndex ??= new();
-                if (_imageIndex.TryGetValue(key, out var index))
+                var known = Images[index];
+                if (ReferenceEquals(known.Expected, use.Expected) && SameRequest(known.Request, use.Request))
                 {
-                    var known = Images[index];
-                    if (ReferenceEquals(known.Expected, use.Expected) && SameRequest(known.Request, use.Request))
-                    {
-                        _usesShared.Increment();
-                        return;
-                    }
+                    _usesShared.Increment();
+                    return;
                 }
-                else
-                {
-                    _imageIndex.Add(key, Images.Count);
-                }
+            }
+            else
+            {
+                _imageIndex.Add(key, Images.Count);
             }
 
             Images.Add(use);
         }
 
         internal static bool SameRequest(in ImageRequest left, in ImageRequest right) =>
-            MemoryMarshal.AsBytes(new ReadOnlySpan<ImageRequest>(in left)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<ImageRequest>(in right)));
+            SameBytes(left.Description, right.Description) && left.View == right.View && left.Role == right.Role &&
+            left.TraceTextureMetadataAddress == right.TraceTextureMetadataAddress &&
+            string.Equals(left.TraceTextureDescriptor, right.TraceTextureDescriptor, StringComparison.Ordinal) &&
+            left.TraceMetadataCompress == right.TraceMetadataCompress && left.TraceWriteCompress == right.TraceWriteCompress;
+
+        private static bool SameBytes<T>(in T left, in T right) where T : unmanaged =>
+            MemoryMarshal.AsBytes(new ReadOnlySpan<T>(in left)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<T>(in right)));
+
         public readonly List<(ulong Address, uint[] Words)> KnownWrites = new();
         public readonly List<SubmissionUploadResources> Resources = new();
         public bool NeedsBdaSweep;
