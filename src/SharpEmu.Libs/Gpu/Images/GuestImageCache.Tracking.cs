@@ -622,10 +622,10 @@ public sealed partial class GuestImageCache
     // bytes, starts from them instead of stale guest memory. Buffer bytes the GPU wrote under the image
     // before it are older than its contents: a buffer write after it over part of it published it then.
     // A raw binding over the whole image leaves it GPU-modified; its bytes may be newer than the image,
-    // so such an image is not published. A formatted write takes the ownership of the whole images under
-    // it too, which then publish as well. The buffer is obtained outside the lock; contents that cannot
-    // be copied are lost as before.
-    private void PublishPartlyWrittenImages(ulong address, ulong size, bool wholeImages = false)
+    // so such an image is not published, unless a raw binding about to be written is exactly the image's
+    // range. A formatted write takes the ownership of the whole images under it too, which then publish as
+    // well. The buffer is obtained outside the lock; contents that cannot be copied are lost as before.
+    private void PublishPartlyWrittenImages(ulong address, ulong size, bool wholeImages = false, bool exactImages = false)
     {
         List<ResourceSlotIdentifier>? partlyWritten = null;
         using (var held = _lock.Hold())
@@ -634,8 +634,9 @@ public sealed partial class GuestImageCache
             {
                 var image = _slots[imageIdentifier];
                 var range = image.Description.Data;
+                var exact = exactImages && address == range.Address && size == range.Size;
                 if (image.IsGpuModified && !image.DepthOwner.IsValid && image.Overlaps(address, size) &&
-                    (wholeImages || address > range.Address || address + size < range.Address + range.Size) &&
+                    (wholeImages || exact || address > range.Address || address + size < range.Address + range.Size) &&
                     image.SafeToDownload && !image.RawWriteAfterGpuWrite && !HasNewerHandedOverImage(imageIdentifier, image))
                 {
                     (partlyWritten ??= []).Add(imageIdentifier);
@@ -715,12 +716,13 @@ public sealed partial class GuestImageCache
     // A raw binding that covers only part of a GPU-modified image names memory the guest gave to a buffer.
     // Before the shader writes it, the image's contents move into the buffer, so no later publish of the
     // image can put them over the shader's bytes. A binding that covers an image whole may be a window
-    // that never writes there; the image keeps its bytes.
+    // that never writes there; the image keeps its bytes. A binding of exactly the image's range names the
+    // image and publishes it as well.
     public void PublishImagesUnderRawWrite(ulong address, ulong size)
     {
         if (IsValidRange(address, size))
         {
-            PublishPartlyWrittenImages(address, size);
+            PublishPartlyWrittenImages(address, size, exactImages: true);
         }
     }
 

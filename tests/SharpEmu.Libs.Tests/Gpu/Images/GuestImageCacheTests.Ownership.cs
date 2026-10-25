@@ -345,6 +345,34 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void RawWriteOfExactlyAGpuImagesRange_HandsTheImageToTheBuffer()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var image = Color32(address, 8192);
+        var imageId = harness.Acquire(ref image);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 0x8000, 0x11111111)));
+        Assert.True(harness.Image(imageId).IsGpuModified);
+
+        harness.Worker.Run(() =>
+        {
+            harness.Images.PublishImagesUnderRawWrite(address, 0x8000);
+            var (bound, offset) = harness.Cache.ObtainBuffer(address, 0x8000, isWritten: true);
+            harness.Images.InvalidateMemoryCopiesFromGpu(address, 0x8000);
+            bound.Fill(offset + 0x5000, 0x100, 0x33333333);
+        });
+        Assert.False(harness.Image(imageId).IsGpuModified);
+
+        Assert.True(harness.Cache.DownloadToCpu(address, 0x8000));
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address));
+        Assert.Equal(0x33333333u, harness.ReadUInt32(address + 0x5000));
+        Assert.Equal(0x33333333u, harness.ReadUInt32(address + 0x50FC));
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address + 0x7FFC));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void FullColorClear_SkipsSourceBufferAndRetainsWriteObservation()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
