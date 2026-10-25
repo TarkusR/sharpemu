@@ -1600,12 +1600,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 var beginEnded = 0L;
                 var completedAtBegin = 0UL;
                 var frameAtBegin = 0L;
-                var direct = false;
                 if (!_relay.TryRunOnGpuQueue(() =>
                     {
                         beginStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-                        pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending, markHot, waitForSlot, out slotsBusy, out direct,
-                            allowPromotion: true);
+                        pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending, markHot, waitForSlot, out slotsBusy);
                         completedAtBegin = _scheduler.CompletedTick;
                         frameAtBegin = FrameTicks.LatestSubmittedFrame + 1;
                         beginEnded = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1629,12 +1627,6 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
                 if (pending is null)
                 {
-                    if (direct)
-                    {
-                        GuestDirectReads.Increment();
-                        GuestDirectReadTicks.Add(beginReturned - beginPosted);
-                    }
-
                     return true;
                 }
 
@@ -1661,7 +1653,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         var onQueue = _relay.IsGpuQueueThread;
         if (_relay.TryRunOnGpuQueue(() => _ = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending: false, markHot: onQueue, waitForSlot: false,
-                out _, out _, allowPromotion: !onQueue, useEager: onQueue)))
+                out _, useEager: onQueue)))
         {
             return true;
         }
@@ -1978,10 +1970,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     private PendingDownload? BeginReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source,
-        bool allowPending, bool markHot, bool waitForSlot, out bool slotsBusy, out bool direct, bool allowPromotion = false, bool useEager = false)
+        bool allowPending, bool markHot, bool waitForSlot, out bool slotsBusy, bool useEager = false)
     {
         slotsBusy = false;
-        direct = false;
         if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("cpu-synchronize", guestAddress, size, $"write={isWrite} source={source}");
         using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
         using var foreignRead = _device.Slabs.BeginForeignRead();
@@ -1992,17 +1983,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
 
         var buffer = _registry.GetBuffer(FindBuffer(guestAddress, size));
-        if (allowPromotion)
-        {
-            buffer = PromoteReadBuffer(buffer);
-        }
-
         var copies = CollectReadbackWindow(buffer, guestAddress, size, out var windowBegin, out var windowEnd);
-        if (copies.Count != 0 && TryReadDirect(copies, guestAddress, size, isWrite, source, readbackStarted))
-        {
-            direct = true;
-            return null;
-        }
 
         if (!isWrite && allowPending && TakeEagerReadback(guestAddress, size) is { } eager)
         {
@@ -2075,120 +2056,6 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         return null;
     }
 
-    private bool TryReadDirect(List<DownloadPiece> copies, ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source,
-        long readbackStarted)
-    {
-        const ulong pageBytes = TrackerLayout.PageBytes;
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var wholePages = isWrite || source == GuestMemoryProfile.ReadbackSource.StoreDownload;
-        var begin = wholePages ? guestAddress & ~(pageBytes - 1) : guestAddress;
-        var end = wholePages ? (guestAddress + size + pageBytes - 1) & ~(pageBytes - 1) : guestAddress + size;
-        var pieces = _directPieces;
-        pieces.Clear();
-        foreach (var copy in copies)
-        {
-            var pieceBegin = Math.Max(copy.Address, begin);
-            var pieceEnd = Math.Min(copy.Address + copy.Size, end);
-            if (pieceBegin >= pieceEnd)
-            {
-                continue;
-            }
-
-            var piece = new DownloadPiece(copy.Buffer, copy.SourceOffset + (pieceBegin - copy.Address), pieceBegin, pieceEnd - pieceBegin);
-            if (!piece.Buffer.IsMapped)
-            {
-                DirectFallbackUnmapped.Increment();
-                return false;
-            }
-
-            var writer = piece.Buffer.LastGpuWriteTickIn(piece.SourceOffset, piece.Size);
-            if (writer == 0)
-            {
-                DirectFallbackNoWriter.Increment();
-                return false;
-            }
-
-            if (!_scheduler.IsTickComplete(writer))
-            {
-                DirectFallbackWriterPending.Increment();
-                return false;
-            }
-
-            pieces.Add(piece);
-        }
-
-        if (AllocatesMappedBuffers && PieceBytes(pieces) > MaxDirectReadBytes)
-        {
-            DirectFallbackTooLarge.Increment();
-            return false;
-        }
-
-        var bytes = 0UL;
-        foreach (var piece in pieces)
-        {
-            if (!_backing.TryWriteBacking(piece.Address, piece.Buffer.ReadMapped(piece.SourceOffset, piece.Size)))
-            {
-                throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{piece.Address:X16} size=0x{piece.Size:X16}");
-            }
-
-            bytes += piece.Size;
-        }
-
-        if (pieces.Count != 0)
-        {
-            using (WriteGpuModified())
-            {
-                foreach (var piece in pieces)
-                {
-                    _gpuModifiedRanges.Remove(piece.Address, piece.Size);
-                }
-            }
-
-            BumpGpuModifiedVersion();
-        }
-
-        if (wholePages)
-        {
-            ClearGpuDirtyPagesOfRemovedRange(begin, end - begin);
-        }
-        else
-        {
-            foreach (var piece in pieces)
-            {
-                ClearGpuDirtyPagesOfRemovedRange(piece.Address, piece.Size);
-            }
-        }
-
-        if (isWrite)
-        {
-            _tracker.MarkCpuDirtyPages(guestAddress, size);
-        }
-
-        RecordReadback(begin, end, isWrite, pieces, readbackStarted, source);
-        pieces.Clear();
-        DirectReadsApplied++;
-        DirectReads.Increment();
-        DirectBytes.Add((long)bytes);
-        DirectTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - started);
-        return true;
-    }
-
-    private const int PromotionReadbacks = 2;
-    private const ulong MaxDirectReadBytes = 256 * 1024;
-    private const ulong MaxPromotedBufferBytes = 32 * MiB;
-    private readonly List<DownloadPiece> _directPieces = [];
-
-    private static ulong PieceBytes(List<DownloadPiece> pieces)
-    {
-        var bytes = 0UL;
-        foreach (var piece in pieces)
-        {
-            bytes += piece.Size;
-        }
-
-        return bytes;
-    }
-
     private ulong _promotedBytes;
     private ulong _promotionCeiling = ulong.MaxValue;
 
@@ -2200,45 +2067,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     public bool HasMappedBuffers => Volatile.Read(ref _mappedBuffers) != 0;
 
-    internal long DirectReadsApplied { get; private set; }
-
     private static bool IsPromoted(GpuBuffer buffer) => buffer.Usage == GpuBufferUsage.MappedDeviceLocal && buffer.IsMapped;
 
     internal bool AllocatesMappedBuffers { get; set; }
 
     private bool FitsMappedBudget(ulong size, ulong released = 0) =>
-        (AllocatesMappedBuffers || size <= MaxPromotedBufferBytes) && _promotedBytes - released + size <= Math.Min(MappedBudget, _promotionCeiling);
-
-    private GpuBuffer PromoteReadBuffer(GpuBuffer buffer)
-    {
-        if (buffer.IsMapped || buffer.Readbacks < PromotionReadbacks || _scheduler.Current.IsInvalid)
-        {
-            return buffer;
-        }
-
-        var identifier = _registry.FindContainingBuffer(buffer.CpuAddress, buffer.Size);
-        if (!identifier.IsValid || !ReferenceEquals(_registry.TryGetRegisteredBuffer(identifier), buffer))
-        {
-            return buffer;
-        }
-
-        buffer.ForgetReadbacks();
-        if (!FitsMappedBudget(buffer.Size))
-        {
-            PromotionsBudgetFull.Increment();
-            return buffer;
-        }
-
-        var promotedIdentifier = _registry.AllocateBuffer(new GpuBuffer(
-            _device, _scheduler, GpuBufferUsage.MappedDeviceLocal, buffer.CpuAddress,
-            GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, buffer.Size), buffer.CpuAddress, buffer.Size);
-        var promoted = _registry.GetBuffer(promotedIdentifier);
-        promoted.AddStreamScore(buffer.StreamScore);
-        MergeOverlappingBuffer(promotedIdentifier, identifier, accumulateStreamScore: false);
-        Register(promotedIdentifier);
-        NotePromotion(promoted);
-        return promoted;
-    }
+        AllocatesMappedBuffers && _promotedBytes - released + size <= Math.Min(MappedBudget, _promotionCeiling);
 
     private void NotePromotion(GpuBuffer buffer, bool atCreation = false)
     {
@@ -2704,19 +2538,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     public static long ReadbacksBusy;
     public static long ReadbacksSlotWaits;
     public static long ReadbacksSynchronous;
-    public static readonly ThreadCounter DirectReads = new();
-    public static readonly ThreadCounter DirectBytes = new();
-    public static readonly ThreadCounter DirectTicks = new();
-    public static readonly ThreadCounter DirectFallbackUnmapped = new();
-    public static readonly ThreadCounter DirectFallbackWriterPending = new();
-    public static readonly ThreadCounter DirectFallbackNoWriter = new();
-    public static readonly ThreadCounter GuestDirectReads = new();
-    public static readonly ThreadCounter GuestDirectReadTicks = new();
     public static readonly ThreadCounter Promotions = new();
     public static readonly ThreadCounter PromotedBufferBytes = new();
     public static readonly ThreadCounter PromotionsBudgetFull = new();
     public static readonly ThreadCounter MappedCreations = new();
-    public static readonly ThreadCounter DirectFallbackTooLarge = new();
     public static long PromotedLiveBytes;
     public static readonly ThreadCounter RelayHopBegin = new();
     public static readonly ThreadCounter RelayHopBeginTicks = new();
