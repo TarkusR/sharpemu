@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
@@ -77,6 +78,46 @@ public sealed unsafe partial class GuestImageCache
             if (!TryInspectColorClear(request, layer, address, sliceSize, bytes, out var operation)) continue;
             RecordColorClear(imageIdentifier, request, operation);
         }
+    }
+
+    // True when ApplyNativeColorClear would change nothing: the registration is current and no slice holds a clear code.
+    internal bool NativeColorClearSettled(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    {
+        var description = request.Description;
+        var metadata = description.Metadata;
+        if (!metadata.NativeColorClear) return true;
+        var metadataKind = metadata.Kind == MetadataKind.Cmask ? SurfaceMetadataKind.CMask : SurfaceMetadataKind.Dcc;
+        var view = request.View;
+        var layers = description.TransferLayers;
+        var volumeTexture = description.IsVolume && view.Type == ImageViewType.Type3D;
+        var layerCount = volumeTexture ? description.Extent.Depth : view.LayerCount;
+        var sliceSize = metadata.Range.Size / layers;
+        if (sliceSize == 0 || metadata.ColorMetadataBaseLayer >= layers ||
+            layerCount > layers - metadata.ColorMetadataBaseLayer)
+            return false;
+
+        using (_lock.Read())
+        {
+            if (_slots.TryGet(imageIdentifier) is not { } image ||
+                !_surfaceMetadata.TryGetValue(metadata.Range.Address, out var registration) ||
+                registration.Invalidated || registration.Kind != metadataKind || !registration.NativeColorClear ||
+                !ReferenceEquals(image.MetadataRegistration, registration) || registration.DccSliceCount != layers ||
+                registration.ClearMask != 0 || registration.FillSize != 0 || registration.FillValue != uint.MaxValue ||
+                registration.RangeSize < metadata.Range.Size || registration.Size < metadata.Range.Size ||
+                _maximumMetadataSize < metadata.Range.Size || !_metadataWriteRanges.Contains(metadata.Range.Address, metadata.Range.Size) ||
+                !MemoryMarshal.AsBytes(new ReadOnlySpan<MetadataDescription>(in image.Description.Metadata))
+                    .SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<MetadataDescription>(in metadata))))
+                return false;
+        }
+
+        Span<byte> bytes = stackalloc byte[4096];
+        for (uint slice = 0; slice < layerCount; slice++)
+        {
+            var address = metadata.Range.Address + sliceSize * (metadata.ColorMetadataBaseLayer + slice);
+            if (TryInspectColorClear(request, view.BaseLayer + slice, address, sliceSize, bytes, out _)) return false;
+        }
+
+        return true;
     }
 
     private bool TryInspectColorClear(in ImageRequest request, uint layer, ulong address,

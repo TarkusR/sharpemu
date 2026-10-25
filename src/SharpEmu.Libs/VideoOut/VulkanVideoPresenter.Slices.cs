@@ -28,6 +28,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly ThreadCounter _slicesRecorded = new();
     private static readonly ThreadCounter _segmentsRecorded = new();
     private static readonly ThreadCounter _usesShared = new();
+    private static readonly ThreadCounter _nativeColorRechecksFailed = new();
     private static readonly ThreadCounter _segmentsEmpty = new();
     private static readonly ThreadCounter _slicesSerial = new();
     private static readonly ThreadCounter _slicesInvalid = new();
@@ -68,7 +69,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly ThreadCounter _workerAllocated = new();
 
     internal static string TakeSliceReport() =>
-        FormattableString.Invariant($"[PERF][SLICES] slices={_slicesRecorded.Take()} segments={_segmentsRecorded.Take()} empty={_segmentsEmpty.Take()} uses_shared={_usesShared.Take()} attachments_kept={RecordingHost.TakeAttachmentsKept()} worker_queries={RecordingHost.TakeWorkerQueries()} ") +
+        FormattableString.Invariant($"[PERF][SLICES] slices={_slicesRecorded.Take()} segments={_segmentsRecorded.Take()} empty={_segmentsEmpty.Take()} uses_shared={_usesShared.Take()} attachments_kept={RecordingHost.TakeAttachmentsKept()} worker_queries={RecordingHost.TakeWorkerQueries()} native_rechecks_failed={_nativeColorRechecksFailed.Take()} ") +
         SharpEmu.Libs.Gpu.Rendering.RenderRecorder.TakeInPlaceReport() + FormattableString.Invariant($" textures_kept={RecordingHost.TakeTexturesKept()} ") + RecordingHost.TakeTableReport() +
         FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)} ") +
         FormattableString.Invariant($"serial_cuts={_slicesSerial.Take()} invalid={_slicesInvalid.Take()} ") +
@@ -218,6 +219,20 @@ internal static unsafe partial class VulkanVideoPresenter
         public long BufferSerial;
         public long? ReadsVersion;
         public bool MixedReadsVersions;
+        public readonly List<(ResourceSlotIdentifier Image, ImageRequest Request)> NativeColorUses = new();
+
+        public bool WritesRange(GuestSpan range)
+        {
+            foreach (var use in Buffers)
+            {
+                if (use.Written && use.Address < range.Address + range.Size && range.Address < use.Address + use.Size)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
         public ulong LookupGeneration;
         public long MetadataGeneration;
         public IReadOnlyList<GuestSpan>? BdaSpans;
@@ -616,6 +631,16 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!valid)
             {
                 return false;
+            }
+
+            foreach (var (image, request) in requests.NativeColorUses)
+            {
+                var range = request.Description.Metadata.Range;
+                if (_bufferCache.HasGpuDirtyBytes(range.Address, range.Size) || !_imageCache.NativeColorClearSettled(image, request))
+                {
+                    _nativeColorRechecksFailed.Increment();
+                    return false;
+                }
             }
 
             if (!requests.MixedReadsVersions && (requests.ReadsVersion is not { } version || version == _bufferCache.GpuModifiedVersion))
@@ -1018,22 +1043,33 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void SynchronizeColorMetadata(in ImageRequest request)
         {
-            if (_worker && request.Description.Metadata.NativeColorClear)
+            if (!_worker)
+            {
+                _imageCache.SynchronizeColorMetadata(request);
+            }
+            else if (request.Description.Metadata.NativeColorClear &&
+                     (_bufferCache.HasGpuDirtyBytes(request.Description.Metadata.Range.Address, request.Description.Metadata.Range.Size) ||
+                      Requests.WritesRange(request.Description.Metadata.Range)))
             {
                 throw Serial("native color metadata", resumable: true);
             }
-
-            _imageCache.SynchronizeColorMetadata(request);
         }
 
         private void ApplyNativeColorClear(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
         {
-            if (_worker && request.Description.Metadata.NativeColorClear)
+            if (!_worker)
             {
-                throw Serial("native color clear", resumable: true);
+                _imageCache.ApplyNativeColorClear(imageIdentifier, request);
             }
+            else if (request.Description.Metadata.NativeColorClear)
+            {
+                if (!_imageCache.NativeColorClearSettled(imageIdentifier, request))
+                {
+                    throw Serial("native color clear", resumable: true);
+                }
 
-            _imageCache.ApplyNativeColorClear(imageIdentifier, request);
+                Requests.NativeColorUses.Add((imageIdentifier, request));
+            }
         }
 
         private void NoteSliceWrite(GpuBuffer buffer, bool isWritten)
