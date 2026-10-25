@@ -156,6 +156,44 @@ public sealed class PendingGpuWritesTests
     }
 
     [Fact]
+    public void ARemarkAfterAReaderKeepsTheEarlierUnreleasedWritePendingForIt()
+    {
+        var pending = new PendingGpuWrites();
+        pending.Mark(0x1000, 0x10, sequence: 10);
+        pending.Mark(0x1000, 0x10, sequence: 30);
+
+        Assert.True(pending.HasPendingBetween(0x1000, 4, pending.Released, 20));
+        Assert.True(pending.TryGetPending(0x1000, 4, out var newest));
+        Assert.Equal(30, newest);
+        pending.Release(30);
+        Assert.False(pending.HasPendingBetween(0x1000, 4, pending.Released, 40));
+    }
+
+    [Fact]
+    public void AnEarlierMarkArrivingAfterALaterOneStillCountsForReadersBetweenThem()
+    {
+        var pending = new PendingGpuWrites();
+        pending.Mark(0x1000, 0x10, sequence: 30);
+        pending.Mark(0x1000, 0x10, sequence: 10);
+
+        Assert.True(pending.HasPendingBetween(0x1000, 4, pending.Released, 20));
+        Assert.True(pending.TryGetPending(0x1000, 4, out var newest));
+        Assert.Equal(30, newest);
+    }
+
+    [Fact]
+    public void ARemarkAfterEverythingWasReleasedStartsAFreshSpan()
+    {
+        var pending = new PendingGpuWrites();
+        pending.Mark(0x1000, 0x10, sequence: 10);
+        pending.Release(15);
+        pending.Mark(0x1000, 0x10, sequence: 30);
+
+        Assert.False(pending.HasPendingBetween(0x1000, 4, pending.Released, 20));
+        Assert.True(pending.HasPendingBetween(0x1000, 4, pending.Released, 31));
+    }
+
+    [Fact]
     public void EveryMarkAdvancesTheGeneration()
     {
         var pending = new PendingGpuWrites();

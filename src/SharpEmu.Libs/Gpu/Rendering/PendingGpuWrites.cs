@@ -52,6 +52,7 @@ public sealed class PendingGpuWrites
         public readonly ulong Size = size;
         public readonly Level Level = level;
         public long Sequence;
+        public long Oldest;
         public PendingWriteKind Kind;
 
         public ulong FirstBlock => Address >> Level.Shift;
@@ -108,7 +109,7 @@ public sealed class PendingGpuWrites
                 foreach (var entry in entries)
                 {
                     var entrySequence = Volatile.Read(ref entry.Sequence);
-                    if (entrySequence > afterSequence && entrySequence < beforeSequence &&
+                    if (entrySequence > afterSequence && Volatile.Read(ref entry.Oldest) < beforeSequence &&
                         entry.Address < address + size && address < entry.Address + entry.Size)
                     {
                         return true;
@@ -175,6 +176,15 @@ public sealed class PendingGpuWrites
         {
             if (_entries.TryGetValue((address, size), out var remarked))
             {
+                if (Volatile.Read(ref remarked.Sequence) <= Volatile.Read(ref _released))
+                {
+                    Volatile.Write(ref remarked.Oldest, sequence);
+                }
+                else
+                {
+                    LowerTo(ref remarked.Oldest, sequence);
+                }
+
                 RaiseTo(ref remarked.Sequence, sequence);
                 remarked.Kind = kind;
                 for (var block = remarked.FirstBlock; block <= remarked.LastBlock; block++)
@@ -196,6 +206,15 @@ public sealed class PendingGpuWrites
         {
             if (_entries.TryGetValue((address, size), out var remarked))
             {
+                if (Volatile.Read(ref remarked.Sequence) <= Volatile.Read(ref _released))
+                {
+                    Volatile.Write(ref remarked.Oldest, sequence);
+                }
+                else
+                {
+                    LowerTo(ref remarked.Oldest, sequence);
+                }
+
                 RaiseTo(ref remarked.Sequence, sequence);
                 remarked.Kind = kind;
                 for (var block = remarked.FirstBlock; block <= remarked.LastBlock; block++)
@@ -208,7 +227,7 @@ public sealed class PendingGpuWrites
             }
 
             var fine = ((address + size - 1) >> FineShift) - (address >> FineShift) < MaxFineBlocks;
-            var entry = new Entry(address, size, fine ? _fine : _coarse) { Sequence = sequence, Kind = kind };
+            var entry = new Entry(address, size, fine ? _fine : _coarse) { Sequence = sequence, Oldest = sequence, Kind = kind };
             _entries.Add((address, size), entry);
             if (fine)
             {
@@ -242,6 +261,21 @@ public sealed class PendingGpuWrites
         finally
         {
             _gate.ExitWriteLock();
+        }
+    }
+
+    private static void LowerTo(ref long target, long value)
+    {
+        var current = Volatile.Read(ref target);
+        while (value < current)
+        {
+            var seen = Interlocked.CompareExchange(ref target, value, current);
+            if (seen == current)
+            {
+                return;
+            }
+
+            current = seen;
         }
     }
 
@@ -354,7 +388,7 @@ public sealed class PendingGpuWrites
                 foreach (var entry in _entries.Values)
                 {
                     var entrySequence = Volatile.Read(ref entry.Sequence);
-                    if (entrySequence > afterSequence && entrySequence < beforeSequence &&
+                    if (entrySequence > afterSequence && Volatile.Read(ref entry.Oldest) < beforeSequence &&
                         entry.Address < address + size && address < entry.Address + entry.Size)
                     {
                         return true;

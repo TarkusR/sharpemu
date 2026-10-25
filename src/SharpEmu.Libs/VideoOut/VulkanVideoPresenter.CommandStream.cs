@@ -370,7 +370,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool IsPendingForWorker(ulong address, ulong size)
         {
             var sequence = _resolveWorker!.Sequence;
-            return (_translation.PendingWrites is { } pending && pending.TryGetPending(address, size, out var writer) && writer < sequence) ||
+            return (_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, pending.Released, sequence)) ||
                 _commandThread!.HasShadowBefore(address, size, sequence);
         }
 
