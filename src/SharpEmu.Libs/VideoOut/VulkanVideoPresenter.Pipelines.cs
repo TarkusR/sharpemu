@@ -392,11 +392,16 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
-        private bool ReadResidentBytesOnCommandThread(ulong address, Span<byte> destination, bool clean)
+        // Without waiting, a range with pending command-thread work is refused instead.
+        private bool ReadResidentBytesOnCommandThread(ulong address, Span<byte> destination, bool clean, bool wait = true)
         {
             CommandReadCounts[0].Increment();
             var size = (ulong)destination.Length;
-            CompletePendingPublicationsForResourceRead(address, size);
+            if (wait)
+            {
+                CompletePendingPublicationsForResourceRead(address, size);
+            }
+
             if (!clean && IsCleanReadPage(address, size) && TryReadAliasBytes(address, destination))
             {
                 CommandReadCounts[1].Increment();
@@ -421,7 +426,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
-            thread.WaitForPendingRange(address, size);
+            if (wait)
+            {
+                thread.WaitForPendingRange(address, size);
+            }
+            else if (thread.HasPendingRange(address, size))
+            {
+                return false;
+            }
+
             if (IsPendingOnCommandThread(address, size) || IsGpuOwnedForResidentRead(address, size, clean) || !thread.ReadOverlay(address, destination))
             {
                 return false;
@@ -433,6 +446,21 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return true;
+        }
+
+        public bool TryPeekResidentGuestBytes(ulong address, Span<byte> destination)
+        {
+            if (HasPendingMemoryPublication(address, (ulong)destination.Length))
+            {
+                return false;
+            }
+
+            if (OnResolveWorker)
+            {
+                return ReadResidentBytesOnResolveWorker(address, destination, clean: false);
+            }
+
+            return OnCommandThread ? ReadResidentBytesOnCommandThread(address, destination, clean: false, wait: false) : TryReadResidentGuestBytes(address, destination, clean: false);
         }
 
         // The same ownership rules as the two word readers, checked once for a whole range.

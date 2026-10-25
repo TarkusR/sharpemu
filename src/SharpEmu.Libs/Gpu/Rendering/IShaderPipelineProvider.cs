@@ -55,12 +55,29 @@ public sealed class GraphicsPrograms
     public bool DropUnwrittenColorTargets { get; init; }
 }
 
+// Learns when a known write of one producer is read.
+internal interface IKnownWriteDemand
+{
+    void NoteRead();
+}
+
 public sealed class KnownGpuWrite(ulong address, uint[] buffer, int count, bool pooled = false)
 {
     private readonly object _gate = new();
     private bool _released;
+    private int _read;
+
+    internal IKnownWriteDemand? Demand { get; init; }
 
     public ulong Address { get; } = address;
+
+    internal void NoteRead()
+    {
+        if (Demand is { } demand && Interlocked.Exchange(ref _read, 1) == 0)
+        {
+            demand.NoteRead();
+        }
+    }
 
     public int ByteCount => count * sizeof(uint);
 
@@ -158,6 +175,10 @@ public interface IShaderPipelineProvider
 
     ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
         GetComputeProgram(banks.Shader.Compute, banks.Context.ShaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+
+    // An indirect dispatch reads its dimensions on the GPU, so the provider cannot know its result.
+    ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 

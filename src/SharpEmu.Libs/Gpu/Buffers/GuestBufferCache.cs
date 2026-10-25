@@ -2532,6 +2532,44 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         Interlocked.Increment(ref _reportedKnownApplied);
     }
 
+    // A store the command stream computed, over GPU-dirty pages: the GPU copy takes it behind the earlier GPU work
+    // and the guest backing takes it as well, so its bytes leave GPU ownership while the bytes around them keep theirs.
+    public bool TryWriteOverGpuBytes(ulong guestAddress, ReadOnlySpan<byte> data)
+    {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("kernel store");
+        }
+
+        var size = (ulong)data.Length;
+        if (guestAddress == 0 || size == 0 || ((guestAddress | size) & 3) != 0 || size > ulong.MaxValue - guestAddress)
+        {
+            return false;
+        }
+
+        CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
+        if (RequireImageCache().MayHaveImageBytes(guestAddress, size))
+        {
+            return false;
+        }
+
+        var (destination, _) = ObtainBuffer(guestAddress, size, isWritten: true);
+        WriteDataBuffer(destination, guestAddress, data);
+        if (!_backing.TryWriteBacking(guestAddress, data))
+        {
+            throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{guestAddress:X16} size=0x{size:X16}");
+        }
+
+        using (WriteGpuModified())
+        {
+            _gpuModifiedRanges.Remove(guestAddress, size);
+        }
+
+        BumpGpuModifiedVersion();
+        ClearGpuDirtyPagesOfRemovedRange(guestAddress, size);
+        return true;
+    }
+
     public static long ReadbacksStarted;
     public static long ReadbacksNoWriter;
     public static long ReadbacksTooLarge;

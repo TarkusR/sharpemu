@@ -66,7 +66,7 @@ public sealed partial class RenderExecutor
         ComputeProgram computeProgram;
         using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.DrawProgramResolution))
         {
-            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ);
+            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0);
         }
 
         if (computeProgram.Consumed)

@@ -229,6 +229,62 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void AStoreOverEveryGpuByteOfItsPage_LandsOnBothCopiesAndEndsGpuOwnership()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Pattern(0x2000, 5));
+        var stored = Pattern(0x40, 9);
+        var owner = harness.Worker.Run(() =>
+        {
+            var (buffer, _) = harness.Cache.ObtainBuffer(address + 0x100, 0x40, isWritten: true);
+            buffer.Fill(buffer.Offset(address + 0x100), 0x40, 0x77777777);
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+
+            Assert.True(harness.Cache.TryWriteOverGpuBytes(address + 0x100, stored));
+
+            Assert.False(harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x40));
+            Assert.False(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+            harness.Scheduler.Finish();
+            return buffer;
+        });
+
+        Assert.Equal(stored, harness.Read(address + 0x100, 0x40));
+        Assert.Equal(stored, harness.ReadBack(owner, owner.Offset(address + 0x100), 0x40));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void AStoreOverPartOfTheGpuBytesOfItsPage_LeavesTheOtherBytesWithTheGpu()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Pattern(0x2000, 5));
+        var stored = Pattern(0x20, 9);
+        var owner = harness.Worker.Run(() =>
+        {
+            var (buffer, _) = harness.Cache.ObtainBuffer(address + 0x100, 0x40, isWritten: true);
+            buffer.Fill(buffer.Offset(address + 0x100), 0x40, 0x77777777);
+
+            Assert.True(harness.Cache.TryWriteOverGpuBytes(address + 0x100, stored));
+
+            Assert.False(harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x20));
+            Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x120, 0x20));
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x1000));
+            harness.Scheduler.Finish();
+            return buffer;
+        });
+
+        var gpu = harness.ReadBack(owner, owner.Offset(address + 0x100), 0x40);
+        Assert.Equal(stored, gpu[..0x20]);
+        Assert.All(gpu[0x20..], value => Assert.Equal(0x77, value));
+        Assert.Equal(stored, harness.Read(address + 0x100, 0x20));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void OverlappingPreparedBindingsUseTheFinalCacheAllocation()
     {
         if (_vulkan is null) return;

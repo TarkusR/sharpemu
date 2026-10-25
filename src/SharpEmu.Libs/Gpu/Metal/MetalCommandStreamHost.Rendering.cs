@@ -182,6 +182,9 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     bool IShaderPipelineHost.TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) =>
         Memory.TryRead(address, destination);
 
+    bool IShaderPipelineHost.TryPeekResidentGuestBytes(ulong address, Span<byte> destination) =>
+        Memory.TryRead(address, destination);
+
     private bool TryReadWord(ulong address, out uint word)
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];

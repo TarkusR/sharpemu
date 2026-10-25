@@ -22,6 +22,22 @@ public sealed class GraphicsPipelineDescription
     public required PipelineStaticParameters StaticParameters { get; init; }
 }
 
+// Why a dispatch the CPU evaluated still runs on the GPU instead of landing as a store of the stream.
+internal enum KernelWriteRefusal
+{
+    None,
+    Unsupported,
+    Sparse,
+    Thread,
+    CrossQueue,
+    Publication,
+    PendingRange,
+    PendingWrite,
+    Image,
+    Metadata,
+    Count,
+}
+
 public sealed class ComputePipelineDescription
 {
     public required ComputeInputInfo Input { get; init; }
@@ -102,7 +118,13 @@ internal interface IShaderPipelineHost
     // the resource cache then re-materializes instead of trusting a stale copy.
     bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) => false;
 
+    // A resident read that refuses instead of waiting for pending command-thread work.
+    bool TryPeekResidentGuestBytes(ulong address, Span<byte> destination) => false;
+
     bool CpuWriteNeedsGpuData(ulong address, ulong size) => false;
+
+    // Queues the words as a store at the current stream position when no earlier work may still touch the range.
+    KernelWriteRefusal TryPostKernelWrite(ulong address, ReadOnlySpan<uint> words) => KernelWriteRefusal.Unsupported;
 
     // Creates the host module of one compiled permutation and returns its handle.
     ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId);

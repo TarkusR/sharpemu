@@ -89,6 +89,24 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool InCrossQueueOrderWindow(int queueId) =>
             _crossQueueWindows is { } windows && windows.TryGetValue(queueId, out var entry) && !entry.Completed;
 
+        private bool InAnyCrossQueueOrderWindow()
+        {
+            if (_crossQueueWindows is not { } windows)
+            {
+                return false;
+            }
+
+            foreach (var entry in windows.Values)
+            {
+                if (!entry.Completed)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         public bool MustHoldForCrossQueueOrder(int queueId)
         {
             if (!InCrossQueueOrderWindow(queueId)) return false;

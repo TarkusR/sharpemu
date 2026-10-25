@@ -4,49 +4,28 @@
 using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Pipelines;
+using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Tests.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Tests.Evaluation;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class CopyKernelTests : IDisposable
+public sealed class CopyKernelTests
 {
-
-    public CopyKernelTests()
-    {
-        ShaderPipelineCache.CpuModuloCopyEnabled = true;
-        ShaderPipelineCache.PredictMaskedCopyEnabled = true;
-    }
-
-    public void Dispose()
-    {
-        ShaderPipelineCache.CpuModuloCopyEnabled = false;
-        ShaderPipelineCache.PredictMaskedCopyEnabled = true;
-    }
-
     private const ulong CodeAddress = PipelineTestGuest.MemoryBase + 0x1000;
     private const ulong HeaderAddress = PipelineTestGuest.MemoryBase + 0x8000;
     private const ulong SourceAddress = PipelineTestGuest.MemoryBase + 0x20000;
     private const ulong DestinationAddress = PipelineTestGuest.MemoryBase + 0x30000;
-    private const ulong ControlAddress = PipelineTestGuest.MemoryBase + 0x40000;
+    private const ulong ControlAddress = PipelineTestGuest.MemoryBase + 0xF0000;
     private const uint Untouched = 0xEEEEEEEE;
-
-    private static readonly uint[] ModuloKernel =
-    [
-        0xBEFC03FF, 0xA65CD91E,
-        0xBF960000, 0xBFA00003, 0xD7460002, 0x04010C0C, 0xF4201A84, 0xFA000000, 0xBF8CC07F, 0x7DA8046A, 0xBF88002A, 0xF4200304,
-        0xFA000004, 0xBF8CC07F, 0x7E000C0C, 0xBF070C80, 0x8588807E, 0x7E005700, 0x100000FF, 0x4F800000, 0x7E060F00, 0xD5766A00,
-        0x0202060C, 0x7D8A0280, 0x4C020080, 0x02000101, 0xD56A0001, 0x00020700, 0x4C000303, 0x4A020303, 0x02000101, 0xD56A0000,
-        0x00020500, 0xD5690001, 0x0002000C, 0x4C060302, 0x7D8C02F9, 0x06068A02, 0x7D86060C, 0x87EA6A0A, 0x50000080, 0xD5286A00,
-        0x002A00C1, 0xD5010000, 0x002200C1, 0xD5690000, 0x0002000C, 0x4C000102, 0xE0002000, 0x80000000, 0xBF8C3F70, 0xE0102000,
-        0x80010002, 0xBF810000,
-    ];
 
     private static uint[] DwordBuffer(ulong address, uint records) =>
         [unchecked((uint)address), 0x0004_0000 | (uint)(address >> 32), records, 0x0001_4004];
 
-    private static ComputeStageRegisters Registers(uint sourceRecords, uint destinationRecords)
+    private static ComputeStageRegisters Registers(uint sourceRecords, uint destinationRecords, uint[]? control = null)
     {
         var registers = new ComputeStageRegisters
         {
@@ -57,7 +36,7 @@ public sealed class CopyKernelTests : IDisposable
         [
             .. DwordBuffer(SourceAddress, sourceRecords),
             .. DwordBuffer(DestinationAddress, destinationRecords),
-            unchecked((uint)ControlAddress), 0x0010_0000 | (uint)(ControlAddress >> 32), 1, 0x0004_DFAC,
+            .. control ?? [unchecked((uint)ControlAddress), 0x0010_0000 | (uint)(ControlAddress >> 32), 1, 0x0004_DFAC],
         ];
         for (var index = 0u; index < words.Length; index++)
         {
@@ -80,285 +59,304 @@ public sealed class CopyKernelTests : IDisposable
         return words;
     }
 
-    private static PipelineTestGuest Guest(uint elementCount, uint period, uint[] source)
+    private static uint[] Kernel(string name) => name switch
+    {
+        "104" => EvaluationTestSupport.ModuloKernel104,
+        "107" => EvaluationTestSupport.ModuloKernel107,
+        _ => EvaluationTestSupport.MaskedKernel,
+    };
+
+    private static PipelineTestGuest Guest(uint elementCount, uint parameter, uint[] source, string kernel = "104")
     {
         var guest = new PipelineTestGuest();
         guest.Host.ResidentReads = true;
-        guest.RegisterProgram(CodeAddress, HeaderAddress, ModuloKernel);
+        guest.Host.ShaderSignedZeroInfNanPreserveFloat32Supported = true;
+        guest.RegisterProgram(CodeAddress, HeaderAddress, Kernel(kernel));
         guest.WriteWords(SourceAddress, source);
-        guest.WriteWords(ControlAddress, elementCount, period, 0, 0);
+        guest.WriteWords(ControlAddress, elementCount, parameter, 0, 0);
         guest.WriteWords(DestinationAddress, Enumerable.Repeat(Untouched, 200).ToArray());
         return guest;
     }
 
     [Theory]
-    [InlineData(10u, 3u, 2u, false)]
-    [InlineData(130u, 7u, 3u, false)]
-    [InlineData(64u, 0u, 1u, false)]
-    [InlineData(5u, 1u, 1u, false)]
-    [InlineData(100u, 12u, 1u, false)]
-    [InlineData(100u, 12u, 70u, true)]
-    [InlineData(20u, 5u, 64u, true)]
-    public void TheModuloCopyKernel_RunsOnTheCpuInStreamOrder(uint elementCount, uint period, uint dimension, bool threadDimensions)
+    [InlineData("104", 130u, 7u, 3u, false)]
+    [InlineData("104", 100u, 12u, 70u, true)]
+    [InlineData("107", 10u, 3u, 2u, false)]
+    [InlineData("107", 160u, 6u, 131u, true)]
+    public void TheModuloCopyKernels_StayOnTheGpuAndTheirResultIsKnown(string kernel, uint elementCount, uint period, uint dimension, bool threadDimensions)
     {
         var source = Enumerable.Range(0, 80).Select(index => 0x1000u + (uint)index).ToArray();
-        var guest = Guest(elementCount, period, source);
+        var guest = Guest(elementCount, period, source, kernel);
         var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
 
         var result = cache.GetComputeProgram(
             Registers(80, 160), new ShaderInterfaceRegisters(), threadDimensions ? 0x8021u : 0x8001u, dimension, 1, 1);
 
-        Assert.True(result.Consumed, ShaderPipelineCache.TakeCopyKernelReport());
-        Assert.Empty(guest.Compiler.Requests);
-        var written = (int)Math.Min(elementCount, threadDimensions ? dimension : dimension * 64);
-        var destination = Destination(guest, 200);
-        for (var index = 0; index < 200; index++)
-        {
-            var sourceIndex = period == 0 ? index : index % (int)period;
-            var expected = index >= written ? Untouched : sourceIndex < source.Length ? source[sourceIndex] : 0u;
-            Assert.Equal(expected, destination[index]);
-        }
-    }
-
-    [Theory]
-    [InlineData(null)]
-    [InlineData("0")]
-    public void TheModuloCopyKernel_StaysOnTheGpuUnlessItIsSwitchedOn_AndItsResultIsKnown(string? value)
-    {
-        ShaderPipelineCache.CpuModuloCopyEnabled = value == "1";
-        var guest = Guest(elementCount: 10, period: 4, [1, 2, 3, 4]);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        var result = cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
-
         Assert.False(result.Consumed);
         Assert.True(result.Available);
         Assert.Equal(Untouched, Destination(guest, 1)[0]);
-        Assert.NotNull(result.KnownWrite);
-        Assert.Equal(DestinationAddress, result.KnownWrite.Address);
-        Assert.Equal(new uint[] { 1, 2, 3, 4, 1, 2, 3, 4, 1, 2 }, result.KnownWrite.Words.ToArray());
-    }
-
-    private static readonly uint[] MaskedKernel =
-    [
-        0xBEFC03FF, 0x94E6DD39,
-        0xBF960000, 0xBFA00001, 0xD7460000, 0x04010C0C, 0xF4201A84, 0xFA000000, 0xBF8CC07F, 0x7DA8006A, 0xBF880009, 0xF4201A84,
-        0xFA000004, 0xBF8CC07F, 0x3602006A, 0xE0002000, 0x80000101, 0xBF8C3F70, 0xE0102000, 0x80010100, 0xBF810000,
-    ];
-
-    private static ComputeStageRegisters MaskedRegisters(uint sourceRecords, uint destinationRecords)
-    {
-        var registers = Registers(sourceRecords, destinationRecords);
-        uint[] control = [.. DwordBuffer(ControlAddress, 2)];
-        for (var index = 0u; index < control.Length; index++)
+        Assert.True(result.KnownWrite is not null, ShaderPipelineCache.TakeCpuKernelReport());
+        var known = result.KnownWrite!;
+        Assert.Equal(DestinationAddress, known.Address);
+        var written = (int)Math.Min(elementCount, threadDimensions ? dimension : dimension * 64);
+        Assert.Equal(written, known.Words.Length);
+        for (var index = 0; index < written; index++)
         {
-            registers.UserScalars.Set(8 + index, control[index], default);
+            var sourceIndex = period == 0 ? index : index % (int)period;
+            Assert.Equal(source[sourceIndex], known.Words[index]);
         }
-
-        return registers;
-    }
-
-    [Fact]
-    public void TheMaskedCopyKernel_InGroupCountMode_IsLeftAloneWhenSwitchedOff()
-    {
-        ShaderPipelineCache.PredictMaskedCopyEnabled = false;
-        var guest = Guest(elementCount: 10, period: 3, [1, 2, 3, 4]);
-        guest.RegisterProgram(CodeAddress, HeaderAddress, MaskedKernel);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        var result = cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
-
-        Assert.False(result.Consumed);
-        Assert.Null(result.KnownWrite);
-        Assert.Equal(Untouched, Destination(guest, 1)[0]);
-    }
-
-    [Fact]
-    public void TheMaskedCopyKernel_InGroupCountMode_StaysOnTheGpuAndItsResultIsKnown()
-    {
-        var guest = Guest(elementCount: 10, period: 3, [1, 2, 3, 4]);
-        guest.RegisterProgram(CodeAddress, HeaderAddress, MaskedKernel);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        var result = cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
-
-        Assert.False(result.Consumed);
-        Assert.Equal(Untouched, Destination(guest, 1)[0]);
-        Assert.NotNull(result.KnownWrite);
-        Assert.Equal(new uint[] { 1, 2, 3, 4, 1, 2, 3, 4, 1, 2 }, result.KnownWrite.Words.ToArray());
-    }
-
-    [Fact]
-    public void TheMaskedCopyKernel_InThreadDimensionMode_StillRunsOnTheCpu()
-    {
-        var guest = Guest(elementCount: 10, period: 3, [1, 2, 3, 4]);
-        guest.RegisterProgram(CodeAddress, HeaderAddress, MaskedKernel);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        var result = cache.GetComputeProgram(MaskedRegisters(4, 64), new ShaderInterfaceRegisters(), 0x8021, 64, 1, 1);
-
-        Assert.True(result.Consumed, ShaderPipelineCache.TakeCopyKernelReport());
-        Assert.Equal(new uint[] { 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, Untouched }, Destination(guest, 11));
-    }
-
-    [Fact]
-    public void TheModuloCopyKernel_ResultIsUnknownWhileTheGpuOwnsItsSource()
-    {
-        ShaderPipelineCache.CpuModuloCopyEnabled = false;
-        var guest = Guest(elementCount: 6, period: 4, [1, 2, 3, 4]);
-        guest.Host.GpuOwned = (SourceAddress, 16);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        Assert.Null(cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1).KnownWrite);
-    }
-
-    [Fact]
-    public void TheModuloCopyKernel_ResultIsUnknownWhenItIsLargerThanATablePatch()
-    {
-        ShaderPipelineCache.CpuModuloCopyEnabled = false;
-        var guest = Guest(elementCount: 1100000, period: 4, [1, 2, 3, 4]);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        Assert.Null(cache.GetComputeProgram(Registers(4, 1100000), new ShaderInterfaceRegisters(), 0x8001, 17500, 1, 1).KnownWrite);
-    }
-
-    [Fact]
-    public void TheModuloCopyKernel_ResultOfSeveralMegabytesIsKnown()
-    {
-        ShaderPipelineCache.CpuModuloCopyEnabled = false;
-        var guest = Guest(elementCount: 300000, period: 4, [1, 2, 3, 4]);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        var known = cache.GetComputeProgram(Registers(4, 300000), new ShaderInterfaceRegisters(), 0x8001, 5000, 1, 1).KnownWrite;
-
-        Assert.NotNull(known);
-        Assert.Equal(300000, known.Words.Length);
-        Assert.Equal(new uint[] { 1, 2, 3, 4, 1 }, known.Words[..5].ToArray());
-        Assert.Equal(4u, known.Words[299999]);
-        known.Release();
     }
 
     [Theory]
-    [InlineData(true, 0u)]
-    [InlineData(true, 8u)]
-    [InlineData(true, 100u)]
-    [InlineData(false, 7u)]
-    [InlineData(false, 0xFFFFFFFFu)]
-    public void ExpandCopyKernel_CopiesTheSourceAsOneBlockWhenEveryElementMapsToItself(bool modulo, uint parameter)
+    [InlineData(0x8001u, 1u, 10)]
+    [InlineData(0x8021u, 64u, 10)]
+    [InlineData(0x0021u, 7u, 7)]
+    public void TheMaskedCopyKernel_StaysOnTheGpuAndItsResultIsKnown(uint initiator, uint dimension, int written)
     {
-        uint[] source = [10, 20, 30, 40, 50, 60, 70, 80];
-        var output = new uint[8];
-
-        ShaderPipelineCache.ExpandCopyKernel(source, output, parameter, modulo);
-
-        Assert.Equal(source, output);
-    }
-
-    [Theory]
-    [InlineData(true, 3u, new uint[] { 10, 20, 30, 10, 20, 30, 10, 20 })]
-    [InlineData(false, 3u, new uint[] { 10, 20, 30, 40, 10, 20, 30, 40 })]
-    [InlineData(false, 5u, new uint[] { 10, 20, 10, 20, 50, 60, 50, 60 })]
-    public void ExpandCopyKernel_KeepsThePatternWhenElementsRepeat(bool modulo, uint parameter, uint[] expected)
-    {
-        uint[] source = [10, 20, 30, 40, 50, 60, 70, 80];
-        var output = new uint[8];
-
-        ShaderPipelineCache.ExpandCopyKernel(source, output, parameter, modulo);
-
-        Assert.Equal(expected, output);
-    }
-
-    [Fact]
-    public void TheModuloCopyKernel_ResultBeyondATablePatchIsKnownAndBorrowsItsBuffer()
-    {
-        ShaderPipelineCache.CpuModuloCopyEnabled = false;
-        var guest = Guest(elementCount: 20000, period: 4, [1, 2, 3, 4]);
+        var guest = Guest(elementCount: 10, parameter: 3, [1, 2, 3, 4], "masked");
         var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
 
-        var known = cache.GetComputeProgram(Registers(4, 20000), new ShaderInterfaceRegisters(), 0x8001, 400, 1, 1).KnownWrite;
-
-        Assert.NotNull(known);
-        Assert.Equal(20000, known.Words.Length);
-        Assert.Equal(new uint[] { 1, 2, 3, 4, 1 }, known.Words[..5].ToArray());
-        Assert.Equal(4u, known.Words[19999]);
-        known.Release();
-        known.Release();
-    }
-
-    [Fact]
-    public void TheModuloCopyKernel_StopsAtTheDestinationRecords()
-    {
-        var guest = Guest(elementCount: 50, period: 4, [1, 2, 3, 4]);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        Assert.True(cache.GetComputeProgram(Registers(4, 20), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1).Consumed);
-
-        var destination = Destination(guest, 24);
-        Assert.Equal(4u, destination[19]);
-        Assert.Equal(Untouched, destination[20]);
-    }
-
-    [Fact]
-    public void TheModuloCopyKernel_StaysOnTheGpuWhenItIsLargerThanATablePatch()
-    {
-        var guest = Guest(elementCount: 20000, period: 4, [1, 2, 3, 4]);
-        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
-
-        var result = cache.GetComputeProgram(Registers(4, 20000), new ShaderInterfaceRegisters(), 0x8001, 400, 1, 1);
+        var result = cache.GetComputeProgram(Registers(4, 64, DwordBuffer(ControlAddress, 2)), new ShaderInterfaceRegisters(), initiator, dimension, 1, 1);
 
         Assert.False(result.Consumed);
         Assert.Equal(Untouched, Destination(guest, 1)[0]);
+        Assert.True(result.KnownWrite is not null, ShaderPipelineCache.TakeCpuKernelReport());
+        var known = result.KnownWrite!;
+        Assert.Equal(new uint[] { 1, 2, 3, 4, 1, 2, 3, 4, 1, 2 }.Take(written), known.Words.ToArray());
     }
 
     [Theory]
-    [InlineData(SourceAddress)]
-    [InlineData(ControlAddress)]
-    [InlineData(DestinationAddress + 8)]
-    public void TheModuloCopyKernel_StaysOnTheGpuWhileTheGpuOwnsAnInput(ulong owned)
+    [InlineData(SourceAddress, false)]
+    [InlineData(ControlAddress, false)]
+    [InlineData(DestinationAddress + 8, true)]
+    public void AnInputTheGpuOwns_LeavesTheResultUnknown(ulong owned, bool known)
     {
-        var guest = Guest(elementCount: 16, period: 4, [1, 2, 3, 4]);
+        var guest = Guest(elementCount: 16, parameter: 4, [1, 2, 3, 4]);
         guest.Host.GpuOwned = (owned, sizeof(uint));
         var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
 
         var result = cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
 
         Assert.False(result.Consumed);
+        Assert.Equal(known, result.KnownWrite is not null);
         guest.Host.GpuOwned = default;
         Assert.Equal(Untouched, Destination(guest, 1)[0]);
     }
 
-    [Fact]
-    public void AKernelThatDiffersInOneWord_IsNotReplaced()
+    [Theory]
+    [InlineData(1048640u, 16385u, false)]
+    [InlineData(20000u, 400u, true)]
+    [InlineData(4096u, 64u, true)]
+    public void OnlyADispatchWithinTheEvaluationLimits_IsEvaluated(uint elementCount, uint groups, bool known)
     {
-        var guest = Guest(elementCount: 16, period: 4, [1, 2, 3, 4]);
-        var changed = (uint[])ModuloKernel.Clone();
-        changed[^6] = 0xE0002000 ^ 0x1000;
-        guest.RegisterProgram(CodeAddress, HeaderAddress, changed);
+        var guest = Guest(elementCount, parameter: 4, [1, 2, 3, 4]);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+
+        var result = cache.GetComputeProgram(Registers(4, elementCount), new ShaderInterfaceRegisters(), 0x8001, groups, 1, 1);
+
+        Assert.True(result.Available);
+        Assert.Equal(known, result.KnownWrite is not null);
+        if (result.KnownWrite is { } write)
+        {
+            Assert.Equal((int)elementCount, write.Words.Length);
+            Assert.Equal(4u, write.Words[^1]);
+        }
+
+        Assert.Equal(Untouched, Destination(guest, 1)[0]);
+    }
+
+    [Fact]
+    public void AnIndirectDispatch_IsNotEvaluated()
+    {
+        var guest = Guest(elementCount: 16, parameter: 4, [1, 2, 3, 4], "107");
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = new RegisterBanks(message => new InvalidOperationException(message));
+        banks.Shader.Compute = Registers(4, 64);
+
+        var indirect = cache.GetComputeProgram(banks, 0x8001, 1, 1, 1, indirect: true);
+        var direct = cache.GetComputeProgram(banks, 0x8001, 1, 1, 1, indirect: false);
+
+        Assert.Null(indirect.KnownWrite);
+        Assert.NotNull(direct.KnownWrite);
+    }
+
+    [Fact]
+    public void AKeptProgram_PredictsEachDispatchFromItsCurrentInputs()
+    {
+        var guest = Guest(elementCount: 8, parameter: 2, [5, 6], "107");
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = new RegisterBanks(message => new InvalidOperationException(message));
+        banks.Shader.Compute = Registers(2, 64);
+
+        var first = cache.GetComputeProgram(banks, 0x8001, 1, 1, 1, indirect: false);
+        guest.WriteWords(ControlAddress, 4u, 1u);
+        var modules = guest.Host.Modules.Count;
+        var second = cache.GetComputeProgram(banks, 0x8001, 1, 1, 1, indirect: false);
+
+        Assert.Equal(new uint[] { 5, 6, 5, 6, 5, 6, 5, 6 }, first.KnownWrite!.Words.ToArray());
+        Assert.Equal(new uint[] { 5, 5, 5, 5 }, second.KnownWrite!.Words.ToArray());
+        Assert.NotSame(first.KnownWrite, second.KnownWrite);
+        Assert.Same(first.Input, second.Input);
+        Assert.Equal(modules, guest.Host.Modules.Count);
+    }
+
+    [Fact]
+    public void AReboundProgram_PredictsTheResultOfItsNewUserData()
+    {
+        var guest = Guest(elementCount: 6, parameter: 3, [7, 8, 9]);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = new RegisterBanks(message => new InvalidOperationException(message));
+        banks.Shader.Compute = Registers(3, 64);
+        var first = cache.GetComputeProgram(banks, 0x8001, 1, 1, 1, indirect: false);
+        const ulong movedControl = ControlAddress + 0x100;
+        guest.WriteWords(movedControl, 5u, 2u, 0u, 0u);
+        banks.Shader.Compute = Registers(3, 64, [unchecked((uint)movedControl), 0x0010_0000 | (uint)(movedControl >> 32), 1, 0x0004_DFAC]);
+        var modules = guest.Host.Modules.Count;
+
+        var second = cache.GetComputeProgram(banks, 0x8001, 1, 1, 1, indirect: false);
+        var third = cache.GetComputeProgram(banks, 0x8001, 2, 1, 1, indirect: false);
+
+        Assert.Equal(new uint[] { 7, 8, 9, 7, 8, 9 }, first.KnownWrite!.Words.ToArray());
+        Assert.Equal(new uint[] { 7, 8, 7, 8, 7 }, second.KnownWrite!.Words.ToArray());
+        Assert.Equal(new uint[] { 7, 8, 7, 8, 7 }, third.KnownWrite!.Words.ToArray());
+        Assert.Equal(modules, guest.Host.Modules.Count);
+    }
+
+    [Fact]
+    public void RefusedEvaluations_MuteTheProgramUntilARecheck()
+    {
+        var guest = Guest(elementCount: 4, parameter: 2, [3, 4]);
+        guest.Host.GpuOwned = (SourceAddress, 2 * sizeof(uint));
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = new RegisterBanks(message => new InvalidOperationException(message));
+        banks.Shader.Compute = Registers(2, 64);
+        KnownGpuWrite? Dispatch() => cache.GetComputeProgram(banks, 0x8001, 1, 1, 1, indirect: false).KnownWrite;
+
+        for (var index = 0; index < ShaderPipelineCache.MuteAfterRefusals; index++)
+        {
+            Assert.Null(Dispatch());
+        }
+
+        guest.Host.GpuOwned = default;
+        for (var index = 1; index < ShaderPipelineCache.MutedRecheckPeriod; index++)
+        {
+            Assert.Null(Dispatch());
+        }
+
+        var recheck = Dispatch();
+        Assert.NotNull(recheck);
+        recheck.NoteRead();
+        Assert.NotNull(Dispatch());
+    }
+
+    [Theory]
+    [InlineData(4, true)]
+    [InlineData(2, false)]
+    public void AnInputAnEarlierPredictionCoversWhole_IsReadFromThatPrediction(int shadowWords, bool known)
+    {
+        var guest = Guest(elementCount: 8, parameter: 4, [1, 2, 3, 4]);
+        guest.Host.GpuOwned = (SourceAddress, 4 * sizeof(uint));
+        guest.Host.Shadow = (SourceAddress, new uint[] { 9, 8, 7, 6 }[..shadowWords]);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+
+        var result = cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
+
+        Assert.Equal(known, result.KnownWrite is not null);
+        if (known)
+        {
+            Assert.Equal(new uint[] { 9, 8, 7, 6, 9, 8, 7, 6 }, result.KnownWrite!.Words.ToArray());
+        }
+    }
+
+    private static readonly uint[] ConsumedWords = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
+
+    [Fact]
+    public void AFullyEvaluatedDispatch_IsConsumedAndItsWordsLandAsAStoreBehindEarlierWork()
+    {
+        var guest = Guest(elementCount: 10, parameter: 4, [1, 2, 3, 4]);
+        var stream = new FakeKernelWriteStream(guest.Memory);
+        guest.Host.KernelWriteStream = stream;
+        stream.QueueGpuRead("earlier read", DestinationAddress, 64);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+
+        var result = cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
+
+        Assert.True(result.Consumed, ShaderPipelineCache.TakeCpuKernelReport());
+        Assert.Null(result.KnownWrite);
+        Assert.Equal(Untouched, Destination(guest, 1)[0]);
+        stream.RunAll();
+        Assert.Equal(new[] { "earlier read", "store" }, stream.Ran);
+        Assert.Equal(ConsumedWords, Destination(guest, ConsumedWords.Length));
+        Assert.Equal(Untouched, Destination(guest, ConsumedWords.Length + 1)[^1]);
+    }
+
+    [Theory]
+    [InlineData(DestinationAddress + 16, false)]
+    [InlineData(DestinationAddress - 4, true)]
+    [InlineData(DestinationAddress + 40, true)]
+    public void AnEarlierQueuedWriteOverTheDestination_KeepsTheDispatchOnTheGpuWithItsResultKnown(ulong written, bool consumed)
+    {
+        var guest = Guest(elementCount: 10, parameter: 4, [1, 2, 3, 4]);
+        var stream = new FakeKernelWriteStream(guest.Memory);
+        guest.Host.KernelWriteStream = stream;
+        stream.QueueGpuWrite("earlier write", written, sizeof(uint));
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+
+        var result = cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
+
+        Assert.Equal(consumed, result.Consumed);
+        Assert.Equal(!consumed, result.KnownWrite is not null);
+        if (!consumed)
+        {
+            Assert.Equal(ConsumedWords, result.KnownWrite!.Words.ToArray());
+        }
+
+        stream.RunAll();
+        Assert.Equal(consumed ? new[] { "earlier write", "store" } : new[] { "earlier write" }, stream.Ran);
+    }
+
+    [Theory]
+    [InlineData("thread")]
+    [InlineData("cross queue")]
+    [InlineData("image bytes")]
+    [InlineData("surface metadata")]
+    public void AStoreTheStreamCannotOrder_FallsBackToThePrediction(string reason)
+    {
+        var guest = Guest(elementCount: 10, parameter: 4, [1, 2, 3, 4]);
+        var stream = new FakeKernelWriteStream(guest.Memory)
+        {
+            OnStreamThread = reason != "thread",
+            InCrossQueueOrderWindow = reason == "cross queue",
+            ImageBytes = reason == "image bytes" ? (DestinationAddress + 36, 4ul) : default,
+            SurfaceMetadata = reason == "surface metadata" ? (DestinationAddress + 8, 4ul) : default,
+        };
+        guest.Host.KernelWriteStream = stream;
         var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
 
         var result = cache.GetComputeProgram(Registers(4, 64), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
 
         Assert.False(result.Consumed);
-        Assert.Equal(Untouched, Destination(guest, 1)[0]);
+        Assert.Equal(ConsumedWords, result.KnownWrite!.Words.ToArray());
+        stream.RunAll();
+        Assert.Empty(stream.Ran);
     }
 
-    [Theory]
-    [InlineData(false, 0u)]
-    [InlineData(false, 3u)]
-    [InlineData(true, 0u)]
-    [InlineData(true, 3u)]
-    [InlineData(true, 200u)]
-    public void ExpandCopyKernel_SelectsTheSourceElement(bool modulo, uint parameter)
+    [Fact]
+    public void AConsumedDispatch_RecordsNoGpuDispatch()
     {
-        uint[] source = [10, 11, 12, 13, 14];
-        var output = new uint[12];
+        var guest = Guest(elementCount: 10, parameter: 4, [1, 2, 3, 4]);
+        var stream = new FakeKernelWriteStream(guest.Memory);
+        guest.Host.KernelWriteStream = stream;
+        var host = new RecordingRenderHost();
+        var executor = new RenderExecutor(host, new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry));
+        var banks = RenderExecutorFixtures.Banks();
+        banks.Shader.Compute = Registers(4, 64);
 
-        ShaderPipelineCache.ExpandCopyKernel(source, output, parameter, modulo);
+        executor.Dispatch(1, banks, 1, 1, 1, 0x8001);
 
-        for (var index = 0u; index < output.Length; index++)
-        {
-            var sourceIndex = modulo ? (parameter == 0 ? index : index % parameter) : index & parameter;
-            Assert.Equal(sourceIndex < source.Length ? source[sourceIndex] : 0u, output[index]);
-        }
+        Assert.DoesNotContain(host.Calls, call => call.StartsWith("dispatch", StringComparison.Ordinal));
+        stream.RunAll();
+        Assert.Equal(new[] { "store" }, stream.Ran);
+        Assert.Equal(ConsumedWords, Destination(guest, ConsumedWords.Length));
     }
 }

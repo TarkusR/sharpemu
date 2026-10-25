@@ -987,7 +987,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return null;
     }
 
-    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ)
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect: false);
+
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect)
     {
         var compute = banks.Shader.Compute;
         var registrations = ShaderHeaderRegistry.Registrations;
@@ -1014,7 +1017,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 SameUserScalars(kept.Registers.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
             {
                 _computeKept.Increment();
-                return previous;
+                return WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
             }
 
             if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
@@ -1022,12 +1025,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 _computeRebound.Increment();
                 var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
                 KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
-                return rebound;
+                return WithPrediction(rebound, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
             }
         }
 
         _computeResolved.Increment();
-        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var copyKernel);
+        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var decoded);
         if (kept is null)
         {
             if (keptList.Count == KeptComputesPerShader)
@@ -1041,14 +1044,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         kept.Source = source;
         kept.SystemRegisters = systemRegisters;
-        kept.Entry = program.Available && !program.Consumed && !copyKernel && source is not null ? ShaderProgramCache.LastEntry : null;
+        kept.Kernel = decoded is not null && program.Available && !program.Consumed ? KernelFor(decoded) : null;
+        kept.Entry = program.Available && !program.Consumed && source is not null ? ShaderProgramCache.LastEntry : null;
         KeepComputeProgram(kept, program, compute, dimensionX, dimensionY, dimensionZ);
-        return program;
+        return WithPrediction(program, kept.Kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
     }
 
     private static void KeepComputeProgram(KeptComputeProgram kept, ComputeProgram program, ComputeStageRegisters compute, uint dimensionX, uint dimensionY, uint dimensionZ)
     {
-        kept.Program = program.Available && !program.Consumed && program.KnownWrite is null ? program : null;
+        kept.Program = program.Available && !program.Consumed ? program : null;
         if (kept.Registers is { } registers && SameComputeShape(registers, compute))
         {
             registers.UserScalars.CopyFrom(compute.UserScalars, compute.UserScalarCount);
@@ -1068,6 +1072,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
         var source = kept.Source! with { UserData = userData };
+        kept.Source = source;
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
         var pushDataCursor = 0u;
         var options = new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = kept.SystemRegisters };
@@ -1106,11 +1111,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionY,
         uint dimensionZ)
     {
-        return ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out _, out _, out _);
+        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var decoded);
+        var kernel = decoded is not null && program.Available && !program.Consumed ? KernelFor(decoded) : null;
+        return WithPrediction(program, kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect: false);
     }
 
     private ComputeProgram ResolveComputeProgram(ComputeStageRegisters compute, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ,
-        out ShaderSource? resolvedSource, out Gen5ComputeSystemRegisters resolvedSystemRegisters, out bool copyKernel)
+        out ShaderSource? resolvedSource, out Gen5ComputeSystemRegisters resolvedSystemRegisters, out Gen5ShaderProgram? decoded)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
@@ -1119,7 +1126,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var systemRegisters = DecodeComputeSystemRegisters(compute);
         resolvedSource = source;
         resolvedSystemRegisters = systemRegisters;
-        copyKernel = IsCopyKernel(program);
+        decoded = program;
         if (_skipRayTracing)
         {
             lock (_rayTracingComputePrograms)
@@ -1138,16 +1145,6 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
         }
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
-        if (TrySubmitMaskedDwordCopyKernel(program, source, systemRegisters, input, dimensionX, dimensionY, dimensionZ, out var description, out var knownWrite))
-        {
-            if (RenderTrace.Enabled)
-            {
-                RenderTrace.Write($"Consumed a masked dword copy dispatch: shader=0x{compute.Address:X16} hash=0x{source.Hash:X16} {description}");
-            }
-
-            return new ComputeProgram { Consumed = true };
-        }
-
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
         var pushDataCursor = 0u;
         if (!TryPrepareProgram(
@@ -1161,7 +1158,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         input.Stage = stage;
-        return new ComputeProgram { Program = handle, Input = input, KnownWrite = knownWrite };
+        return new ComputeProgram { Program = handle, Input = input };
     }
 
     private bool TryPrepareProgram(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
@@ -1610,6 +1607,7 @@ internal sealed class KeptComputeProgram
     public ShaderSource? Source;
     public Gen5ComputeSystemRegisters SystemRegisters;
     public ProgramSourceEntry? Entry;
+    public ShaderPipelineCache.KernelDemand? Kernel;
     public long Rebinds;
     public long Registrations;
     public uint DispatchInitiator;

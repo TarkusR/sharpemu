@@ -49,6 +49,7 @@ internal static partial class VulkanVideoPresenter
             public Action? Action;
             public ulong Address;
             public byte[]? Data;
+            public bool Kernel;
             // The guest range a queued fill or copy writes; zero for other items.
             public ulong RangeSize;
             public RangeKind Range;
@@ -234,9 +235,9 @@ internal static partial class VulkanVideoPresenter
         internal const int ProducerRunWait = 4;
         private volatile int _producerState;
 
-        public void PostWrite(ulong address, ReadOnlySpan<byte> data)
+        public void PostWrite(ulong address, ReadOnlySpan<byte> data, bool kernel = false)
         {
-            var item = new Item { Kind = Kind.Write, Address = address, Data = data.ToArray() };
+            var item = new Item { Kind = Kind.Write, Address = address, Data = data.ToArray(), Kernel = kernel };
             lock (_writeLock)
             {
                 _pendingWrites.Enqueue(item);
@@ -416,6 +417,7 @@ internal static partial class VulkanVideoPresenter
                         return false;
                     }
 
+                    shadow.Known.NoteRead();
                     sequence = shadow.Sequence;
                     source = shadow.Source;
                     ApplyPendingStoresLocked(address, destination, shadow.Sequence, beforeSequence);
@@ -1023,7 +1025,7 @@ internal static partial class VulkanVideoPresenter
         {
             lock (_writeLock)
             {
-                var written = _memory.TryWrite(item.Address, item.Data);
+                var written = (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, item.Data!)) || _memory.TryWrite(item.Address, item.Data);
                 if (!ReferenceEquals(_pendingWrites.Peek(), item))
                 {
                     throw SubmissionScheduler.Fatal("The command stream stores ran out of order.");

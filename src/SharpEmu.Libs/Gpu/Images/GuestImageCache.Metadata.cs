@@ -309,7 +309,7 @@ public sealed partial class GuestImageCache
         return low;
     }
 
-    private bool MayOverlapMetadata(ulong address, ulong size)
+    internal bool MayOverlapMetadata(ulong address, ulong size)
     {
         return _metadataWriteRanges.Overlaps(address, size);
     }
