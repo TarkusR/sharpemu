@@ -261,9 +261,11 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             {
                 var buffer = index < bound.Length ? bound[index] : CreateBuffer(16);
                 var record = (int)(BindingLayout.TableBlockHeaderDwords + (uint)index * BindingLayout.TableBufferDwords);
+                var range = bufferRanges is not null && index < bufferRanges.Length ? bufferRanges[index] : buffer.Size;
                 block[record] = (uint)buffer.DeviceAddress;
                 block[record + 1] = (uint)(buffer.DeviceAddress >> 32);
-                block[record + 2] = (uint)(buffer.Size >> 2);
+                block[record + 2] = (uint)(range >> 2);
+                block[record + 3] = memoryOffsets is not null && index < memoryOffsets.Length ? memoryOffsets[index] & 0xFF : 0;
             }
 
             table.CopyTo(block, (int)layout.TableFlattenedDword);
