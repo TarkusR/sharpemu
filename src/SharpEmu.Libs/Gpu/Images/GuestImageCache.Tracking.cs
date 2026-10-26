@@ -626,8 +626,9 @@ public sealed partial class GuestImageCache
     // so such an image is not published, unless a raw binding about to be written is exactly the image's
     // range. A formatted write takes the ownership of the whole images under it too, which then publish as
     // well. The buffer is obtained outside the lock; contents that cannot be copied are lost as before.
-    private void PublishPartlyWrittenImages(ulong address, ulong size, bool wholeImages = false, bool exactImages = false)
+    private bool PublishPartlyWrittenImages(ulong address, ulong size, bool wholeImages = false, bool exactImages = false)
     {
+        var published = false;
         List<ResourceSlotIdentifier>? partlyWritten = null;
         using (var held = _lock.Hold())
         {
@@ -676,9 +677,12 @@ public sealed partial class GuestImageCache
                 {
                     image.ClearGpuModified();
                     MarkOlderOverlappingImagesOverwritten(imageIdentifier, image);
+                    published = true;
                 }
             }
         }
+
+        return published;
     }
 
     // A newer GPU-written image over the same memory that has already handed its bytes to the buffer (or lost

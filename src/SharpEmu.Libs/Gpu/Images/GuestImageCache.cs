@@ -142,6 +142,12 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         var metadataBaseLayer = request.View.BaseLayer;
         var result = LookUpImage(ref request, exactFormat);
+        if (_insertedOverGpuImages == result)
+        {
+            _insertedOverGpuImages = ResourceSlotIdentifier.Invalid;
+            HandOverImagesToNewImage(result);
+        }
+
         CompleteLookup(result, in request, metadataBaseLayer);
         return result;
     }
@@ -189,6 +195,29 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 throw SubmissionScheduler.Fatal(
                     $"A compressed display surface can only be read from clean native GPU contents: address=0x{image.Description.Data.Address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsCpuDirty} gpuModified={image.IsGpuModified}.");
             }
+        }
+    }
+
+    private ResourceSlotIdentifier _insertedOverGpuImages = ResourceSlotIdentifier.Invalid;
+
+    // A new image over memory that GPU-written images of another shape hold starts from their contents:
+    // they move into the buffer first, and the new image is filled from it.
+    private void HandOverImagesToNewImage(ResourceSlotIdentifier imageIdentifier)
+    {
+        GuestSpan range;
+        using (var held = _lock.Hold())
+        {
+            range = _slots[imageIdentifier].Description.Data;
+        }
+
+        if (!PublishPartlyWrittenImages(range.Address, range.Size, wholeImages: true))
+        {
+            return;
+        }
+
+        using (var held = _lock.Hold())
+        {
+            _slots.TryGet(imageIdentifier)?.MarkBufferModified();
         }
     }
 
@@ -325,6 +354,19 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             if (_bufferCache.HasGpuDirtyBytes(inserted.Description.Data.Address, inserted.Description.Data.Size))
             {
                 inserted.MarkBufferModified();
+            }
+
+            foreach (var candidate in candidates)
+            {
+                if (_slots.TryGet(candidate) is { IsGpuModified: true } overlapped &&
+                    overlapped.Description.Data.Address == inserted.Description.Data.Address &&
+                    (overlapped.Description.Extent.Width != inserted.Description.Extent.Width ||
+                     overlapped.Description.Extent.Height != inserted.Description.Extent.Height ||
+                     overlapped.Description.Pitch != inserted.Description.Pitch))
+                {
+                    _insertedOverGpuImages = result;
+                    break;
+                }
             }
         }
 
