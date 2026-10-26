@@ -201,9 +201,6 @@ public static partial class AgcExports
 
         internal PendingGpuWrites? PendingWrites => _executor?.PendingWrites;
 
-        // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
-        internal ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
-
         internal SubmittedVertexData? FindSubmittedVertexData(VertexInputInfo input)
         {
             var snapshot = _current?.CurrentVertexSnapshot;

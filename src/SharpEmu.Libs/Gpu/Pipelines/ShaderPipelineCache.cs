@@ -42,7 +42,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         _context = context;
         _host = host;
         _registry = registry;
-        _programs = new ShaderProgramCache(context, compiler, host);
+        _programs = new ShaderProgramCache(context, compiler, host) { DeferLinking = true };
+        _programs.TryComputePipeline = (program, stage, input) =>
+        {
+            input.Stage = stage;
+            return TryCreateComputePipeline(input, program, out _);
+        };
     }
 
     public ShaderProgramCache Programs => _programs;
@@ -1173,6 +1178,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     private void ReportShaderSkip(ShaderSource source, string rejection)
     {
+        if (rejection.Length == 0)
+        {
+            return;
+        }
+
         bool reported;
         lock (_reportedShaderSkips)
         {

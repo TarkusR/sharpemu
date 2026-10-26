@@ -29,14 +29,12 @@ internal static class VulkanPipelineCacheStorage
             CacheFileName));
     }
 
+    // The directory of the linked programs' pipeline caches and kept callees (ShaderCallUnionStore), beside the cache file.
+    internal static string LinkedDirectory(string? titleId, string? configuredPath) => ResolvePath(titleId, configuredPath) + ".linked";
+
     internal static string GetLegacyPath()
     {
-        var root = OperatingSystem.IsMacOS()
-            ? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "Library",
-                "Caches")
-            : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         return Path.Combine(root, "SharpEmu", CacheFileName);
     }
 

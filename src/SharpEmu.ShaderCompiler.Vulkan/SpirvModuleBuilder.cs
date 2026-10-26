@@ -217,7 +217,9 @@ public enum SpirvCapability : uint
     ShaderViewportIndex = 70,
     DrawParameters = 4427,
     ShaderViewportIndexLayerExt = 5254,
+    ShaderNonUniform = 5301,
     RuntimeDescriptorArray = 5302,
+    SampledImageArrayNonUniformIndexing = 5307,
     PhysicalStorageBufferAddresses = 5347,
     SignedZeroInfNanPreserve = 4466,
     MeshShadingExt = 5283,
@@ -271,9 +273,11 @@ public enum SpirvDecoration : uint
     DescriptorSet = 34,
     Offset = 35,
     NoContraction = 42,
+    Aliased = 20,
     Coherent = 23,
     NonWritable = 24,
     PerPrimitiveExt = 5271,
+    NonUniform = 5300,
 }
 
 public enum SpirvBuiltIn : uint
@@ -814,8 +818,11 @@ public sealed class SpirvModuleBuilder
         => BeginFunction(returnType, functionType, 0);
 
     public uint BeginFunction(uint returnType, uint functionType, uint functionControl)
+        => BeginFunction(returnType, functionType, functionControl, AllocateId());
+
+    // A function whose id was allocated before its callers were emitted.
+    public uint BeginFunction(uint returnType, uint functionType, uint functionControl, uint id)
     {
-        var id = AllocateId();
         Emit(_functions, SpirvOp.Function, returnType, id, functionControl, functionType);
         return id;
     }

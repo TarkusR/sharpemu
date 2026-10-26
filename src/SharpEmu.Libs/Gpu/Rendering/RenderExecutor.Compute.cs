@@ -130,6 +130,12 @@ public sealed partial class RenderExecutor
             }
         }
 
+        if (SkipWhileLinkedModuleCompiles(input, computeProgram.Program, program))
+        {
+            Record(record);
+            return;
+        }
+
         if (indirectArgumentsAddress == 0 && (groupsX == 0 || groupsY == 0 || groupsZ == 0) && RenderTrace.Enabled && RenderTrace.ZeroDispatch())
         {
             RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
@@ -154,6 +160,22 @@ public sealed partial class RenderExecutor
             record.MetadataClear is not null || record.ConstantFill is not null || record.BoundedFill is not null || record.BoundedCopy is not null || record.ImageClear is not null,
             computeProgram.KnownWrite is not null);
         Record(record);
+    }
+
+    // A program linked with the callees of its hit-group tables can take the driver minutes to compile, and the game
+    // adds callees as it streams. Such programs are ray-traced passes that run every frame, so their dispatches are left
+    // out while the module compiles instead of holding every queue behind it: the pass's output is stale for those
+    // frames.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, long> LinkedCompileSkips = new();
+
+    private bool SkipWhileLinkedModuleCompiles(ComputeInputInfo input, ShaderProgram handle, ShaderProgramInfo program)
+    {
+        if (program.Bindings is not { CallTargetCount: not 0 } ||
+            _pipelines.TryCreateComputePipeline(input, handle, out _)) return false;
+        var skipped = LinkedCompileSkips.AddOrUpdate(program.Hash, 1, static (_, count) => count + 1);
+        if ((skipped & (skipped - 1)) == 0)
+            Console.Error.WriteLine($"[GPU][WARN][LINKED_COMPILE] Dispatches of a linked program are skipped while its module compiles: hash=0x{program.Hash:X16} skipped={skipped}.");
+        return true;
     }
 
     // The dispatch counts threads; the host counts groups of the shader's thread size.

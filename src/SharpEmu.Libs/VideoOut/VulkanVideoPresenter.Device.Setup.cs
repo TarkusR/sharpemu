@@ -318,8 +318,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (IsInstanceExtensionAvailable(PortabilityEnumerationExtensionName))
                 {
-                    // MoltenVK is a portability (non-conformant) implementation;
-                    // without this flag + extension the loader hides it.
+                    // Portability (non-conformant) implementations are hidden by
+                    // the loader unless this flag + extension are requested.
                     portabilityExtension = (byte*)SilkMarshal.StringToPtr(PortabilityEnumerationExtensionName);
                     enabledExtensions[enabledExtensionCount++] = portabilityExtension;
                     instanceCreateFlags |= InstanceCreateFlags.EnumeratePortabilityBitKhr;
@@ -666,9 +666,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 subgroupSizeControl.MaxSubgroupSize >= Wave64SubgroupSize &&
                 (subgroupSizeControl.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0;
             _maxComputeWorkgroupSubgroups = subgroupSizeControl.MaxComputeWorkgroupSubgroups;
-            // MoltenVK reports a zero OpArrayLength for storage buffers bound through push
-            // descriptors, which turns every bounds-checked load into zero and drops every store.
-            _maxPushDescriptors = Gpu.Vulkan.VulkanPushDescriptorPolicy.UsableCount(_vk, _physicalDevice, pushDescriptorProperties.MaxPushDescriptors);
+            _maxPushDescriptors = pushDescriptorProperties.MaxPushDescriptors;
             _shaderDescriptorLimits = properties.Limits;
             _noAttachmentSampleCounts = properties.Limits.FramebufferNoAttachmentsSampleCounts;
             _maxComputeWorkGroupCountX = properties.Limits.MaxComputeWorkGroupCount[0];
@@ -1002,9 +1000,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _supportsUnifiedImageLayouts = unifiedImageLayoutsFeatures.UnifiedImageLayouts;
             }
 
-            // MoltenVK exposes the barycentric builtins, but SPIRV-Cross rejects PerVertexKHR inputs.
-            _supportsPerVertexPixelInputs = _supportsFragmentShaderBarycentric &&
-                !IsDeviceExtensionAvailable(PortabilitySubsetExtensionName);
+            _supportsPerVertexPixelInputs = _supportsFragmentShaderBarycentric;
 
             var depthClipEnableFeatures = new PhysicalDeviceDepthClipEnableFeaturesEXT
             {
@@ -1071,6 +1067,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
             var supportsNullDescriptor = robustness2Features.NullDescriptor;
+            _bindlessHeapSupported = BindlessHeapSupported(in vulkan12Features, supportsNullDescriptor);
             var supportsRobustness2 = supportsRobustImageAccess2 || supportsNullDescriptor;
             _canRequireComputeSubgroup32 &= vulkan13Features.SubgroupSizeControl;
             _canRequireComputeSubgroup64 &= vulkan13Features.SubgroupSizeControl;
@@ -1194,8 +1191,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (IsDeviceExtensionAvailable(PortabilitySubsetExtensionName))
                 {
-                    // The spec requires enabling this when the (MoltenVK)
-                    // device advertises it.
+                    // The spec requires enabling this when the device advertises it.
                     extensions[extensionCount++] = portabilitySubsetExtension;
                 }
 
@@ -1226,6 +1222,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
                     ShaderOutputLayer = _supportsShaderLayer,
                     ShaderOutputViewportIndex = supportsViewportIndexLayer,
+                    DescriptorIndexing = _bindlessHeapSupported,
+                    RuntimeDescriptorArray = _bindlessHeapSupported,
+                    ShaderSampledImageArrayNonUniformIndexing = _bindlessHeapSupported,
+                    DescriptorBindingSampledImageUpdateAfterBind = _bindlessHeapSupported,
+                    DescriptorBindingPartiallyBound = _bindlessHeapSupported,
+                    DescriptorBindingUpdateUnusedWhilePending = _bindlessHeapSupported,
                     PNext = supportsRobustness2
                         ? &robustness2Features
                         : (supportsMaintenance8 ? &maintenance8Features : null),
@@ -1404,6 +1406,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateImageCache();
             _descriptorHeap = new DescriptorHeap(_deviceInfo, _scheduler);
             _contentUploads = new ContentUploadArena(_deviceInfo, _scheduler);
+            CreateBindlessHeapLayout();
             CreateCommandStream();
             LoadDebugUtilsCommands();
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))
@@ -1418,21 +1421,23 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _loadedPrewarmCache = [];
             var cacheMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE");
-            // MoltenVK imports compile every cached MSL library. Load shader
-            // groups on demand on macOS so a mature cache cannot hold startup
-            // behind unrelated scenes. Keep explicit overrides for comparison.
-            var shardMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_SHARDS");
-            var useShards = shardMode == "1" || (shardMode is null && OperatingSystem.IsMacOS());
+            // SHARPEMU_VK_PIPELINE_CACHE_SHARDS=1 loads shader groups on demand
+            // so a mature cache cannot hold startup behind unrelated scenes.
+            var useShards = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_SHARDS") == "1";
             // Vulkan cache blobs carry the implementation's compatibility
             // header and are rejected/rebuilt below when the device or driver
-            // changes. MoltenVK compilation of a large translated shader can
-            // take ten seconds, so discarding a valid cache at every launch is
+            // changes. Compiling a large translated shader can take
+            // seconds, so discarding a valid cache at every launch is
             // much more harmful than using Vulkan's normal persistence path.
             // Keep an explicit opt-out for diagnostics and read-only systems.
             var persistentCacheEnabled =
                 !string.Equals(cacheMode, "0", StringComparison.Ordinal) &&
                 (useShards || !OperatingSystem.IsWindows() || cacheMode is "1" or "file");
             _pipelineCachePath = persistentCacheEnabled ? GetPipelineCachePath() : null;
+            _linkedPipelineCacheDirectory = cacheMode != "0"
+                ? VulkanPipelineCacheStorage.LinkedDirectory(VideoOutExports.GetApplicationTitleId(),
+                    Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH"))
+                : null;
             if (_pipelineCachePath is not null &&
                 useShards)
             {

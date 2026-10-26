@@ -105,6 +105,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public BufferView GlobalDataShare;
             public BufferView FlattenedTable;
             public BufferView ShaderData;
+            public BufferView CallRecords;
         }
 
         private sealed class PreparedStageBindings : IPreparedBindings
@@ -126,6 +127,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Descriptors.GlobalDataShare = default;
                 Descriptors.FlattenedTable = default;
                 Descriptors.ShaderData = default;
+                Descriptors.CallRecords = default;
             }
 
             public SpecializedResourceInfo Resources => _program.Resources!;
@@ -137,6 +139,12 @@ internal static unsafe partial class VulkanVideoPresenter
             public (BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer, ulong MappedSize)[] BufferSources { get; set; } = [];
 
             public uint[] ShaderData { get; set; } = [];
+
+            // The call records the shader's call entries search, and the memory their callees read through them
+            // (PrepareCallRecords).
+            public uint[] CallRecordWords { get; set; } = [];
+
+            public DeviceAddressRange[] CallRecordRanges { get; set; } = [];
 
             public TextureResource[] Textures => Descriptors.Images;
 
@@ -367,6 +375,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             stage.WriteDispatchThreadLimits(shaderData);
             stage.WriteMeshDrawParameters(shaderData);
+            stage.WriteCallData(shaderData);
             return shaderData;
         }
 
@@ -749,6 +758,26 @@ internal static unsafe partial class VulkanVideoPresenter
             var layout = program.Bindings!;
             var snapshot = stage.Resources;
             var info = resources.Info;
+            if (layout.UsesBindlessHeap)
+            {
+                if (_worker)
+                {
+                    throw Serial("bindless heap", resumable: true);
+                }
+
+                _presenter.PrepareBindlessHeap(preparation);
+            }
+
+            if (layout.Find(DescriptorBindingKind.CallMarks) is not null)
+            {
+                if (_worker)
+                {
+                    throw Serial("call marks", resumable: true);
+                }
+
+                _presenter.PollCallMarks();
+            }
+
             using var stallProfile = DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.Prepare, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count);
             if (snapshot.Images.Length != info.Images.Count || snapshot.Samplers.Length != info.Samplers.Count || snapshot.Buffers.Length != info.Buffers.Count)
             {
@@ -812,13 +841,23 @@ internal static unsafe partial class VulkanVideoPresenter
                 descriptors.GlobalDataShare = new BufferView(_bufferCache.GdsBuffer.Handle, 0, Vk.WholeSize);
             }
 
+            if (program.CallRecordCallees.Count != 0)
+            {
+                if (_worker)
+                {
+                    throw Serial("call records", resumable: true);
+                }
+
+                (prepared.CallRecordWords, prepared.CallRecordRanges) = _presenter.PrepareCallRecords(program, stage);
+            }
+
             using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.FindAddressBuffers, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
                 FindDeviceAddressBuffers(prepared);
             using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.FindBuffers, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
                 FindBuffers(prepared);
             using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.ValidateImages, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
                 ValidateDrawImageTypes(prepared);
-            if (!movieActive)
+            if (!movieActive && layout.CallTargetCount == 0 && layout.CallArgumentCount == 0 && !layout.UsesBindlessHeap)
             {
                 NoteStagePreparation(preparations, prepared, snapshot, stage.ShaderBase);
             }
@@ -857,13 +896,20 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private static IEnumerable<DeviceAddressRange> DeviceAddressRangesOf(PreparedStageBindings prepared) =>
+            prepared.CallRecordRanges.Length == 0
+                ? prepared.Stage.Resources.DeviceAddressRanges
+                : prepared.Stage.Resources.DeviceAddressRanges.Concat(prepared.CallRecordRanges);
+
         private const int FoundRangeSetSlots = 16;
         private (DeviceAddressRange[]? Ranges, long RegionStamp, long Spans)[]? _foundRangeSets;
         private int _foundRangeSetNext;
 
         private void FindDeviceAddressBuffers(PreparedStageBindings prepared)
         {
-            var ranges = prepared.Stage.Resources.DeviceAddressRanges;
+            DeviceAddressRange[] ranges = prepared.CallRecordRanges.Length == 0
+                ? prepared.Stage.Resources.DeviceAddressRanges
+                : [.. prepared.Stage.Resources.DeviceAddressRanges, .. prepared.CallRecordRanges];
             if (ranges.Length == 0)
             {
                 return;
@@ -1363,6 +1409,11 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 prepared.Descriptors.ShaderData = UploadDwords(shaderData, "shader data", program, byIdentity: false);
             }
+
+            if (layout.Find(DescriptorBindingKind.CallRecords) is not null)
+            {
+                prepared.Descriptors.CallRecords = UploadDwords(prepared.CallRecordWords, "call records", program, byIdentity: false);
+            }
         }
 
         private void BindBufferViews(PreparedStageBindings prepared, uint[] shaderData)
@@ -1395,7 +1446,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private void ObtainDeviceAddressRanges(PreparedStageBindings prepared)
         {
             var program = prepared.Program;
-            foreach (var range in prepared.Stage.Resources.DeviceAddressRanges)
+            foreach (var range in DeviceAddressRangesOf(prepared))
             {
                 if (!range.Planned)
                 {
@@ -1810,6 +1861,15 @@ internal static unsafe partial class VulkanVideoPresenter
                                 case DescriptorBindingKind.MipStatistics:
                                     bufferInfos[bufferIndex++] = _presenter.MipStatisticsDescriptor();
                                     break;
+                                case DescriptorBindingKind.CallMarks:
+                                    bufferInfos[bufferIndex++] = _worker ? throw Serial("call marks", resumable: true) : _presenter.CallMarksDescriptor();
+                                    break;
+                                case DescriptorBindingKind.DeviceAddressFallback:
+                                {
+                                    var fallback = _bufferCache.DeviceAddressFallbackBuffer;
+                                    bufferInfos[bufferIndex++] = new DescriptorBufferInfo { Buffer = fallback.Handle, Offset = 0, Range = fallback.Size };
+                                    break;
+                                }
                                 case DescriptorBindingKind.DeviceAddressPageTable:
                                 case DescriptorBindingKind.FaultBuffer:
                                 {
@@ -1821,11 +1881,13 @@ internal static unsafe partial class VulkanVideoPresenter
                                 case DescriptorBindingKind.FlattenedResourceTable:
                                 case DescriptorBindingKind.ShaderData:
                                 case DescriptorBindingKind.GlobalDataShare:
+                                case DescriptorBindingKind.CallRecords:
                                 {
                                     var view = binding.Kind switch
                                     {
                                         DescriptorBindingKind.FlattenedResourceTable => descriptors.FlattenedTable,
                                         DescriptorBindingKind.ShaderData => descriptors.ShaderData,
+                                        DescriptorBindingKind.CallRecords => descriptors.CallRecords,
                                         _ => descriptors.GlobalDataShare,
                                     };
                                     if (view.Buffer.Handle == 0)
@@ -1950,6 +2012,16 @@ internal static unsafe partial class VulkanVideoPresenter
                             ShaderCacheCounters.CountHeapSet();
                         }
                     }
+                }
+
+                if (entry.UsesBindlessHeap)
+                {
+                    if (_worker)
+                    {
+                        throw Serial("bindless heap", resumable: true);
+                    }
+
+                    _presenter.BindBindlessHeap(command, bindPoint, entry.Layout);
                 }
             }
 

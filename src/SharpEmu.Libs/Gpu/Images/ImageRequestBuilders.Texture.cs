@@ -9,11 +9,31 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
+// A descriptor the texture builder rejected inside ImageRequestBuilders.RejectInvalidDescriptors.
+public sealed class TextureDescriptorRejectedException(string message) : Exception(message);
+
 // A texture request built from the descriptor words and the shape the shader was compiled with.
 public readonly record struct TextureRequestResolution(ImageRequest Request, bool ExactFormat, Format ViewFormat, uint Swizzle);
 
 public static partial class ImageRequestBuilders
 {
+    [ThreadStatic] private static int _rejectInvalidDescriptors;
+
+    // Inside this scope a descriptor the builder cannot turn into a texture request throws TextureDescriptorRejectedException
+    // instead of stopping the GPU: a call record holds whatever the game last wrote there.
+    public static RejectionScope RejectInvalidDescriptors()
+    {
+        _rejectInvalidDescriptors++;
+        return default;
+    }
+
+    public readonly struct RejectionScope : IDisposable
+    {
+        public void Dispose() => _rejectInvalidDescriptors--;
+    }
+
+    private static Exception InvalidDescriptor(string message) =>
+        _rejectInvalidDescriptors > 0 ? new TextureDescriptorRejectedException(message) : SubmissionScheduler.Fatal(message);
     internal static ShaderImageShape ShapeOf(ImageResource image) => new(
         Volume: image.Dimension == ImageDimension.Dim3D,
         Arrayed: image.Cube || image.Dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray,
@@ -100,7 +120,7 @@ public static partial class ImageRequestBuilders
                 description.Extent.Width, description.Extent.Height, description.Extent.Depth, description.Resources.Levels, 1);
             if (!TileGeometry.TryGetTiledTextureLayout(surfaceDescription, out var surface))
             {
-                throw SubmissionScheduler.Fatal(
+                throw InvalidDescriptor(
                     $"The volume texture layout is not supported: format={(uint)description.GuestFormat} tile={(uint)description.TileMode} " +
                     $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} levels={description.Resources.Levels}.");
             }
@@ -151,7 +171,7 @@ public static partial class ImageRequestBuilders
         {
             var words = new uint[8];
             for (var index = 0; index < words.Length; index++) words[index] = descriptor[index];
-            throw SubmissionScheduler.Fatal($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}. " +
+            throw InvalidDescriptor($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}. " +
                 $"shaderHash=0x{shaderHash:X16} image={imageIndex} type={descriptor.Type} depth={descriptor.Depth} " +
                 $"shape={shape} words={string.Join(',', words.Select(word => word.ToString("X8")))}");
         }
@@ -265,7 +285,7 @@ public static partial class ImageRequestBuilders
              (baseLevel != 0 || lastLevel == 0 || lastLevel > 3 || maxMip != lastLevel || !msaaTile || (descriptor.MsaaDepth && !depthTile) ||
               (!msaaArray && (descriptor.Depth != 0 || descriptor.BaseArray != 0)))))
         {
-            throw SubmissionScheduler.Fatal(
+            throw InvalidDescriptor(
                 $"The texture mip view is not supported: address=0x{address:X16} type={(uint)type} baseLevel={baseLevel} lastLevel={lastLevel} maxMip={maxMip} " +
                 $"levels={levels} tile={(uint)tile} depth={descriptor.Depth} baseArray={descriptor.BaseArray} msaaDepth={descriptor.MsaaDepth} storage={storage}.");
         }
@@ -284,7 +304,7 @@ public static partial class ImageRequestBuilders
         if (shape.Cube &&
             (volume || multisampled || width != height || descriptor.BaseArray > descriptor.Depth))
         {
-            throw SubmissionScheduler.Fatal(
+            throw InvalidDescriptor(
                 $"The cubemap view is invalid: address=0x{address:X16} extent={width}x{height} layers={imageLayers} baseArray={descriptor.BaseArray} samples={samples} " +
                 $"type={descriptor.Type} shape={shape} shaderHash=0x{shaderHash:X16} image={imageIndex} words={Convert.ToHexString(System.Runtime.InteropServices.MemoryMarshal.AsBytes(padded))}.");
         }
@@ -296,7 +316,7 @@ public static partial class ImageRequestBuilders
             pitch = depthTile ? TileGeometry.DepthPitch(width, bytes, lastLevel) : TileGeometry.RenderTargetPitch(width, bytes, lastLevel);
             if (pitch == 0 || !TileGeometry.TryGetRenderTargetSize(width, height, pitch, bytes, out size, lastLevel) || size.Size > uint.MaxValue / imageLayers)
             {
-                throw SubmissionScheduler.Fatal(
+                throw InvalidDescriptor(
                     $"The multisample texture layout is not supported: address=0x{address:X16} extent={width}x{height} bytes={bytes} pitch={pitch} samplesLog2={lastLevel} layers={imageLayers}.");
             }
 
@@ -310,7 +330,7 @@ public static partial class ImageRequestBuilders
 
         if (size.Size == 0 || size.Align == 0 || (address & (size.Align - 1UL)) != 0)
         {
-            throw SubmissionScheduler.Fatal(
+            throw InvalidDescriptor(
                 $"The texture footprint or alignment is invalid: address=0x{address:X16} size=0x{size.Size:X} align=0x{size.Align:X} format={(uint)format} tile={(uint)tile}.");
         }
 

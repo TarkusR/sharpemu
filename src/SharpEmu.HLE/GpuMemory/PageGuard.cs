@@ -139,6 +139,8 @@ public sealed class PageGuard : IDisposable
 
     public GuestPermissionLedger Permissions { get; } = new();
 
+    public CpuStackRanges Stacks { get; } = new();
+
     public void Dispose()
     {
         foreach (var block in _blocks)
@@ -304,11 +306,43 @@ public sealed class PageGuard : IDisposable
         return derived;
     }
 
+    // Pages a thread runs on as its stack keep the guest's own access (CpuStackRanges).
     private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess, ProtectionCause cause)
+    {
+        ProtectionCauseCounts.Record(cause, size);
+        var stacks = Stacks.Snapshot;
+        var cursor = address;
+        var end = address + size;
+        for (var index = CpuStackRanges.FirstEndingAfter(stacks, address); index < stacks.Length && stacks[index].Start < end; index++)
+        {
+            var stackStart = Math.Max(stacks[index].Start, cursor);
+            var stackEnd = Math.Min(stacks[index].End, end);
+            if (cursor < stackStart)
+            {
+                Protect(cursor, stackStart - cursor, allowedAccess);
+            }
+
+            for (var page = stackStart; page < stackEnd;)
+            {
+                var guest = Permissions.Lookup(page, out var guestValidEnd);
+                var partEnd = Math.Min(guestValidEnd, stackEnd);
+                Protect(page, partEnd - page, Derive(guest, GuestPageProtection.Read | GuestPageProtection.Write));
+                page = partEnd;
+            }
+
+            cursor = stackEnd;
+        }
+
+        if (cursor < end)
+        {
+            Protect(cursor, end - cursor, allowedAccess);
+        }
+    }
+
+    private void Protect(ulong address, ulong size, GuestPageProtection allowedAccess)
     {
         using var profile = GpuMemoryAccessProfile.MeasureAccess(
             GpuMemoryAccessProfile.Operation.HostProtection, GpuMemoryAccessProfile.Operation.FaultHostProtection, size);
-        ProtectionCauseCounts.Record(cause, size);
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"host-protect derived={allowedAccess}");
         if (!_addressSpace.TryProtect(address, size, allowedAccess))
