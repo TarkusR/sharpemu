@@ -60,6 +60,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public long RegistrationSerial;
         public long Spans;
         public TextureResource[] Textures = [];
+        public GuestSpan[] TextureRanges = [];
+        public ulong LookupGeneration;
         public Sampler[] SamplerHandles = [];
         public (BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer, ulong MappedSize)[] Sources = [];
         public bool Valid;
@@ -338,16 +340,26 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
-            foreach (var texture in memo.Textures)
+            var generation = memo.LookupGeneration;
+            for (var index = 0; index < memo.Textures.Length; index++)
             {
-                if (IsStaleImage(texture.ImageIdentifier, out _))
+                var texture = memo.Textures[index];
+                var range = memo.TextureRanges[index];
+                var checkedGeneration = memo.LookupGeneration;
+                if (IsStaleImage(texture.ImageIdentifier, out _) ||
+                    !ImageDescription.IsEmptyRange(texture.Request.Description.Data) && !(_worker
+                        ? _imageCache.TryRememberedForSlice(texture.ImageIdentifier, ref checkedGeneration, range.Address, range.End)
+                        : _imageCache.TryTouchRemembered(texture.ImageIdentifier, ref checkedGeneration, range.Address, range.End)))
                 {
                     memo.Invalidate();
                     Interlocked.Increment(ref _stageMemoStale);
                     return false;
                 }
+
+                generation = checkedGeneration;
             }
 
+            memo.LookupGeneration = generation;
             return true;
         }
 
@@ -476,10 +488,18 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
+            if (memo.TextureRanges.Length != images.Length)
+            {
+                memo.TextureRanges = new GuestSpan[images.Length];
+            }
+
             for (var index = 0; index < images.Length; index++)
             {
                 memo.Textures[index].CopyBindingFrom(images[index]);
+                memo.TextureRanges[index] = _imageCache.RememberedRange(images[index].ImageIdentifier, images[index].Request);
             }
+
+            memo.LookupGeneration = _imageCache.LookupGeneration;
 
             var samplers = prepared.Descriptors.Samplers;
             if (memo.SamplerHandles.Length != samplers.Length)
